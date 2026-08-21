@@ -1,0 +1,323 @@
+import type { PathLike } from "node:fs";
+import { open } from "node:fs/promises";
+
+import {
+  type CheckpointAnchor,
+  type FileIdentity,
+  readCheckpointAnchor,
+  snapshotFromStats,
+} from "./checkpoint.js";
+
+export interface JsonlReadOptions<T> {
+  /** First byte to read. It must point to the start of a physical line. */
+  readonly startOffset?: number;
+  /** One-based physical line number corresponding to startOffset. */
+  readonly nextLineNumber?: number;
+  /**
+   * Last byte to consider present, exclusive.
+   *
+   * A live trace grows while it is read, so "read to EOF" is not a snapshot:
+   * the bytes consumed depend on when the reader happened to finish. Pinning
+   * the end to a size observed up front makes the read reproducible, and a
+   * line straddling the boundary is reported as a partial final line rather
+   * than half-consumed.
+   */
+  readonly endOffset?: number;
+  /** Optional parser layered over JSON.parse. */
+  readonly parse?: (raw: string) => T;
+  readonly highWaterMark?: number;
+  readonly signal?: AbortSignal;
+}
+
+export interface JsonlLineBase {
+  readonly lineNumber: number;
+  readonly byteStart: number;
+  /** Offset immediately after the terminating LF byte. */
+  readonly byteEndExclusive: number;
+  /** Alias for byteEndExclusive, suitable for the next checkpoint. */
+  readonly nextOffset: number;
+  /** Decoded line content without LF or an optional preceding CR. */
+  readonly raw: string;
+}
+
+export interface ParsedJsonlLine<T> extends JsonlLineBase {
+  readonly kind: "record";
+  readonly value: T;
+}
+
+export interface JsonlLineError {
+  readonly name: string;
+  readonly message: string;
+}
+
+export interface MalformedJsonlLine extends JsonlLineBase {
+  readonly kind: "malformed";
+  readonly error: JsonlLineError;
+}
+
+export type JsonlLine<T> = ParsedJsonlLine<T> | MalformedJsonlLine;
+
+export interface PartialJsonlLine {
+  readonly byteStart: number;
+  readonly byteLength: number;
+  readonly lineNumber: number;
+}
+
+export interface JsonlReadSummary {
+  readonly fileIdentity: FileIdentity;
+  readonly observedSize: number;
+  readonly startOffset: number;
+  /** First byte not committed; partial EOF bytes remain at this offset. */
+  readonly checkpointOffset: number;
+  readonly nextLineNumber: number;
+  readonly checkpointAnchor: CheckpointAnchor;
+  readonly bytesRead: number;
+  readonly completeLines: number;
+  readonly parsedLines: number;
+  readonly malformedLines: number;
+  readonly partialFinalLine?: PartialJsonlLine;
+}
+
+export type JsonlLineVisitor<T> = (
+  line: JsonlLine<T>,
+) => void | Promise<void>;
+
+/**
+ * Iterate complete physical JSONL lines from a byte offset. Malformed complete
+ * lines are yielded as data rather than thrown. An unterminated final line is
+ * reported in the summary and deliberately left outside the checkpoint.
+ */
+export async function* iterateJsonlForward<T = unknown>(
+  filePath: PathLike,
+  options: JsonlReadOptions<T> = {},
+): AsyncGenerator<JsonlLine<T>, JsonlReadSummary, void> {
+  const startOffset = options.startOffset ?? 0;
+  const firstLineNumber = options.nextLineNumber ?? 1;
+  assertSafeNonNegativeInteger(startOffset, "startOffset");
+  assertSafePositiveInteger(firstLineNumber, "nextLineNumber");
+  const endOffset = options.endOffset;
+  if (endOffset !== undefined) {
+    assertSafeNonNegativeInteger(endOffset, "endOffset");
+    if (endOffset < startOffset) {
+      throw new RangeError("endOffset must not precede startOffset");
+    }
+  }
+  if (
+    options.highWaterMark !== undefined &&
+    (!Number.isSafeInteger(options.highWaterMark) || options.highWaterMark < 1)
+  ) {
+    throw new RangeError("highWaterMark must be a positive safe integer");
+  }
+
+  const handle = await open(filePath, "r");
+  try {
+    const initialSnapshot = snapshotFromStats(
+      await handle.stat({ bigint: true }),
+    );
+    if (startOffset > initialSnapshot.size) {
+      throw new RangeError("startOffset is beyond the current end of the file");
+    }
+  } catch (error: unknown) {
+    await handle.close();
+    throw error;
+  }
+
+  let stream: ReturnType<typeof handle.createReadStream>;
+  try {
+    stream = handle.createReadStream({
+      autoClose: false,
+      start: startOffset,
+      ...(options.highWaterMark === undefined
+        ? {}
+        : { highWaterMark: options.highWaterMark }),
+      ...(options.signal === undefined ? {} : { signal: options.signal }),
+    });
+  } catch (error: unknown) {
+    await handle.close();
+    throw error;
+  }
+
+  const parser = options.parse ?? ((raw: string) => JSON.parse(raw) as T);
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let fragments: Buffer[] = [];
+  let fragmentBytes = 0;
+  let bytesRead = 0;
+  let checkpointOffset = startOffset;
+  let nextLineNumber = firstLineNumber;
+  let completeLines = 0;
+  let parsedLines = 0;
+  let malformedLines = 0;
+
+  try {
+    let reachedEnd = false;
+    for await (const streamChunk of stream) {
+      // Past the pinned boundary the remaining bytes are drained but ignored.
+      // Breaking out of the iterator would destroy the stream and close the
+      // handle the summary's anchor read still needs.
+      if (reachedEnd) continue;
+      const chunk = Buffer.isBuffer(streamChunk)
+        ? streamChunk
+        : Buffer.from(streamChunk);
+      bytesRead += chunk.byteLength;
+      let segmentStart = 0;
+      let newlineIndex = chunk.indexOf(0x0a, segmentStart);
+
+      while (newlineIndex !== -1) {
+        const segment = chunk.subarray(segmentStart, newlineIndex);
+        if (
+          endOffset !== undefined &&
+          checkpointOffset + fragmentBytes + segment.byteLength + 1 > endOffset
+        ) {
+          // This line ends past the pinned boundary: it is not part of the
+          // snapshot. Whatever precedes it is reported as a partial tail.
+          fragments.push(segment);
+          fragmentBytes += segment.byteLength;
+          segmentStart = chunk.byteLength;
+          reachedEnd = true;
+          break;
+        }
+        let lineBytes: Buffer;
+        if (fragments.length === 0) {
+          lineBytes = segment;
+        } else {
+          fragments.push(segment);
+          lineBytes = Buffer.concat(fragments, fragmentBytes + segment.byteLength);
+        }
+
+        const lineNumber = nextLineNumber;
+        const byteStart = checkpointOffset;
+        const byteEndExclusive =
+          byteStart + lineBytes.byteLength + 1;
+        const contentBytes =
+          lineBytes.at(-1) === 0x0d
+            ? lineBytes.subarray(0, lineBytes.byteLength - 1)
+            : lineBytes;
+
+        fragments = [];
+        fragmentBytes = 0;
+        checkpointOffset = byteEndExclusive;
+        nextLineNumber += 1;
+        completeLines += 1;
+
+        let raw: string;
+        let event: JsonlLine<T>;
+        try {
+          raw = decoder.decode(contentBytes);
+          const value = parser(raw);
+          parsedLines += 1;
+          event = {
+            kind: "record",
+            value,
+            raw,
+            lineNumber,
+            byteStart,
+            byteEndExclusive,
+            nextOffset: byteEndExclusive,
+          };
+        } catch (error: unknown) {
+          malformedLines += 1;
+          raw = contentBytes.toString("utf8");
+          event = {
+            kind: "malformed",
+            error: describeError(error),
+            raw,
+            lineNumber,
+            byteStart,
+            byteEndExclusive,
+            nextOffset: byteEndExclusive,
+          };
+        }
+
+        yield event;
+        segmentStart = newlineIndex + 1;
+        newlineIndex = chunk.indexOf(0x0a, segmentStart);
+      }
+
+      if (segmentStart < chunk.byteLength) {
+        const remainder = chunk.subarray(segmentStart);
+        fragments.push(remainder);
+        fragmentBytes += remainder.byteLength;
+      }
+      if (endOffset !== undefined && checkpointOffset >= endOffset) {
+        reachedEnd = true;
+      }
+    }
+
+    const finalSnapshot = snapshotFromStats(await handle.stat({ bigint: true }));
+    if (finalSnapshot.size < checkpointOffset) {
+      throw new RangeError("JSONL file was truncated while it was being read");
+    }
+    const checkpointAnchor = await readCheckpointAnchor(
+      handle,
+      checkpointOffset,
+    );
+    const partialFinalLine =
+      fragmentBytes === 0
+        ? undefined
+        : {
+            byteStart: checkpointOffset,
+            byteLength: fragmentBytes,
+            lineNumber: nextLineNumber,
+          };
+
+    return {
+      fileIdentity: finalSnapshot.identity,
+      observedSize: finalSnapshot.size,
+      startOffset,
+      checkpointOffset,
+      nextLineNumber,
+      checkpointAnchor,
+      bytesRead,
+      completeLines,
+      parsedLines,
+      malformedLines,
+      ...(partialFinalLine === undefined ? {} : { partialFinalLine }),
+    };
+  } finally {
+    stream.destroy();
+    await handle.close();
+  }
+}
+
+/** Callback facade for consumers that prefer a returned summary. */
+export async function readJsonlForward<T = unknown>(
+  filePath: PathLike,
+  onLine: JsonlLineVisitor<T>,
+  options: JsonlReadOptions<T> = {},
+): Promise<JsonlReadSummary> {
+  const iterator = iterateJsonlForward(filePath, options);
+  let finished = false;
+  try {
+    while (true) {
+      const result = await iterator.next();
+      if (result.done) {
+        finished = true;
+        return result.value;
+      }
+      await onLine(result.value);
+    }
+  } finally {
+    if (!finished) {
+      await iterator.return(undefined as never);
+    }
+  }
+}
+
+function describeError(error: unknown): JsonlLineError {
+  if (error instanceof Error) {
+    return { name: error.name, message: error.message };
+  }
+  return { name: "Error", message: String(error) };
+}
+
+function assertSafeNonNegativeInteger(value: number, name: string): void {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${name} must be a non-negative safe integer`);
+  }
+}
+
+function assertSafePositiveInteger(value: number, name: string): void {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new RangeError(`${name} must be a positive safe integer`);
+  }
+}

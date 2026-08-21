@@ -1,0 +1,140 @@
+{
+  "turns": [
+    {
+      "actions": [
+        {
+          "action_id": "act_74216849192f0720357e670d07154653",
+          "command": {
+            "fidelity": "verbatim",
+            "original_utf8_bytes": 10,
+            "redactions": [],
+            "text": "./check.sh",
+            "truncated": false
+          },
+          "kind": "command",
+          "outcome": "unknown",
+          "source_refs": [
+            {
+              "line_end": 3,
+              "line_start": 2,
+              "native_record_ids": [
+                "a8000000-0000-4000-8000-000000000002"
+              ],
+              "trace_id": "claude:88888888-8888-4888-8888-888888888888:main"
+            }
+          ]
+        },
+        {
+          "action_id": "act_18796a91aac39ef3a681d979c8087804",
+          "kind": "other",
+          "outcome": "success",
+          "source_refs": [
+            {
+              "line_end": 5,
+              "line_start": 4,
+              "native_record_ids": [
+                "a8000000-0000-4000-8000-000000000004"
+              ],
+              "trace_id": "claude:88888888-8888-4888-8888-888888888888:main"
+            }
+          ],
+          "summary": {
+            "fidelity": "normalized",
+            "original_utf8_bytes": 29,
+            "redactions": [],
+            "text": "file change outside workspace",
+            "truncated": false
+          }
+        }
+      ],
+      "agent_id": "main",
+      "ended_at": "2026-08-16T17:00:20.000Z",
+      "evidence_refs": [
+        "ev_9973f631c924a6ec9b8c176597778a5c"
+      ],
+      "extensions": {
+        "claude": {
+          "api_responses": 3,
+          "models": [
+            "claude-opus-5"
+          ],
+          "native_turn_key": "a8000000-0000-4000-8000-000000000001",
+          "turn_start": {
+            "method": "origin"
+          }
+        }
+      },
+      "outcome": "success",
+      "provider": "claude",
+      "request": {
+        "fidelity": "verbatim",
+        "original_utf8_bytes": 26,
+        "redactions": [],
+        "text": "Run the check and tidy up.",
+        "truncated": false
+      },
+      "response": {
+        "fidelity": "verbatim",
+        "original_utf8_bytes": 12,
+        "redactions": [],
+        "text": "Checks pass.",
+        "truncated": false
+      },
+      "schema": "barbaro.turn.v1",
+      "sequence": 1,
+      "session_id": "ses_89de37716cf351362af70c6ea7a97de2",
+      "source_refs": [
+        {
+          "line_end": 6,
+          "line_start": 1,
+          "native_record_ids": [
+            "a8000000-0000-4000-8000-000000000001",
+            "a8000000-0000-4000-8000-000000000006"
+          ],
+          "trace_id": "claude:88888888-8888-4888-8888-888888888888:main"
+        }
+      ],
+      "started_at": "2026-08-16T17:00:00.000Z",
+      "subagents": {
+        "by_role": [],
+        "changed_paths": [],
+        "evidence_refs": [],
+        "outcomes": {},
+        "total": 0
+      },
+      "turn_id": "turn_5b303ab9aee10ee7bf1a45a9180953c1"
+    }
+  ],
+  "evidence": [
+    {
+      "agent_id": "main",
+      "content": {
+        "api_responses": 3,
+        "cache_creation_input_tokens": 60,
+        "cache_read_input_tokens": 3000,
+        "deduplicated_by": "message.id",
+        "input_tokens": 15,
+        "output_tokens": 120
+      },
+      "evidence_id": "ev_9973f631c924a6ec9b8c176597778a5c",
+      "kind": "usage",
+      "occurred_at": "2026-08-16T17:00:20.000Z",
+      "provider": "claude",
+      "schema": "barbaro.evidence.v1",
+      "session_id": "ses_89de37716cf351362af70c6ea7a97de2",
+      "source_refs": [
+        {
+          "line_end": 6,
+          "line_start": 2,
+          "native_record_ids": [
+            "a8000000-0000-4000-8000-000000000002",
+            "a8000000-0000-4000-8000-000000000004",
+            "a8000000-0000-4000-8000-000000000006"
+          ],
+          "trace_id": "claude:88888888-8888-4888-8888-888888888888:main"
+        }
+      ],
+      "turn_id": "turn_5b303ab9aee10ee7bf1a45a9180953c1"
+    }
+  ]
+}

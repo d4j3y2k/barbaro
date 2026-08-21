@@ -1,0 +1,7 @@
+.barbaro/
+.maximus/
+.claude/settings.local.json
+.codex/hooks.json
+dist/
+node_modules/
+.DS_Store

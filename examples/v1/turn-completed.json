@@ -1,0 +1,81 @@
+{
+  "schema": "barbaro.turn.v1",
+  "turn_id": "turn_0123456789abcdef0123456789abcdef",
+  "provider": "claude",
+  "session_id": "ses_0123456789abcdef0123456789abcdef",
+  "sequence": 47,
+  "agent_id": "main",
+  "started_at": "2026-08-16T20:50:56.369Z",
+  "ended_at": "2026-08-16T20:53:11.002Z",
+  "outcome": "success",
+  "request": {
+    "text": "Fix the race in the session writer.",
+    "fidelity": "verbatim",
+    "truncated": false,
+    "original_utf8_bytes": 35,
+    "redactions": []
+  },
+  "response": {
+    "text": "Fixed the writer race by partitioning output per session. Tests pass.",
+    "fidelity": "verbatim",
+    "truncated": false,
+    "original_utf8_bytes": 68,
+    "redactions": []
+  },
+  "actions": [
+    {
+      "action_id": "act_0123456789abcdef0123456789abcdef",
+      "kind": "file_change",
+      "outcome": "success",
+      "operation": "modify",
+      "path": "src/writer.ts",
+      "added_lines": 18,
+      "removed_lines": 9,
+      "source_refs": [
+        {
+          "trace_id": "claude:session-native-id",
+          "line_start": 128,
+          "line_end": 129,
+          "native_record_ids": ["tool-use-uuid", "tool-result-uuid"]
+        }
+      ]
+    },
+    {
+      "action_id": "act_fedcba9876543210fedcba9876543210",
+      "kind": "test",
+      "outcome": "success",
+      "command": {
+        "text": "npm test",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 8,
+        "redactions": []
+      },
+      "exit_code": 0,
+      "source_refs": [
+        {
+          "trace_id": "claude:session-native-id",
+          "line_start": 132,
+          "line_end": 133,
+          "native_record_ids": ["test-tool-use-uuid", "test-tool-result-uuid"]
+        }
+      ]
+    }
+  ],
+  "subagents": {
+    "total": 1,
+    "by_role": [{ "role": "Explore", "count": 1 }],
+    "outcomes": { "success": 1 },
+    "changed_paths": [],
+    "evidence_refs": ["ev_0123456789abcdef0123456789abcdef"]
+  },
+  "evidence_refs": ["ev_0123456789abcdef0123456789abcdef"],
+  "source_refs": [
+    {
+      "trace_id": "claude:session-native-id",
+      "line_start": 120,
+      "line_end": 140,
+      "native_record_ids": ["human-prompt-uuid", "terminal-assistant-uuid"]
+    }
+  ]
+}

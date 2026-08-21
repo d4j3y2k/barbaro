@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://barbaro.local/schema/barbaro-active-v1.schema.json",
+  "title": "Barbaro active advisory lease v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "lease_id",
+    "provider",
+    "session_id",
+    "agent_id",
+    "state",
+    "revision",
+    "updated_at",
+    "expires_at",
+    "claims",
+    "unknown_write_scope"
+  ],
+  "properties": {
+    "schema": { "const": "barbaro.active.v1" },
+    "lease_id": { "type": "string", "pattern": "^lease_[0-9a-f]{32}$" },
+    "provider": { "$ref": "barbaro-common-v1.schema.json#/$defs/provider" },
+    "session_id": { "type": "string", "pattern": "^ses_[0-9a-f]{32}$" },
+    "turn_id": { "type": "string", "pattern": "^turn_[0-9a-f]{32}$" },
+    "agent_id": { "type": "string", "minLength": 1 },
+    "state": { "enum": ["working", "waiting", "blocked", "idle"] },
+    "intent": { "$ref": "barbaro-common-v1.schema.json#/$defs/content" },
+    "current_action": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["file_change", "command", "test", "tool", "other"] },
+        "tool_name": { "type": "string", "minLength": 1 },
+        "path": { "$ref": "barbaro-common-v1.schema.json#/$defs/repoPath" },
+        "command": { "$ref": "barbaro-common-v1.schema.json#/$defs/content" },
+        "started_at": { "$ref": "barbaro-common-v1.schema.json#/$defs/timestamp" }
+      },
+      "additionalProperties": false
+    },
+    "claims": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "mode", "confidence"],
+        "properties": {
+          "path": { "$ref": "barbaro-common-v1.schema.json#/$defs/repoPath" },
+          "mode": { "const": "write" },
+          "confidence": { "enum": ["exact", "inferred"] }
+        },
+        "additionalProperties": false
+      }
+    },
+    "unknown_write_scope": { "type": "boolean" },
+    "revision": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "updated_at": { "$ref": "barbaro-common-v1.schema.json#/$defs/timestamp" },
+    "expires_at": { "$ref": "barbaro-common-v1.schema.json#/$defs/timestamp" },
+    "source_refs": {
+      "type": "array",
+      "items": { "$ref": "barbaro-common-v1.schema.json#/$defs/sourceRef" }
+    },
+    "extensions": { "$ref": "barbaro-common-v1.schema.json#/$defs/extensions" }
+  },
+  "additionalProperties": false
+}

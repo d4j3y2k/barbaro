@@ -1,0 +1,6 @@
+interface:
+  display_name: "Barbaro"
+  short_description: "Explicitly join this session to Barbaro"
+  default_prompt: "$barbaro Join this session to Barbaro."
+policy:
+  allow_implicit_invocation: false

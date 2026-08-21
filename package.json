@@ -1,0 +1,60 @@
+{
+  "name": "barbaro",
+  "version": "0.1.0-alpha.1",
+  "description": "Live coordination for Codex and Claude Code sessions",
+  "keywords": [
+    "ai",
+    "agents",
+    "claude-code",
+    "codex",
+    "coordination",
+    "developer-tools"
+  ],
+  "author": "David Kim",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/d4j3y2k/barbaro.git"
+  },
+  "homepage": "https://github.com/d4j3y2k/barbaro#readme",
+  "bugs": {
+    "url": "https://github.com/d4j3y2k/barbaro/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "alpha"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "main": "./dist/src/core/index.js",
+  "types": "./dist/src/core/index.d.ts",
+  "files": [
+    "dist/src/",
+    ".agents/skills/barbaro/",
+    ".claude/skills/barbaro/",
+    ".claude/skills/barbaro-watch/",
+    "examples/",
+    "spec/",
+    "INSTALL.md"
+  ],
+  "bin": {
+    "barbaro": "./dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "fixtures:regenerate": "npm run build && node scripts/regenerate-claude-expected.mjs && node scripts/regenerate-codex-expected.mjs",
+    "prepack": "node scripts/prepare-package.mjs",
+    "prepare": "npm run build",
+    "test": "npm run build && find dist/test -type f -name '*.test.js' -print0 | xargs -0 node --test",
+    "test:package": "node scripts/verify-packed-install.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
+    "typescript": "^5.9.2"
+  }
+}

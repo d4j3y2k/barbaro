@@ -1,0 +1,39 @@
+{
+  "schema": "barbaro.active.v1",
+  "lease_id": "lease_0123456789abcdef0123456789abcdef",
+  "provider": "codex",
+  "session_id": "ses_fedcba9876543210fedcba9876543210",
+  "turn_id": "turn_fedcba9876543210fedcba9876543210",
+  "agent_id": "main",
+  "state": "working",
+  "intent": {
+    "text": "Refactor the session writer.",
+    "fidelity": "verbatim",
+    "truncated": false,
+    "original_utf8_bytes": 28,
+    "redactions": []
+  },
+  "current_action": {
+    "kind": "file_change",
+    "tool_name": "apply_patch",
+    "path": "src/writer.ts",
+    "started_at": "2026-08-16T20:51:17.000Z"
+  },
+  "claims": [
+    {
+      "path": "src/writer.ts",
+      "mode": "write",
+      "confidence": "exact"
+    }
+  ],
+  "unknown_write_scope": false,
+  "revision": 14,
+  "updated_at": "2026-08-16T20:51:17.000Z",
+  "expires_at": "2026-08-16T20:56:17.000Z",
+  "source_refs": [
+    {
+      "trace_id": "codex:session-native-id:thread:thread-native-id",
+      "native_record_ids": ["tool-use-id"]
+    }
+  ]
+}

@@ -1,0 +1,222 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://barbaro.local/schema/barbaro-turn-v1.schema.json",
+  "title": "Barbaro completed turn digest v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "turn_id",
+    "provider",
+    "session_id",
+    "sequence",
+    "agent_id",
+    "started_at",
+    "ended_at",
+    "outcome",
+    "request",
+    "actions",
+    "subagents",
+    "evidence_refs",
+    "source_refs"
+  ],
+  "properties": {
+    "schema": { "const": "barbaro.turn.v1" },
+    "turn_id": { "type": "string", "pattern": "^turn_[0-9a-f]{32}$" },
+    "provider": { "$ref": "barbaro-common-v1.schema.json#/$defs/provider" },
+    "session_id": { "type": "string", "pattern": "^ses_[0-9a-f]{32}$" },
+    "sequence": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 9007199254740991
+    },
+    "agent_id": { "type": "string", "minLength": 1 },
+    "parent_turn_id": {
+      "type": "string",
+      "pattern": "^turn_[0-9a-f]{32}$"
+    },
+    "started_at": { "$ref": "barbaro-common-v1.schema.json#/$defs/timestamp" },
+    "ended_at": { "$ref": "barbaro-common-v1.schema.json#/$defs/timestamp" },
+    "outcome": { "$ref": "barbaro-common-v1.schema.json#/$defs/outcome" },
+    "request": { "$ref": "barbaro-common-v1.schema.json#/$defs/content" },
+    "response": { "$ref": "barbaro-common-v1.schema.json#/$defs/content" },
+    "actions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/action" }
+    },
+    "subagents": { "$ref": "#/$defs/subagentRollup" },
+    "evidence_refs": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^ev_[0-9a-f]{32}$" }
+    },
+    "source_refs": { "$ref": "barbaro-common-v1.schema.json#/$defs/sourceRefs" },
+    "extensions": { "$ref": "barbaro-common-v1.schema.json#/$defs/extensions" }
+  },
+  "$defs": {
+    "actionBase": {
+      "type": "object",
+      "required": ["action_id", "kind", "outcome", "source_refs"],
+      "properties": {
+        "action_id": { "type": "string", "pattern": "^act_[0-9a-f]{32}$" },
+        "kind": { "type": "string" },
+        "outcome": { "$ref": "barbaro-common-v1.schema.json#/$defs/actionOutcome" },
+        "source_refs": { "$ref": "barbaro-common-v1.schema.json#/$defs/sourceRefs" }
+      }
+    },
+    "fileChange": {
+      "allOf": [
+        { "$ref": "#/$defs/actionBase" },
+        {
+          "type": "object",
+          "required": ["kind", "operation", "path"],
+          "properties": {
+            "kind": { "const": "file_change" },
+            "operation": {
+              "enum": ["create", "modify", "delete", "move", "unknown"]
+            },
+            "path": { "$ref": "barbaro-common-v1.schema.json#/$defs/repoPath" },
+            "previous_path": { "$ref": "barbaro-common-v1.schema.json#/$defs/repoPath" },
+            "added_lines": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "removed_lines": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "command": {
+      "allOf": [
+        { "$ref": "#/$defs/actionBase" },
+        {
+          "type": "object",
+          "required": ["kind", "command"],
+          "properties": {
+            "kind": { "const": "command" },
+            "command": { "$ref": "barbaro-common-v1.schema.json#/$defs/content" },
+            "exit_code": { "type": "integer" },
+            "failure_excerpt": { "$ref": "barbaro-common-v1.schema.json#/$defs/content" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "test": {
+      "allOf": [
+        { "$ref": "#/$defs/actionBase" },
+        {
+          "type": "object",
+          "required": ["kind", "command"],
+          "properties": {
+            "kind": { "const": "test" },
+            "command": { "$ref": "barbaro-common-v1.schema.json#/$defs/content" },
+            "exit_code": { "type": "integer" },
+            "passed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "failed": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "failure_excerpt": { "$ref": "barbaro-common-v1.schema.json#/$defs/content" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "tool": {
+      "allOf": [
+        { "$ref": "#/$defs/actionBase" },
+        {
+          "type": "object",
+          "required": ["kind", "tool_name"],
+          "properties": {
+            "kind": { "const": "tool" },
+            "tool_name": { "type": "string", "minLength": 1 },
+            "summary": { "$ref": "barbaro-common-v1.schema.json#/$defs/content" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "other": {
+      "allOf": [
+        { "$ref": "#/$defs/actionBase" },
+        {
+          "type": "object",
+          "required": ["kind", "summary"],
+          "properties": {
+            "kind": { "const": "other" },
+            "summary": { "$ref": "barbaro-common-v1.schema.json#/$defs/content" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "action": {
+      "oneOf": [
+        { "$ref": "#/$defs/fileChange" },
+        { "$ref": "#/$defs/command" },
+        { "$ref": "#/$defs/test" },
+        { "$ref": "#/$defs/tool" },
+        { "$ref": "#/$defs/other" }
+      ]
+    },
+    "subagentRollup": {
+      "type": "object",
+      "required": ["total", "by_role", "outcomes", "changed_paths", "evidence_refs"],
+      "properties": {
+        "total": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "by_role": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["role", "count"],
+            "properties": {
+              "role": { "type": "string", "minLength": 1 },
+              "count": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 9007199254740991
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "outcomes": {
+          "type": "object",
+          "propertyNames": {
+            "enum": ["success", "partial", "blocked", "failed", "cancelled", "abandoned", "unknown"]
+          },
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9007199254740991
+          }
+        },
+        "changed_paths": {
+          "type": "array",
+          "items": { "$ref": "barbaro-common-v1.schema.json#/$defs/repoPath" }
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^ev_[0-9a-f]{32}$" }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,81 @@
+{
+  "turns": [
+    {
+      "schema": "barbaro.turn.v1",
+      "turn_id": "turn_7c71ccb95d54bb28e93676880d8c0027",
+      "provider": "codex",
+      "session_id": "ses_e82c3e42ed58a5dbd1e461be7758aaff",
+      "sequence": 1,
+      "agent_id": "main",
+      "started_at": "2026-08-16T20:05:01.000Z",
+      "ended_at": "2026-08-16T20:05:03.000Z",
+      "outcome": "success",
+      "request": {
+        "text": "Use the first session metadata.",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 31,
+        "redactions": []
+      },
+      "response": {
+        "text": "Used the canonical metadata.",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 28,
+        "redactions": []
+      },
+      "actions": [],
+      "subagents": {
+        "total": 0,
+        "by_role": [],
+        "outcomes": {},
+        "changed_paths": [],
+        "evidence_refs": []
+      },
+      "evidence_refs": [],
+      "source_refs": [
+        {
+          "trace_id": "codex:fixture-repeated-session-meta",
+          "line_start": 2,
+          "line_end": 6,
+          "native_record_ids": [
+            "01910000-0000-7000-8000-000000000106",
+            "msg_meta_user",
+            "msg_meta_assistant"
+          ]
+        }
+      ],
+      "extensions": {
+        "codex": {
+          "native_turn_id": "01910000-0000-7000-8000-000000000106",
+          "producer_cli_version": "0.148.0-alpha.9",
+          "history_mode": "legacy",
+          "terminal_event": "task_complete"
+        }
+      }
+    }
+  ],
+  "oracle": {
+    "canonical_session_meta_line": 1,
+    "canonical_native_session_id": "01910000-0000-7000-8000-000000000006",
+    "session_id_fell_back_to_id": true,
+    "noncanonical_session_meta_lines": [
+      3
+    ],
+    "turn_boundaries": [
+      {
+        "native_turn_id": "01910000-0000-7000-8000-000000000106",
+        "start_line": 2,
+        "terminal_line": 6
+      }
+    ],
+    "projection_duplicates": [],
+    "preserved_records": [
+      {
+        "line": 3,
+        "outer_type": "session_meta",
+        "reason": "copied_or_historical_metadata"
+      }
+    ]
+  }
+}

@@ -1,0 +1,80 @@
+{
+  "turns": [
+    {
+      "schema": "barbaro.turn.v1",
+      "turn_id": "turn_d94b26c0bf0c27008281aa429dce1644",
+      "provider": "codex",
+      "session_id": "ses_17515414002f2d2afd7038782ecb9d87",
+      "sequence": 1,
+      "agent_id": "main",
+      "started_at": "2026-08-16T20:07:01.000Z",
+      "ended_at": "2026-08-16T20:07:03.000Z",
+      "outcome": "success",
+      "request": {
+        "text": "Keep the completed turn.",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 24,
+        "redactions": []
+      },
+      "response": {
+        "text": "The completed turn remains.",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 27,
+        "redactions": []
+      },
+      "actions": [],
+      "subagents": {
+        "total": 0,
+        "by_role": [],
+        "outcomes": {},
+        "changed_paths": [],
+        "evidence_refs": []
+      },
+      "evidence_refs": [],
+      "source_refs": [
+        {
+          "trace_id": "codex:fixture-partial-final-line",
+          "line_start": 2,
+          "line_end": 5,
+          "native_record_ids": [
+            "01910000-0000-7000-8000-000000000108",
+            "msg_partial_user",
+            "msg_partial_assistant"
+          ]
+        }
+      ],
+      "extensions": {
+        "codex": {
+          "native_turn_id": "01910000-0000-7000-8000-000000000108",
+          "producer_cli_version": "0.148.0-alpha.9",
+          "history_mode": "legacy",
+          "terminal_event": "task_complete"
+        }
+      }
+    }
+  ],
+  "oracle": {
+    "canonical_session_meta_line": 1,
+    "canonical_native_session_id": "01910000-0000-7000-8000-000000000008",
+    "turn_boundaries": [
+      {
+        "native_turn_id": "01910000-0000-7000-8000-000000000108",
+        "start_line": 2,
+        "terminal_line": 5
+      }
+    ],
+    "partial_final_line": 6,
+    "partial_tail_ignored": true,
+    "retry_partial_tail_after_growth": true,
+    "projection_duplicates": [],
+    "preserved_records": [
+      {
+        "line": 6,
+        "outer_type": "response_item",
+        "reason": "incomplete_final_json"
+      }
+    ]
+  }
+}

@@ -1,0 +1,86 @@
+{
+  "turns": [
+    {
+      "schema": "barbaro.turn.v1",
+      "turn_id": "turn_ba1c58668016413b70790a9c8e862119",
+      "provider": "codex",
+      "session_id": "ses_dc55f450a4563bb581b99cb14ae92c7e",
+      "sequence": 1,
+      "agent_id": "main",
+      "started_at": "2026-08-16T20:04:01.000Z",
+      "ended_at": "2026-08-16T20:04:03.000Z",
+      "outcome": "success",
+      "request": {
+        "text": "Normalize this message once.",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 28,
+        "redactions": []
+      },
+      "response": {
+        "text": "This response appears once.",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 27,
+        "redactions": []
+      },
+      "actions": [],
+      "subagents": {
+        "total": 0,
+        "by_role": [],
+        "outcomes": {},
+        "changed_paths": [],
+        "evidence_refs": []
+      },
+      "evidence_refs": [],
+      "source_refs": [
+        {
+          "trace_id": "codex:fixture-duplicate-projections",
+          "line_start": 2,
+          "line_end": 7,
+          "native_record_ids": [
+            "01910000-0000-7000-8000-000000000105",
+            "msg_duplicate_user",
+            "msg_duplicate_assistant"
+          ]
+        }
+      ],
+      "extensions": {
+        "codex": {
+          "native_turn_id": "01910000-0000-7000-8000-000000000105",
+          "producer_cli_version": "0.148.0-alpha.9",
+          "history_mode": "legacy",
+          "terminal_event": "task_complete"
+        }
+      }
+    }
+  ],
+  "oracle": {
+    "canonical_session_meta_line": 1,
+    "canonical_native_session_id": "01910000-0000-7000-8000-000000000005",
+    "turn_boundaries": [
+      {
+        "native_turn_id": "01910000-0000-7000-8000-000000000105",
+        "start_line": 2,
+        "terminal_line": 7
+      }
+    ],
+    "projection_duplicates": [
+      {
+        "semantic": "request",
+        "canonical_line": 3,
+        "projection_line": 4,
+        "exact_utf8_match": true
+      },
+      {
+        "semantic": "response",
+        "canonical_line": 6,
+        "projection_line": 5,
+        "exact_utf8_match": true
+      }
+    ],
+    "normalized_request_count": 1,
+    "normalized_response_count": 1,
+    "preserved_records": []
+  }
+}

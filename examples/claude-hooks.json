@@ -1,0 +1,111 @@
+{
+  "_comment": [
+    "Barbaro activation template for Claude Code. Copy these entries into",
+    "~/.claude/settings.json (or a project .claude/settings.json) and replace",
+    "BARBARO_BIN with the absolute path to the installed `barbaro` binary.",
+    "",
+    "These installed hooks stay dormant for every new session until the user",
+    "invokes the project skill with `/barbaro`. Mentioning that command",
+    "elsewhere does not opt in. Joined sessions write derived copies",
+    "of their traces into",
+    "<project>/.barbaro/, which may be shared or committed. Add `.barbaro/`",
+    "to .gitignore first unless the project has decided to publish it.",
+    "",
+    "Every command is fail-open. If the binary is missing, errors, or is slow,",
+    "the coding turn proceeds unaffected — an advisory lease and a derived",
+    "digest are never worth failing real work over.",
+    "",
+    "After a session joins, two commands perform two jobs:",
+    "  `claude hook`        keeps the present-tense activity lease current.",
+    "  `claude hook-ingest` publishes completed turns and child bundles.",
+    "",
+    "Why ingestion runs on more than Stop: a subagent launched with",
+    "status async_launched is only attested complete once the parent records",
+    "its task notification, which can land AFTER the parent's own Stop.",
+    "The ingest handlers are asynchronous except SessionEnd, so they never",
+    "delay the event whose trace record they may be waiting for. SubagentStop",
+    "polls for the correlated completion record; SessionStart, TaskCompleted,",
+    "UserPromptSubmit and SessionEnd provide bounded catch-up sweeps."
+  ],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 },
+          { "type": "command", "command": "BARBARO_BIN claude hook-ingest", "async": true, "timeout": 15 }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 },
+          { "type": "command", "command": "BARBARO_BIN claude hook-ingest", "async": true, "timeout": 15 }
+        ]
+      }
+    ],
+    "UserPromptExpansion": [
+      {
+        "matcher": "barbaro",
+        "hooks": [
+          { "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 },
+          { "type": "command", "command": "BARBARO_BIN claude hook-ingest", "async": true, "timeout": 15 }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      { "hooks": [{ "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 }] }
+    ],
+    "PostToolUse": [
+      { "hooks": [{ "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 }] }
+    ],
+    "PostToolUseFailure": [
+      { "hooks": [{ "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 }] }
+    ],
+    "PostToolBatch": [
+      { "hooks": [{ "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 }] }
+    ],
+    "SubagentStart": [
+      { "hooks": [{ "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 }] }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 },
+          { "type": "command", "command": "BARBARO_BIN claude hook-ingest", "async": true, "timeout": 15 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 },
+          { "type": "command", "command": "BARBARO_BIN claude hook-ingest", "async": true, "timeout": 15 }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          { "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 },
+          { "type": "command", "command": "BARBARO_BIN claude hook-ingest", "async": true, "timeout": 15 }
+        ]
+      }
+    ],
+    "TaskCompleted": [
+      {
+        "hooks": [
+          { "type": "command", "command": "BARBARO_BIN claude hook-ingest", "async": true, "timeout": 15 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 },
+          { "type": "command", "command": "BARBARO_BIN claude hook-ingest", "timeout": 10 }
+        ]
+      }
+    ]
+  }
+}

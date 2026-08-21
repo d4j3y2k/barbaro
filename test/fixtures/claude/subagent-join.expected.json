@@ -1,0 +1,280 @@
+{
+  "turns": [
+    {
+      "actions": [
+        {
+          "action_id": "act_c40a72a04117d0209f109dee000e8c99",
+          "kind": "other",
+          "outcome": "success",
+          "source_refs": [
+            {
+              "line_end": 5,
+              "line_start": 4,
+              "native_record_ids": [
+                "c3000000-0000-4000-8000-000000000004"
+              ],
+              "trace_id": "claude:33333333-3333-4333-8333-333333333333:main"
+            }
+          ],
+          "summary": {
+            "fidelity": "excerpt",
+            "original_utf8_bytes": 8,
+            "redactions": [],
+            "text": "Workflow",
+            "truncated": false
+          }
+        }
+      ],
+      "agent_id": "main",
+      "ended_at": "2026-08-16T12:02:48.000Z",
+      "evidence_refs": [
+        "ev_31102d44e8b1fcf1418af9b82a38bbd8",
+        "ev_aecb191ae56e16ef128b9aff71129ded",
+        "ev_082d66cb6047ae07dcbf06760b43723e"
+      ],
+      "extensions": {
+        "claude": {
+          "api_responses": 3,
+          "models": [
+            "claude-opus-5"
+          ],
+          "native_turn_key": "c3000000-0000-4000-8000-000000000001",
+          "turn_start": {
+            "method": "origin"
+          }
+        }
+      },
+      "outcome": "success",
+      "provider": "claude",
+      "request": {
+        "fidelity": "verbatim",
+        "original_utf8_bytes": 48,
+        "redactions": [],
+        "text": "Find every caller of loadIndex and migrate them.",
+        "truncated": false
+      },
+      "response": {
+        "fidelity": "verbatim",
+        "original_utf8_bytes": 40,
+        "redactions": [],
+        "text": "Migrated all three loadIndex call sites.",
+        "truncated": false
+      },
+      "schema": "barbaro.turn.v1",
+      "sequence": 1,
+      "session_id": "ses_17d9b598a981eb6379367b062e252359",
+      "source_refs": [
+        {
+          "line_end": 6,
+          "line_start": 1,
+          "native_record_ids": [
+            "c3000000-0000-4000-8000-000000000001",
+            "c3000000-0000-4000-8000-000000000006"
+          ],
+          "trace_id": "claude:33333333-3333-4333-8333-333333333333:main"
+        }
+      ],
+      "started_at": "2026-08-16T12:00:00.000Z",
+      "subagents": {
+        "by_role": [
+          {
+            "count": 1,
+            "role": "Explore"
+          },
+          {
+            "count": 1,
+            "role": "workflow-agent"
+          }
+        ],
+        "changed_paths": [
+          "src/a.ts"
+        ],
+        "evidence_refs": [
+          "ev_aecb191ae56e16ef128b9aff71129ded",
+          "ev_082d66cb6047ae07dcbf06760b43723e"
+        ],
+        "outcomes": {
+          "success": 2
+        },
+        "total": 2
+      },
+      "turn_id": "turn_e84de19667a8621908f277ed1aaab5de"
+    }
+  ],
+  "evidence": [
+    {
+      "agent_id": "main",
+      "content": {
+        "api_responses": 3,
+        "cache_creation_input_tokens": 480,
+        "cache_read_input_tokens": 45600,
+        "deduplicated_by": "message.id",
+        "input_tokens": 21,
+        "output_tokens": 274
+      },
+      "evidence_id": "ev_31102d44e8b1fcf1418af9b82a38bbd8",
+      "kind": "usage",
+      "occurred_at": "2026-08-16T12:02:48.000Z",
+      "provider": "claude",
+      "schema": "barbaro.evidence.v1",
+      "session_id": "ses_17d9b598a981eb6379367b062e252359",
+      "source_refs": [
+        {
+          "line_end": 6,
+          "line_start": 2,
+          "native_record_ids": [
+            "c3000000-0000-4000-8000-000000000002",
+            "c3000000-0000-4000-8000-000000000004",
+            "c3000000-0000-4000-8000-000000000006"
+          ],
+          "trace_id": "claude:33333333-3333-4333-8333-333333333333:main"
+        }
+      ],
+      "turn_id": "turn_e84de19667a8621908f277ed1aaab5de"
+    },
+    {
+      "agent_id": "a1111111111111111",
+      "content": {
+        "actions": [
+          {
+            "action_id": "act_3217f90ef198a96ee0807bef393a3ff0",
+            "kind": "tool",
+            "outcome": "success",
+            "source_refs": [
+              {
+                "line_end": 3,
+                "line_start": 2,
+                "native_record_ids": [
+                  "d4000000-0000-4000-8000-000000000002"
+                ],
+                "trace_id": "claude:33333333-3333-4333-8333-333333333333:agent:a1111111111111111"
+              }
+            ],
+            "tool_name": "Grep"
+          }
+        ],
+        "ended_at": "2026-08-16T12:00:50.000Z",
+        "outcome": "success",
+        "request": {
+          "fidelity": "verbatim",
+          "original_utf8_bytes": 52,
+          "redactions": [],
+          "text": "Locate every call site of loadIndex across the repo.",
+          "truncated": false
+        },
+        "response": {
+          "fidelity": "verbatim",
+          "original_utf8_bytes": 48,
+          "redactions": [],
+          "text": "Found 3 call sites: src/a.ts, src/b.ts, src/c.ts",
+          "truncated": false
+        },
+        "role": "Explore",
+        "sequence": 1,
+        "started_at": "2026-08-16T12:00:08.000Z"
+      },
+      "evidence_id": "ev_aecb191ae56e16ef128b9aff71129ded",
+      "extensions": {
+        "claude": {
+          "subagent_kind": "direct_agent"
+        }
+      },
+      "kind": "subagent_turn",
+      "occurred_at": "2026-08-16T12:00:50.000Z",
+      "parent_link": {
+        "method": "joined",
+        "native_key": "a1111111111111111"
+      },
+      "parent_turn_id": "turn_e84de19667a8621908f277ed1aaab5de",
+      "provider": "claude",
+      "schema": "barbaro.evidence.v1",
+      "session_id": "ses_17d9b598a981eb6379367b062e252359",
+      "source_refs": [
+        {
+          "line_end": 4,
+          "line_start": 1,
+          "native_record_ids": [
+            "d4000000-0000-4000-8000-000000000001",
+            "d4000000-0000-4000-8000-000000000004"
+          ],
+          "trace_id": "claude:33333333-3333-4333-8333-333333333333:agent:a1111111111111111"
+        }
+      ],
+      "turn_id": "turn_b0ce3e100b9343738e1ef72fa5952156"
+    },
+    {
+      "agent_id": "a2222222222222222",
+      "content": {
+        "actions": [
+          {
+            "action_id": "act_f2da69e1994d4924404f28e197fdc3dc",
+            "added_lines": 1,
+            "kind": "file_change",
+            "operation": "modify",
+            "outcome": "success",
+            "path": "src/a.ts",
+            "removed_lines": 1,
+            "source_refs": [
+              {
+                "line_end": 3,
+                "line_start": 2,
+                "native_record_ids": [
+                  "e5000000-0000-4000-8000-000000000002"
+                ],
+                "trace_id": "claude:33333333-3333-4333-8333-333333333333:workflow:wf_abc1234-def:agent:a2222222222222222"
+              }
+            ]
+          }
+        ],
+        "ended_at": "2026-08-16T12:02:30.000Z",
+        "outcome": "success",
+        "request": {
+          "fidelity": "verbatim",
+          "original_utf8_bytes": 52,
+          "redactions": [],
+          "text": "Migrate the three loadIndex call sites to openIndex.",
+          "truncated": false
+        },
+        "response": {
+          "fidelity": "verbatim",
+          "original_utf8_bytes": 54,
+          "redactions": [],
+          "text": "Migrated src/a.ts, src/b.ts and src/c.ts to openIndex.",
+          "truncated": false
+        },
+        "role": "workflow-agent",
+        "sequence": 1,
+        "started_at": "2026-08-16T12:01:10.000Z"
+      },
+      "evidence_id": "ev_082d66cb6047ae07dcbf06760b43723e",
+      "extensions": {
+        "claude": {
+          "subagent_kind": "workflow_agent",
+          "workflow_id": "wf_abc1234-def"
+        }
+      },
+      "kind": "subagent_turn",
+      "occurred_at": "2026-08-16T12:02:30.000Z",
+      "parent_link": {
+        "method": "joined",
+        "native_key": "wf_abc1234-def/a2222222222222222"
+      },
+      "parent_turn_id": "turn_e84de19667a8621908f277ed1aaab5de",
+      "provider": "claude",
+      "schema": "barbaro.evidence.v1",
+      "session_id": "ses_17d9b598a981eb6379367b062e252359",
+      "source_refs": [
+        {
+          "line_end": 4,
+          "line_start": 1,
+          "native_record_ids": [
+            "e5000000-0000-4000-8000-000000000001",
+            "e5000000-0000-4000-8000-000000000004"
+          ],
+          "trace_id": "claude:33333333-3333-4333-8333-333333333333:workflow:wf_abc1234-def:agent:a2222222222222222"
+        }
+      ],
+      "turn_id": "turn_ef8bfde95dc17e471905ecad5f1962d4"
+    }
+  ]
+}

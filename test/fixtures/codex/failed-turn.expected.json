@@ -1,0 +1,71 @@
+{
+  "turns": [
+    {
+      "schema": "barbaro.turn.v1",
+      "turn_id": "turn_8a3a86ec3634b063b73262791103f892",
+      "provider": "codex",
+      "session_id": "ses_ca61525e5656a2a87353682aa9d20540",
+      "sequence": 1,
+      "agent_id": "main",
+      "started_at": "2026-08-16T20:02:01.000Z",
+      "ended_at": "2026-08-16T20:02:03.000Z",
+      "outcome": "failed",
+      "request": {
+        "text": "Run the synthetic migration.",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 28,
+        "redactions": []
+      },
+      "response": {
+        "text": "The synthetic migration failed.",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 31,
+        "redactions": []
+      },
+      "actions": [],
+      "subagents": {
+        "total": 0,
+        "by_role": [],
+        "outcomes": {},
+        "changed_paths": [],
+        "evidence_refs": []
+      },
+      "evidence_refs": [],
+      "source_refs": [
+        {
+          "trace_id": "codex:fixture-failed",
+          "line_start": 2,
+          "line_end": 4,
+          "native_record_ids": [
+            "01910000-0000-7000-8000-000000000103",
+            "msg_failed_user"
+          ]
+        }
+      ],
+      "extensions": {
+        "codex": {
+          "native_turn_id": "01910000-0000-7000-8000-000000000103",
+          "producer_cli_version": "0.148.0-alpha.9",
+          "history_mode": "legacy",
+          "terminal_event": "task_complete",
+          "terminal_error": true
+        }
+      }
+    }
+  ],
+  "oracle": {
+    "canonical_session_meta_line": 1,
+    "canonical_native_session_id": "01910000-0000-7000-8000-000000000003",
+    "turn_boundaries": [
+      {
+        "native_turn_id": "01910000-0000-7000-8000-000000000103",
+        "start_line": 2,
+        "terminal_line": 4
+      }
+    ],
+    "projection_duplicates": [],
+    "preserved_records": []
+  }
+}

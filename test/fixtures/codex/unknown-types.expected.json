@@ -1,0 +1,89 @@
+{
+  "turns": [
+    {
+      "schema": "barbaro.turn.v1",
+      "turn_id": "turn_dd8b4814036e82136b34acee1856a1e0",
+      "provider": "codex",
+      "session_id": "ses_d122293e816d7fb68b459a6d99fafa3f",
+      "sequence": 1,
+      "agent_id": "main",
+      "started_at": "2026-08-16T20:06:01.000Z",
+      "ended_at": "2026-08-16T20:06:03.000Z",
+      "outcome": "success",
+      "request": {
+        "text": "Ignore unfamiliar records safely.",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 33,
+        "redactions": []
+      },
+      "response": {
+        "text": "Known records still normalize.",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 30,
+        "redactions": []
+      },
+      "actions": [],
+      "subagents": {
+        "total": 0,
+        "by_role": [],
+        "outcomes": {},
+        "changed_paths": [],
+        "evidence_refs": []
+      },
+      "evidence_refs": [],
+      "source_refs": [
+        {
+          "trace_id": "codex:fixture-unknown-types",
+          "line_start": 2,
+          "line_end": 8,
+          "native_record_ids": [
+            "01910000-0000-7000-8000-000000000107",
+            "msg_unknown_user",
+            "msg_unknown_assistant"
+          ]
+        }
+      ],
+      "extensions": {
+        "codex": {
+          "native_turn_id": "01910000-0000-7000-8000-000000000107",
+          "producer_cli_version": "0.148.0-alpha.9",
+          "history_mode": "legacy",
+          "terminal_event": "task_complete"
+        }
+      }
+    }
+  ],
+  "oracle": {
+    "canonical_session_meta_line": 1,
+    "canonical_native_session_id": "01910000-0000-7000-8000-000000000007",
+    "turn_boundaries": [
+      {
+        "native_turn_id": "01910000-0000-7000-8000-000000000107",
+        "start_line": 2,
+        "terminal_line": 8
+      }
+    ],
+    "projection_duplicates": [],
+    "preserved_records": [
+      {
+        "line": 4,
+        "outer_type": "future_outer_record",
+        "unknown_level": "outer"
+      },
+      {
+        "line": 5,
+        "outer_type": "response_item",
+        "nested_type": "future_response_item",
+        "unknown_level": "nested"
+      },
+      {
+        "line": 6,
+        "outer_type": "event_msg",
+        "nested_type": "future_event_msg",
+        "unknown_level": "nested"
+      }
+    ]
+  }
+}

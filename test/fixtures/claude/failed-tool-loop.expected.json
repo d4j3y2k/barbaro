@@ -1,0 +1,281 @@
+{
+  "turns": [
+    {
+      "actions": [
+        {
+          "action_id": "act_4590d4fe92ea595a9d8f2c81af500909",
+          "command": {
+            "fidelity": "verbatim",
+            "original_utf8_bytes": 8,
+            "redactions": [],
+            "text": "npm test",
+            "truncated": false
+          },
+          "exit_code": 1,
+          "failure_excerpt": {
+            "fidelity": "excerpt",
+            "original_utf8_bytes": 74,
+            "redactions": [],
+            "text": "FAIL test/sum.test.ts\n  expected 4, received 5\n\nTests: 1 failed, 12 passed",
+            "truncated": false
+          },
+          "kind": "test",
+          "outcome": "failed",
+          "source_refs": [
+            {
+              "line_end": 5,
+              "line_start": 4,
+              "native_record_ids": [
+                "b2000000-0000-4000-8000-000000000004"
+              ],
+              "trace_id": "claude:22222222-2222-4222-8222-222222222222:main"
+            }
+          ]
+        },
+        {
+          "action_id": "act_550380d3d77827c70adc79ac155cb342",
+          "added_lines": 1,
+          "kind": "file_change",
+          "operation": "modify",
+          "outcome": "success",
+          "path": "src/sum.ts",
+          "removed_lines": 1,
+          "source_refs": [
+            {
+              "line_end": 7,
+              "line_start": 6,
+              "native_record_ids": [
+                "b2000000-0000-4000-8000-000000000006"
+              ],
+              "trace_id": "claude:22222222-2222-4222-8222-222222222222:main"
+            }
+          ]
+        },
+        {
+          "action_id": "act_95fb47989945e57b580d8b136fd13e17",
+          "command": {
+            "fidelity": "verbatim",
+            "original_utf8_bytes": 8,
+            "redactions": [],
+            "text": "npm test",
+            "truncated": false
+          },
+          "kind": "test",
+          "outcome": "unknown",
+          "source_refs": [
+            {
+              "line_end": 9,
+              "line_start": 8,
+              "native_record_ids": [
+                "b2000000-0000-4000-8000-000000000008"
+              ],
+              "trace_id": "claude:22222222-2222-4222-8222-222222222222:main"
+            }
+          ]
+        },
+        {
+          "action_id": "act_976ddaeec5ed32c5d4b1ef31fd7ee357",
+          "command": {
+            "fidelity": "verbatim",
+            "original_utf8_bytes": 12,
+            "redactions": [],
+            "text": "rm -rf build",
+            "truncated": false
+          },
+          "failure_excerpt": {
+            "fidelity": "excerpt",
+            "original_utf8_bytes": 52,
+            "redactions": [],
+            "text": "The user doesn't want to proceed with this tool use.",
+            "truncated": false
+          },
+          "kind": "command",
+          "outcome": "denied",
+          "source_refs": [
+            {
+              "line_end": 11,
+              "line_start": 10,
+              "native_record_ids": [
+                "b2000000-0000-4000-8000-00000000000a"
+              ],
+              "trace_id": "claude:22222222-2222-4222-8222-222222222222:main"
+            }
+          ]
+        },
+        {
+          "action_id": "act_832d60057cde045310d6ab1647635d41",
+          "command": {
+            "fidelity": "verbatim",
+            "original_utf8_bytes": 13,
+            "redactions": [],
+            "text": "npm run watch",
+            "truncated": false
+          },
+          "failure_excerpt": {
+            "fidelity": "excerpt",
+            "original_utf8_bytes": 24,
+            "redactions": [],
+            "text": "[watcher output omitted]",
+            "truncated": false
+          },
+          "kind": "command",
+          "outcome": "interrupted",
+          "source_refs": [
+            {
+              "line_end": 13,
+              "line_start": 12,
+              "native_record_ids": [
+                "b2000000-0000-4000-8000-00000000000c"
+              ],
+              "trace_id": "claude:22222222-2222-4222-8222-222222222222:main"
+            }
+          ]
+        },
+        {
+          "action_id": "act_41b8fd80289e247b5d2b050ac0531cf2",
+          "kind": "other",
+          "outcome": "success",
+          "source_refs": [
+            {
+              "line_end": 15,
+              "line_start": 14,
+              "native_record_ids": [
+                "b2000000-0000-4000-8000-00000000000e"
+              ],
+              "trace_id": "claude:22222222-2222-4222-8222-222222222222:main"
+            }
+          ],
+          "summary": {
+            "fidelity": "normalized",
+            "original_utf8_bytes": 29,
+            "redactions": [],
+            "text": "file change outside workspace",
+            "truncated": false
+          }
+        }
+      ],
+      "agent_id": "main",
+      "ended_at": "2026-08-16T11:02:30.000Z",
+      "evidence_refs": [
+        "ev_58d671795ac2a3844b0c275725736488",
+        "ev_57618ebde21191bdab39155122e0cc1d"
+      ],
+      "extensions": {
+        "claude": {
+          "api_responses": 7,
+          "models": [
+            "claude-opus-5"
+          ],
+          "native_turn_key": "b2000000-0000-4000-8000-000000000001",
+          "turn_start": {
+            "method": "origin"
+          }
+        }
+      },
+      "outcome": "partial",
+      "provider": "claude",
+      "request": {
+        "fidelity": "verbatim",
+        "original_utf8_bytes": 27,
+        "redactions": [],
+        "text": "Get the test suite passing.",
+        "truncated": false
+      },
+      "response": {
+        "fidelity": "verbatim",
+        "original_utf8_bytes": 124,
+        "redactions": [],
+        "text": "Fixed the off-by-one in src/sum.ts; the suite reports 13 passed. The build clean was denied and the watcher was interrupted.",
+        "truncated": false
+      },
+      "schema": "barbaro.turn.v1",
+      "sequence": 1,
+      "session_id": "ses_fcff06f12b41eb907504e152e71f02a4",
+      "source_refs": [
+        {
+          "line_end": 16,
+          "line_start": 1,
+          "native_record_ids": [
+            "b2000000-0000-4000-8000-000000000001",
+            "b2000000-0000-4000-8000-000000000010"
+          ],
+          "trace_id": "claude:22222222-2222-4222-8222-222222222222:main"
+        }
+      ],
+      "started_at": "2026-08-16T11:00:00.000Z",
+      "subagents": {
+        "by_role": [],
+        "changed_paths": [],
+        "evidence_refs": [],
+        "outcomes": {},
+        "total": 0
+      },
+      "turn_id": "turn_a7b99d48067e2d25eee86567cfbcd8e3"
+    }
+  ],
+  "evidence": [
+    {
+      "agent_id": "main",
+      "content": {
+        "api_responses": 7,
+        "cache_creation_input_tokens": 690,
+        "cache_read_input_tokens": 157080,
+        "deduplicated_by": "message.id",
+        "input_tokens": 37,
+        "output_tokens": 794
+      },
+      "evidence_id": "ev_58d671795ac2a3844b0c275725736488",
+      "kind": "usage",
+      "occurred_at": "2026-08-16T11:02:30.000Z",
+      "provider": "claude",
+      "schema": "barbaro.evidence.v1",
+      "session_id": "ses_fcff06f12b41eb907504e152e71f02a4",
+      "source_refs": [
+        {
+          "line_end": 16,
+          "line_start": 2,
+          "native_record_ids": [
+            "b2000000-0000-4000-8000-000000000002",
+            "b2000000-0000-4000-8000-000000000006",
+            "b2000000-0000-4000-8000-000000000008",
+            "b2000000-0000-4000-8000-00000000000a",
+            "b2000000-0000-4000-8000-00000000000c",
+            "b2000000-0000-4000-8000-00000000000e",
+            "b2000000-0000-4000-8000-000000000010"
+          ],
+          "trace_id": "claude:22222222-2222-4222-8222-222222222222:main"
+        }
+      ],
+      "turn_id": "turn_a7b99d48067e2d25eee86567cfbcd8e3"
+    },
+    {
+      "agent_id": "main",
+      "content": {
+        "text": {
+          "fidelity": "verbatim",
+          "original_utf8_bytes": 44,
+          "redactions": [],
+          "text": "Running the suite first to see the failures.",
+          "truncated": false
+        }
+      },
+      "evidence_id": "ev_57618ebde21191bdab39155122e0cc1d",
+      "kind": "response",
+      "occurred_at": "2026-08-16T11:00:04.100Z",
+      "provider": "claude",
+      "schema": "barbaro.evidence.v1",
+      "session_id": "ses_fcff06f12b41eb907504e152e71f02a4",
+      "source_refs": [
+        {
+          "line_end": 3,
+          "line_start": 3,
+          "native_record_ids": [
+            "b2000000-0000-4000-8000-000000000003"
+          ],
+          "trace_id": "claude:22222222-2222-4222-8222-222222222222:main"
+        }
+      ],
+      "turn_id": "turn_a7b99d48067e2d25eee86567cfbcd8e3"
+    }
+  ]
+}

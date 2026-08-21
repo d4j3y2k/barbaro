@@ -1,0 +1,82 @@
+{
+  "turns": [
+    {
+      "schema": "barbaro.turn.v1",
+      "turn_id": "turn_561b3369a13e8248576aa81321dbaee2",
+      "provider": "codex",
+      "session_id": "ses_33c30d3d71182ecc9f045474b1b3f4df",
+      "sequence": 1,
+      "agent_id": "main",
+      "started_at": "2026-08-16T20:00:01.000Z",
+      "ended_at": "2026-08-16T20:00:03.000Z",
+      "outcome": "success",
+      "request": {
+        "text": "Add a status endpoint.",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 22,
+        "redactions": []
+      },
+      "response": {
+        "text": "Added the status endpoint.",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 26,
+        "redactions": []
+      },
+      "actions": [],
+      "subagents": {
+        "total": 0,
+        "by_role": [],
+        "outcomes": {},
+        "changed_paths": [],
+        "evidence_refs": []
+      },
+      "evidence_refs": [],
+      "source_refs": [
+        {
+          "trace_id": "codex:fixture-success",
+          "line_start": 2,
+          "line_end": 7,
+          "native_record_ids": [
+            "01910000-0000-7000-8000-000000000101",
+            "msg_success_user",
+            "msg_success_assistant"
+          ]
+        }
+      ],
+      "extensions": {
+        "codex": {
+          "native_turn_id": "01910000-0000-7000-8000-000000000101",
+          "producer_cli_version": "0.148.0-alpha.9",
+          "history_mode": "legacy",
+          "terminal_event": "task_complete"
+        }
+      }
+    }
+  ],
+  "oracle": {
+    "canonical_session_meta_line": 1,
+    "canonical_native_session_id": "01910000-0000-7000-8000-000000000001",
+    "turn_boundaries": [
+      {
+        "native_turn_id": "01910000-0000-7000-8000-000000000101",
+        "start_line": 2,
+        "terminal_line": 7
+      }
+    ],
+    "projection_duplicates": [
+      {
+        "semantic": "request",
+        "canonical_line": 3,
+        "projection_line": 4
+      },
+      {
+        "semantic": "response",
+        "canonical_line": 6,
+        "projection_line": 5
+      }
+    ],
+    "preserved_records": []
+  }
+}

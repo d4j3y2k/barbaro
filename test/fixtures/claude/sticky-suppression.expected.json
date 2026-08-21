@@ -1,0 +1,111 @@
+{
+  "turns": [
+    {
+      "actions": [
+        {
+          "action_id": "act_d136013530a02b797b66ae813643b7ef",
+          "kind": "tool",
+          "outcome": "success",
+          "source_refs": [
+            {
+              "line_end": 5,
+              "line_start": 2,
+              "native_record_ids": [
+                "a9000000-0000-4000-8000-000000000002"
+              ],
+              "trace_id": "claude:99999999-9999-4999-8999-999999999999:main"
+            }
+          ],
+          "tool_name": "Read"
+        }
+      ],
+      "agent_id": "main",
+      "ended_at": "2026-08-16T18:00:12.000Z",
+      "evidence_refs": [
+        "ev_0045dc7bf760b04e5571f6c118b590ac"
+      ],
+      "extensions": {
+        "claude": {
+          "api_responses": 2,
+          "models": [
+            "claude-opus-5"
+          ],
+          "native_turn_key": "a9000000-0000-4000-8000-000000000001",
+          "turn_start": {
+            "method": "origin"
+          }
+        }
+      },
+      "outcome": "success",
+      "provider": "claude",
+      "request": {
+        "fidelity": "verbatim",
+        "original_utf8_bytes": 20,
+        "redactions": [],
+        "text": "Refactor the loader.",
+        "truncated": false
+      },
+      "response": {
+        "fidelity": "verbatim",
+        "original_utf8_bytes": 14,
+        "redactions": [],
+        "text": "HUMAN RESPONSE",
+        "truncated": false
+      },
+      "schema": "barbaro.turn.v1",
+      "sequence": 1,
+      "session_id": "ses_a0f9d7ed02cc32d2cd8c4d47eb5fd546",
+      "source_refs": [
+        {
+          "line_end": 6,
+          "line_start": 1,
+          "native_record_ids": [
+            "a9000000-0000-4000-8000-000000000001",
+            "a9000000-0000-4000-8000-000000000006"
+          ],
+          "trace_id": "claude:99999999-9999-4999-8999-999999999999:main"
+        }
+      ],
+      "started_at": "2026-08-16T18:00:00.000Z",
+      "subagents": {
+        "by_role": [],
+        "changed_paths": [],
+        "evidence_refs": [],
+        "outcomes": {},
+        "total": 0
+      },
+      "turn_id": "turn_2a94b7dcc1156aff4131b06bf5f9cd71"
+    }
+  ],
+  "evidence": [
+    {
+      "agent_id": "main",
+      "content": {
+        "api_responses": 2,
+        "cache_creation_input_tokens": 20,
+        "cache_read_input_tokens": 1800,
+        "deduplicated_by": "message.id",
+        "input_tokens": 10,
+        "output_tokens": 60
+      },
+      "evidence_id": "ev_0045dc7bf760b04e5571f6c118b590ac",
+      "kind": "usage",
+      "occurred_at": "2026-08-16T18:00:12.000Z",
+      "provider": "claude",
+      "schema": "barbaro.evidence.v1",
+      "session_id": "ses_a0f9d7ed02cc32d2cd8c4d47eb5fd546",
+      "source_refs": [
+        {
+          "line_end": 6,
+          "line_start": 2,
+          "native_record_ids": [
+            "a9000000-0000-4000-8000-000000000002",
+            "a9000000-0000-4000-8000-000000000006"
+          ],
+          "trace_id": "claude:99999999-9999-4999-8999-999999999999:main"
+        }
+      ],
+      "turn_id": "turn_2a94b7dcc1156aff4131b06bf5f9cd71"
+    }
+  ]
+}

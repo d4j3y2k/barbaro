@@ -1,0 +1,93 @@
+{
+  "turns": [
+    {
+      "actions": [],
+      "agent_id": "main",
+      "ended_at": "2026-08-16T14:00:06.100Z",
+      "evidence_refs": [
+        "ev_20e004eb5aaceec01e6650f4851bbe1f"
+      ],
+      "extensions": {
+        "claude": {
+          "api_responses": 1,
+          "models": [
+            "claude-opus-5"
+          ],
+          "native_turn_key": "a5000000-0000-4000-8000-000000000001",
+          "turn_start": {
+            "method": "origin"
+          }
+        }
+      },
+      "outcome": "success",
+      "provider": "claude",
+      "request": {
+        "fidelity": "verbatim",
+        "original_utf8_bytes": 28,
+        "redactions": [],
+        "text": "Summarize the writer change.",
+        "truncated": false
+      },
+      "response": {
+        "fidelity": "verbatim",
+        "original_utf8_bytes": 67,
+        "redactions": [],
+        "text": "The writer now partitions output per session, so no lock is needed.",
+        "truncated": false
+      },
+      "schema": "barbaro.turn.v1",
+      "sequence": 1,
+      "session_id": "ses_1caeb7ea585625f0c96d183e77a3a395",
+      "source_refs": [
+        {
+          "line_end": 3,
+          "line_start": 1,
+          "native_record_ids": [
+            "a5000000-0000-4000-8000-000000000001",
+            "a5000000-0000-4000-8000-000000000003"
+          ],
+          "trace_id": "claude:55555555-5555-4555-8555-555555555555:main"
+        }
+      ],
+      "started_at": "2026-08-16T14:00:00.000Z",
+      "subagents": {
+        "by_role": [],
+        "changed_paths": [],
+        "evidence_refs": [],
+        "outcomes": {},
+        "total": 0
+      },
+      "turn_id": "turn_ec712dc3eb603c9cc4d2ad8ad328f61d"
+    }
+  ],
+  "evidence": [
+    {
+      "agent_id": "main",
+      "content": {
+        "api_responses": 1,
+        "cache_creation_input_tokens": 40,
+        "cache_read_input_tokens": 7000,
+        "deduplicated_by": "message.id",
+        "input_tokens": 9,
+        "output_tokens": 220
+      },
+      "evidence_id": "ev_20e004eb5aaceec01e6650f4851bbe1f",
+      "kind": "usage",
+      "occurred_at": "2026-08-16T14:00:06.100Z",
+      "provider": "claude",
+      "schema": "barbaro.evidence.v1",
+      "session_id": "ses_1caeb7ea585625f0c96d183e77a3a395",
+      "source_refs": [
+        {
+          "line_end": 2,
+          "line_start": 2,
+          "native_record_ids": [
+            "a5000000-0000-4000-8000-000000000002"
+          ],
+          "trace_id": "claude:55555555-5555-4555-8555-555555555555:main"
+        }
+      ],
+      "turn_id": "turn_ec712dc3eb603c9cc4d2ad8ad328f61d"
+    }
+  ]
+}

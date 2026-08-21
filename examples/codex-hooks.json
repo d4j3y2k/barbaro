@@ -1,0 +1,161 @@
+{
+  "description": "Dormant Barbaro hooks. A session publishes only after the user explicitly invokes the `$barbaro` skill.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "barbaro codex hook",
+            "timeout": 30,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "barbaro codex hook",
+            "timeout": 30,
+            "async": false
+          },
+          {
+            "type": "command",
+            "command": "barbaro codex hook-ingest",
+            "timeout": 30,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "barbaro codex hook",
+            "timeout": 30,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "barbaro codex hook",
+            "timeout": 30,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "barbaro codex hook",
+            "timeout": 30,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "barbaro codex hook",
+            "timeout": 30,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "barbaro codex hook",
+            "timeout": 30,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "barbaro codex hook",
+            "timeout": 30,
+            "async": false
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "barbaro codex hook",
+            "timeout": 30,
+            "async": false
+          },
+          {
+            "type": "command",
+            "command": "barbaro codex hook-ingest",
+            "timeout": 30,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "barbaro codex hook",
+            "timeout": 30,
+            "async": false
+          },
+          {
+            "type": "command",
+            "command": "barbaro codex hook-ingest",
+            "timeout": 30,
+            "async": true
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "barbaro codex hook",
+            "timeout": 3,
+            "async": false
+          },
+          {
+            "type": "command",
+            "command": "barbaro codex hook-ingest",
+            "timeout": 3,
+            "async": false
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,167 @@
+{
+  "turns": [
+    {
+      "actions": [],
+      "agent_id": "main",
+      "ended_at": "2026-08-16T19:00:09.000Z",
+      "evidence_refs": [
+        "ev_00f6df7aaa613280dce577e30e2d2e8f",
+        "ev_20cd5c34ee5bf597ac7052f15c1bfc06"
+      ],
+      "extensions": {
+        "claude": {
+          "api_responses": 2,
+          "models": [
+            "claude-opus-5"
+          ],
+          "native_turn_key": "b1000000-0000-4000-8000-000000000001",
+          "turn_start": {
+            "method": "origin"
+          }
+        }
+      },
+      "outcome": "success",
+      "provider": "claude",
+      "request": {
+        "fidelity": "verbatim",
+        "original_utf8_bytes": 19,
+        "redactions": [],
+        "text": "Kick off the audit.",
+        "truncated": false
+      },
+      "response": {
+        "fidelity": "verbatim",
+        "original_utf8_bytes": 15,
+        "redactions": [],
+        "text": "ACTIVE RESPONSE",
+        "truncated": false
+      },
+      "schema": "barbaro.turn.v1",
+      "sequence": 1,
+      "session_id": "ses_57ba10e961be5c6952cbaf6e65a5fdb7",
+      "source_refs": [
+        {
+          "line_end": 4,
+          "line_start": 1,
+          "native_record_ids": [
+            "b1000000-0000-4000-8000-000000000001",
+            "b1000000-0000-4000-8000-000000000004"
+          ],
+          "trace_id": "claude:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:main"
+        }
+      ],
+      "started_at": "2026-08-16T19:00:00.000Z",
+      "subagents": {
+        "by_role": [
+          {
+            "count": 1,
+            "role": "Explore"
+          }
+        ],
+        "changed_paths": [],
+        "evidence_refs": [
+          "ev_20cd5c34ee5bf597ac7052f15c1bfc06"
+        ],
+        "outcomes": {
+          "unknown": 1
+        },
+        "total": 1
+      },
+      "turn_id": "turn_e8dcc570f1be9d6b7b17f21c633d4592"
+    }
+  ],
+  "evidence": [
+    {
+      "agent_id": "main",
+      "content": {
+        "api_responses": 2,
+        "cache_creation_input_tokens": 20,
+        "cache_read_input_tokens": 1800,
+        "deduplicated_by": "message.id",
+        "input_tokens": 10,
+        "output_tokens": 60
+      },
+      "evidence_id": "ev_00f6df7aaa613280dce577e30e2d2e8f",
+      "kind": "usage",
+      "occurred_at": "2026-08-16T19:00:09.000Z",
+      "provider": "claude",
+      "schema": "barbaro.evidence.v1",
+      "session_id": "ses_57ba10e961be5c6952cbaf6e65a5fdb7",
+      "source_refs": [
+        {
+          "line_end": 4,
+          "line_start": 2,
+          "native_record_ids": [
+            "b1000000-0000-4000-8000-000000000002",
+            "b1000000-0000-4000-8000-000000000004"
+          ],
+          "trace_id": "claude:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:main"
+        }
+      ],
+      "turn_id": "turn_e8dcc570f1be9d6b7b17f21c633d4592"
+    },
+    {
+      "agent_id": "aaaa111111111111a",
+      "content": {
+        "actions": [
+          {
+            "action_id": "act_ead00ac30ac44f49fd86c12286244fee",
+            "kind": "tool",
+            "outcome": "success",
+            "source_refs": [
+              {
+                "line_end": 3,
+                "line_start": 2,
+                "native_record_ids": [
+                  "c1000000-0000-4000-8000-000000000002"
+                ],
+                "trace_id": "claude:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:agent:aaaa111111111111a"
+              }
+            ],
+            "tool_name": "Grep"
+          }
+        ],
+        "ended_at": "2026-08-16T19:00:11.000Z",
+        "outcome": "unknown",
+        "request": {
+          "fidelity": "verbatim",
+          "original_utf8_bytes": 6,
+          "redactions": [],
+          "text": "Audit.",
+          "truncated": false
+        },
+        "role": "Explore",
+        "sequence": 1,
+        "started_at": "2026-08-16T19:00:06.000Z"
+      },
+      "evidence_id": "ev_20cd5c34ee5bf597ac7052f15c1bfc06",
+      "extensions": {
+        "claude": {
+          "subagent_kind": "direct_agent"
+        }
+      },
+      "kind": "subagent_turn",
+      "occurred_at": "2026-08-16T19:00:11.000Z",
+      "parent_link": {
+        "method": "joined",
+        "native_key": "aaaa111111111111a"
+      },
+      "parent_turn_id": "turn_e8dcc570f1be9d6b7b17f21c633d4592",
+      "provider": "claude",
+      "schema": "barbaro.evidence.v1",
+      "session_id": "ses_57ba10e961be5c6952cbaf6e65a5fdb7",
+      "source_refs": [
+        {
+          "line_end": 3,
+          "line_start": 1,
+          "native_record_ids": [
+            "c1000000-0000-4000-8000-000000000001",
+            "c1000000-0000-4000-8000-000000000003"
+          ],
+          "trace_id": "claude:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa:agent:aaaa111111111111a"
+        }
+      ],
+      "turn_id": "turn_13abc0030d8def5bb9bb84d0f3a12430"
+    }
+  ]
+}

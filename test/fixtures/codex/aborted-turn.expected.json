@@ -1,0 +1,72 @@
+{
+  "turns": [
+    {
+      "schema": "barbaro.turn.v1",
+      "turn_id": "turn_bb3b986d279f0429714b5d51bcd9be1b",
+      "provider": "codex",
+      "session_id": "ses_1054a196ef6601f37fef7641ee050f96",
+      "sequence": 1,
+      "agent_id": "main",
+      "started_at": "2026-08-16T20:01:01.000Z",
+      "ended_at": "2026-08-16T20:01:03.000Z",
+      "outcome": "cancelled",
+      "request": {
+        "text": "Stop after the preview.",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 23,
+        "redactions": []
+      },
+      "response": {
+        "text": "Preparing a preview.",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 20,
+        "redactions": []
+      },
+      "actions": [],
+      "subagents": {
+        "total": 0,
+        "by_role": [],
+        "outcomes": {},
+        "changed_paths": [],
+        "evidence_refs": []
+      },
+      "evidence_refs": [],
+      "source_refs": [
+        {
+          "trace_id": "codex:fixture-aborted",
+          "line_start": 2,
+          "line_end": 5,
+          "native_record_ids": [
+            "01910000-0000-7000-8000-000000000102",
+            "msg_aborted_user",
+            "msg_aborted_commentary"
+          ]
+        }
+      ],
+      "extensions": {
+        "codex": {
+          "native_turn_id": "01910000-0000-7000-8000-000000000102",
+          "producer_cli_version": "0.148.0-alpha.9",
+          "history_mode": "legacy",
+          "terminal_event": "turn_aborted",
+          "abort_reason": "interrupted"
+        }
+      }
+    }
+  ],
+  "oracle": {
+    "canonical_session_meta_line": 1,
+    "canonical_native_session_id": "01910000-0000-7000-8000-000000000002",
+    "turn_boundaries": [
+      {
+        "native_turn_id": "01910000-0000-7000-8000-000000000102",
+        "start_line": 2,
+        "terminal_line": 5
+      }
+    ],
+    "projection_duplicates": [],
+    "preserved_records": []
+  }
+}

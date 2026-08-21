@@ -1,0 +1,148 @@
+{
+  "turns": [
+    {
+      "schema": "barbaro.turn.v1",
+      "turn_id": "turn_c0e3fb5981b3db0951a3d81d0b4b0087",
+      "provider": "codex",
+      "session_id": "ses_e1178f5d06c585be9ff716a3a3a9b034",
+      "sequence": 1,
+      "agent_id": "main",
+      "started_at": "2026-08-16T20:03:01.000Z",
+      "ended_at": "2026-08-16T20:03:03.000Z",
+      "outcome": "success",
+      "request": {
+        "text": "Check the catalog and print ok.",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 31,
+        "redactions": []
+      },
+      "response": {
+        "text": "Catalog checked and command finished.",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 37,
+        "redactions": []
+      },
+      "actions": [
+        {
+          "action_id": "act_13f02320197bf0f1045f1944f8b7f7e7",
+          "kind": "tool",
+          "outcome": "unknown",
+          "tool_name": "read_catalog",
+          "source_refs": [
+            {
+              "trace_id": "codex:fixture-tool-pairing",
+              "line_start": 4,
+              "line_end": 4,
+              "native_record_ids": [
+                "fc_fixture_001",
+                "call_function_001"
+              ]
+            },
+            {
+              "trace_id": "codex:fixture-tool-pairing",
+              "line_start": 7,
+              "line_end": 7,
+              "native_record_ids": [
+                "fco_fixture_001",
+                "call_function_001"
+              ]
+            }
+          ]
+        },
+        {
+          "action_id": "act_cac1148a5a98f5ab74bb2ad9ee31b0ee",
+          "outcome": "unknown",
+          "command": {
+            "text": "printf ok",
+            "fidelity": "verbatim",
+            "truncated": false,
+            "original_utf8_bytes": 9,
+            "redactions": []
+          },
+          "source_refs": [
+            {
+              "trace_id": "codex:fixture-tool-pairing",
+              "line_start": 5,
+              "line_end": 5,
+              "native_record_ids": [
+                "ctc_fixture_001",
+                "call_custom_001"
+              ]
+            },
+            {
+              "trace_id": "codex:fixture-tool-pairing",
+              "line_start": 6,
+              "line_end": 6,
+              "native_record_ids": [
+                "ctco_fixture_001",
+                "call_custom_001"
+              ]
+            }
+          ],
+          "kind": "command"
+        }
+      ],
+      "subagents": {
+        "total": 0,
+        "by_role": [],
+        "outcomes": {},
+        "changed_paths": [],
+        "evidence_refs": []
+      },
+      "evidence_refs": [],
+      "source_refs": [
+        {
+          "trace_id": "codex:fixture-tool-pairing",
+          "line_start": 2,
+          "line_end": 9,
+          "native_record_ids": [
+            "01910000-0000-7000-8000-000000000104",
+            "msg_tools_user",
+            "msg_tools_assistant"
+          ]
+        }
+      ],
+      "extensions": {
+        "codex": {
+          "native_turn_id": "01910000-0000-7000-8000-000000000104",
+          "producer_cli_version": "0.148.0-alpha.9",
+          "history_mode": "legacy",
+          "terminal_event": "task_complete"
+        }
+      }
+    }
+  ],
+  "oracle": {
+    "canonical_session_meta_line": 1,
+    "canonical_native_session_id": "01910000-0000-7000-8000-000000000004",
+    "turn_boundaries": [
+      {
+        "native_turn_id": "01910000-0000-7000-8000-000000000104",
+        "start_line": 2,
+        "terminal_line": 9
+      }
+    ],
+    "tool_pairs": [
+      {
+        "kind": "function",
+        "call_id": "call_function_001",
+        "call_line": 4,
+        "output_line": 7
+      },
+      {
+        "kind": "custom",
+        "call_id": "call_custom_001",
+        "call_line": 5,
+        "output_line": 6
+      }
+    ],
+    "action_call_order": [
+      4,
+      5
+    ],
+    "projection_duplicates": [],
+    "preserved_records": []
+  }
+}

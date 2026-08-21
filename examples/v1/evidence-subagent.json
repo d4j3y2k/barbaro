@@ -1,0 +1,56 @@
+{
+  "schema": "barbaro.evidence.v1",
+  "evidence_id": "ev_0123456789abcdef0123456789abcdef",
+  "turn_id": "turn_fedcba9876543210fedcba9876543210",
+  "provider": "claude",
+  "session_id": "ses_0123456789abcdef0123456789abcdef",
+  "agent_id": "agent-7f3a",
+  "parent_turn_id": "turn_0123456789abcdef0123456789abcdef",
+  "parent_link": {
+    "method": "joined",
+    "native_key": "agent-7f3a"
+  },
+  "kind": "subagent_turn",
+  "occurred_at": "2026-08-16T20:52:02.100Z",
+  "content": {
+    "role": "Explore",
+    "sequence": 1,
+    "outcome": "success",
+    "started_at": "2026-08-16T20:51:10.000Z",
+    "ended_at": "2026-08-16T20:52:02.100Z",
+    "request": {
+      "text": "Find all writes to the session index.",
+      "fidelity": "verbatim",
+      "truncated": false,
+      "original_utf8_bytes": 37,
+      "redactions": []
+    },
+    "response": {
+      "text": "Found the session-index writes in src/index.ts.",
+      "fidelity": "verbatim",
+      "truncated": false,
+      "original_utf8_bytes": 47,
+      "redactions": []
+    },
+    "actions": []
+  },
+  "source_refs": [
+    {
+      "trace_id": "claude:session-native-id:agent:agent-7f3a",
+      "line_start": 1,
+      "line_end": 8,
+      "native_record_ids": ["sidechain-root-uuid", "sidechain-terminal-uuid"]
+    },
+    {
+      "trace_id": "claude:session-native-id:main",
+      "line_start": 124,
+      "line_end": 124,
+      "native_record_ids": ["agent-tool-result-uuid"]
+    }
+  ],
+  "extensions": {
+    "claude": {
+      "subagent_kind": "direct_agent"
+    }
+  }
+}

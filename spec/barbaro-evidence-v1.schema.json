@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://barbaro.local/schema/barbaro-evidence-v1.schema.json",
+  "title": "Barbaro normalized evidence item v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "evidence_id",
+    "turn_id",
+    "provider",
+    "session_id",
+    "agent_id",
+    "kind",
+    "occurred_at",
+    "content",
+    "source_refs"
+  ],
+  "properties": {
+    "schema": { "const": "barbaro.evidence.v1" },
+    "evidence_id": { "type": "string", "pattern": "^ev_[0-9a-f]{32}$" },
+    "turn_id": { "type": "string", "pattern": "^turn_[0-9a-f]{32}$" },
+    "provider": { "$ref": "barbaro-common-v1.schema.json#/$defs/provider" },
+    "session_id": { "type": "string", "pattern": "^ses_[0-9a-f]{32}$" },
+    "agent_id": { "type": "string", "minLength": 1 },
+    "parent_turn_id": { "type": "string", "pattern": "^turn_[0-9a-f]{32}$" },
+    "parent_link": {
+      "type": "object",
+      "required": ["method"],
+      "properties": {
+        "method": { "enum": ["native", "joined", "unresolved"] },
+        "native_key": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "kind": {
+      "enum": [
+        "prompt",
+        "response",
+        "command",
+        "tool_call",
+        "tool_result",
+        "failure_excerpt",
+        "usage",
+        "attachment_metadata",
+        "subagent_turn",
+        "provider_event"
+      ]
+    },
+    "occurred_at": { "$ref": "barbaro-common-v1.schema.json#/$defs/timestamp" },
+    "content": { "type": "object" },
+    "source_refs": { "$ref": "barbaro-common-v1.schema.json#/$defs/sourceRefs" },
+    "extensions": { "$ref": "barbaro-common-v1.schema.json#/$defs/extensions" }
+  },
+  "additionalProperties": false
+}
