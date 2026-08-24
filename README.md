@@ -37,10 +37,30 @@ reads rollout files present on the local machine. A Codex session running only
 on iOS or in the cloud is not visible to Barbaro until that session's rollout
 lands locally. Barbaro does not provide or assume cross-device rollout sync.
 
+## Install
+
+The canonical installation guide is [`INSTALL.md`](INSTALL.md). Barbaro requires
+Node.js 22 or newer; install the published CLI from the npm registry first:
+
+```sh
+npm install --global barbaro
+barbaro --version
+```
+
+If the registry is unavailable, the secondary path in [`INSTALL.md`](INSTALL.md)
+downloads the GitHub prerelease assets `barbaro-0.1.0-alpha.3.tgz` and its
+separate `barbaro-0.1.0-alpha.3.tgz.sha256` checksum, verifies the archive, and
+installs that built tarball. The `github:d4j3y2k/barbaro#<tag>` source-install
+form is intentionally unsupported; source tags do not contain the built CLI.
+
+Before enabling hooks, read the [public-alpha limitations](ALPHA.md) and
+[security policy](SECURITY.md). Checkout-backed development is a
+maintainer-only workflow documented separately below and in [`INSTALL.md`](INSTALL.md).
+
 ## Cowork quickstart: Codex builder + Claude reviewer
 
-After installing the hooks and ignoring `.barbaro/`, choose a fresh lowercase
-slug and create one workstream without enrolling either session:
+After completing [`INSTALL.md`](INSTALL.md) and ignoring `.barbaro/`, choose a
+fresh lowercase slug and create one workstream without enrolling either session:
 
 ```sh
 barbaro workstream new alpha-demo \
@@ -115,15 +135,22 @@ No heading, greeting, or status line comes before the verdict keyword. A turn
 that does not begin with one of those verdict forms—including a person's
 sideline direction—is context or instruction, not approval for the next gate.
 
-## Build and verify
+## Maintainer-only checkout development
 
-Requires Node.js 22 or newer.
+This checkout-backed workflow is for Barbaro maintainers, not normal users or
+persistent hook installations:
 
 ```sh
-npm install
+npm ci
 npm run typecheck
 npm test
+npm run build
+npm link
 ```
+
+Normal users should install the registry package or verified release tarball as
+described in [`INSTALL.md`](INSTALL.md); `npm link` deliberately points the
+global command back into this development checkout.
 
 Run a one-off Codex ingest:
 
@@ -192,7 +219,7 @@ at a Gallop* frames into precomputed `█▓▒░` terminal shading. It remains
 standalone provenance and comparison tool for the riderless dashboard art:
 
 ```sh
-npm run study:horse
+npm --prefix "$(npm root --global)/barbaro" run study:horse
 ```
 
 The preview opens as a compact side-by-side comparison: the unaltered source is
@@ -203,8 +230,12 @@ original, riderless, and comparison views, `w` to cycle the body-wordmark
 on or off, and `q` to exit. For a noninteractive frame:
 
 ```sh
-npm run study:horse -- --once --frame 3 --scale compact --variant compare
+npm --prefix "$(npm root --global)/barbaro" run study:horse -- \
+  --once --frame 3 --scale compact --variant compare
 ```
+
+Maintainers working from a built checkout may use `npm run study:horse`
+directly instead.
 
 Use `--wordmark none|spaced-lower` to select the body wordmark directly.
 
@@ -222,7 +253,7 @@ Stream peer events — completed turns, joins, incidents, stale leases — as
 they happen:
 
 ```sh
-node dist/src/cli.js watch \
+barbaro watch \
   --project-root /absolute/path/to/project \
   --provider claude --session-id "$CLAUDE_CODE_SESSION_ID"
 ```
@@ -265,19 +296,9 @@ cap is 3600000 ms. A timeout remains a successful result.
 
 ## Enable Codex live coordination
 
-For Codex on one machine, install Barbaro once at user scope so it is available
-from every repository:
-
-1. Build the CLI with `npm run build`.
-2. Copy or symlink `.agents/skills/barbaro` to
-   `$HOME/.agents/skills/barbaro`.
-3. Merge the event entries from [`examples/codex-hooks.json`](examples/codex-hooks.json)
-   into `$HOME/.codex/hooks.json`. If `barbaro` is not on `PATH`, replace the
-   command prefix with absolute paths to Node and `dist/src/cli.js`.
-4. Add `.barbaro/` to `$HOME/.config/git/ignore` so generated coordination
-   state stays out of every Git repository.
-5. Restart Codex if the skill does not appear, then review and trust the new
-   user hook definitions with `/hooks`.
+Complete the package, skill, and hook steps in [`INSTALL.md`](INSTALL.md), then
+restart Codex if the skill does not appear and review the installed user hook
+definitions with `/hooks`.
 
 User-scoped hooks remain dormant in every repository until the user explicitly
 joins a particular session. The `.barbaro/` store remains isolated under that
@@ -362,13 +383,6 @@ idle tombstone, while an ingest-only `barbaro codex hook-ingest` runs in the
 background and polls for that exact terminal turn. User-prompt and session-end
 catch-up cover interrupted workers.
 
-First build and expose the local CLI:
-
-```sh
-npm run build
-npm link
-```
-
 For a project-local installation, merge the event entries from
 [`examples/codex-hooks.json`](examples/codex-hooks.json) into the target
 project's `.codex/hooks.json`. Do not overwrite an existing hook file blindly.
@@ -383,20 +397,10 @@ command. Installing Barbaro must not silently enroll work in another project.
 
 ## Enable Claude Code live coordination
 
-For a user-wide installation available from every repository:
-
-1. Build the CLI with `npm run build`.
-2. Copy or symlink `.claude/skills/barbaro` and
-   `.claude/skills/barbaro-watch` into `$HOME/.claude/skills/` under those same
-   directory names.
-3. Merge the hook groups from
-   [`examples/claude-hooks.json`](examples/claude-hooks.json) into
-   `$HOME/.claude/settings.json`. Replace `BARBARO_BIN` with the absolute
-   Barbaro command; append to existing event arrays instead of replacing other
-   tools' hooks.
-4. Restart Claude Code if its top-level user skills directory did not exist
-   when the session started, then verify `/barbaro` and `/barbaro-watch` appear
-   in `/skills` and the handlers appear in `/hooks`.
+Complete the package, skill, and hook steps in [`INSTALL.md`](INSTALL.md), then
+restart Claude Code if its top-level user skills directory did not exist when
+the session started. Verify `/barbaro` and `/barbaro-watch` appear in `/skills`
+and the installed handlers appear in `/hooks`.
 
 The activity handlers are short and synchronous; ingest handlers run
 asynchronously except for the bounded SessionEnd fallback. SubagentStop

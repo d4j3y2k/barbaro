@@ -9,6 +9,9 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const packagedInputs = [
   ".agents",
   ".claude",
+  "ALPHA.md",
+  "SECURITY.md",
+  "docs",
   "examples",
   "spec",
   "src",
@@ -18,6 +21,7 @@ const packagedInputs = [
   "package-lock.json",
   "package.json",
   "scripts/prepare-package.mjs",
+  "tsconfig.package.json",
   "tsconfig.json",
 ];
 

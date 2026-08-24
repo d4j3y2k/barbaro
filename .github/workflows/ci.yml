@@ -6,6 +6,12 @@ on:
       - main
   pull_request:
   workflow_dispatch:
+    inputs:
+      post_publish_registry_check:
+        description: Run the registry install check after a release is published
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -54,3 +60,127 @@ jobs:
 
       - name: Smoke-test packed install
         run: npm run test:package
+
+  install-contract:
+    name: Packed install / Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node:
+          - "22"
+          - "26"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install build dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Pack the release artifact
+        id: pack
+        shell: bash
+        run: |
+          npm pack --json > "${RUNNER_TEMP}/barbaro-pack.json"
+          node --input-type=module - \
+            "${RUNNER_TEMP}/barbaro-pack.json" \
+            "${GITHUB_OUTPUT}" <<'NODE'
+          import { appendFileSync, readFileSync } from "node:fs";
+
+          const [packJsonPath, outputPath] = process.argv.slice(2);
+          const stdout = readFileSync(packJsonPath, "utf8");
+          const arrayStart = Math.max(
+            stdout.lastIndexOf("\n["),
+            stdout.indexOf("["),
+          );
+          if (arrayStart === -1) {
+            throw new Error("npm pack --json did not emit JSON");
+          }
+          const result = JSON.parse(
+            stdout.slice(stdout[arrayStart] === "\n" ? arrayStart + 1 : arrayStart),
+          );
+          const filename = result[0]?.filename;
+          if (typeof filename !== "string" || filename.length === 0) {
+            throw new Error("npm pack --json did not return a tarball filename");
+          }
+          appendFileSync(outputPath, `filename=${filename}\n`);
+          NODE
+
+      - name: Install packed CLI with lifecycle scripts disabled
+        shell: bash
+        env:
+          HOME: ${{ runner.temp }}/barbaro-ignore-scripts/home
+          npm_config_cache: ${{ runner.temp }}/barbaro-ignore-scripts/cache
+          npm_config_userconfig: ${{ runner.temp }}/barbaro-ignore-scripts/npmrc
+          npm_config_prefix: ${{ runner.temp }}/barbaro-ignore-scripts/prefix
+        run: |
+          mkdir -p "${HOME}" "${npm_config_cache}" "${npm_config_prefix}"
+          npm install --global --ignore-scripts "./${{ steps.pack.outputs.filename }}"
+          "${npm_config_prefix}/bin/barbaro" --help > "${RUNNER_TEMP}/barbaro-ignore-scripts-help.txt"
+          test -s "${RUNNER_TEMP}/barbaro-ignore-scripts-help.txt"
+          expected_version="$(node -p \
+            'require(process.argv[1]).version' \
+            "${npm_config_prefix}/lib/node_modules/barbaro/package.json")"
+          actual_version="$("${npm_config_prefix}/bin/barbaro" --version)"
+          test "${actual_version}" = "${expected_version}"
+
+      - name: Install packed CLI with default lifecycle policy
+        shell: bash
+        env:
+          HOME: ${{ runner.temp }}/barbaro-default-policy/home
+          npm_config_cache: ${{ runner.temp }}/barbaro-default-policy/cache
+          npm_config_userconfig: ${{ runner.temp }}/barbaro-default-policy/npmrc
+          npm_config_prefix: ${{ runner.temp }}/barbaro-default-policy/prefix
+        run: |
+          mkdir -p "${HOME}" "${npm_config_cache}" "${npm_config_prefix}"
+          npm install --global "./${{ steps.pack.outputs.filename }}"
+          "${npm_config_prefix}/bin/barbaro" --help > "${RUNNER_TEMP}/barbaro-default-policy-help.txt"
+          test -s "${RUNNER_TEMP}/barbaro-default-policy-help.txt"
+          expected_version="$(node -p \
+            'require(process.argv[1]).version' \
+            "${npm_config_prefix}/lib/node_modules/barbaro/package.json")"
+          actual_version="$("${npm_config_prefix}/bin/barbaro" --version)"
+          test "${actual_version}" = "${expected_version}"
+
+  post-publish-registry-install:
+    name: Post-publish registry install / Node ${{ matrix.node }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.post_publish_registry_check }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        node:
+          - "22"
+          - "26"
+
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Install and smoke-test the published CLI
+        shell: bash
+        env:
+          HOME: ${{ runner.temp }}/barbaro-registry/home
+          npm_config_cache: ${{ runner.temp }}/barbaro-registry/cache
+          npm_config_userconfig: ${{ runner.temp }}/barbaro-registry/npmrc
+          npm_config_prefix: ${{ runner.temp }}/barbaro-registry/prefix
+        run: |
+          mkdir -p "${HOME}" "${npm_config_cache}" "${npm_config_prefix}"
+          npm install --global barbaro
+          "${npm_config_prefix}/bin/barbaro" --help > "${RUNNER_TEMP}/barbaro-registry-help.txt"
+          test -s "${RUNNER_TEMP}/barbaro-registry-help.txt"
+          expected_version="$(node -p \
+            'require(process.argv[1]).version' \
+            "${npm_config_prefix}/lib/node_modules/barbaro/package.json")"
+          actual_version="$("${npm_config_prefix}/bin/barbaro" --version)"
+          test "${actual_version}" = "${expected_version}"

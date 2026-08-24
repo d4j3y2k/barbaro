@@ -94,6 +94,70 @@ test("the watcher skill distinguishes external wake from cursor nudges", async (
   assert.match(watch, /Do not read on a\s+cadence/u);
 });
 
+test("README and INSTALL pin the public installation contract", async () => {
+  const [readme, install] = await Promise.all([
+    readFile("README.md", "utf8"),
+    readFile("INSTALL.md", "utf8"),
+  ]);
+  const readmeInstall = readme.match(
+    /^## Install$[\s\S]+?(?=^## Cowork quickstart:)/mu,
+  )?.[0];
+
+  assert.ok(readmeInstall, "README must put Install before the quickstart");
+  assert.match(readmeInstall, /\[`INSTALL\.md`\]\(INSTALL\.md\)/u);
+  assert.match(readmeInstall, /^npm install --global barbaro$/mu);
+  assert.doesNotMatch(readmeInstall, /barbaro@alpha/u);
+  assert.match(readmeInstall, /barbaro-0\.1\.0-alpha\.3\.tgz/u);
+  assert.match(readmeInstall, /barbaro-0\.1\.0-alpha\.3\.tgz\.sha256/u);
+  assert.match(
+    readmeInstall,
+    /`github:d4j3y2k\/barbaro#<tag>`[\s\S]+intentionally unsupported/u,
+  );
+  assert.match(readmeInstall, /\[public-alpha limitations\]\(ALPHA\.md\)/u);
+  assert.match(readmeInstall, /\[security policy\]\(SECURITY\.md\)/u);
+
+  const readmeMaintainerIndex = readme.indexOf(
+    "## Maintainer-only checkout development",
+  );
+  assert.notEqual(readmeMaintainerIndex, -1);
+  assert.doesNotMatch(readme.slice(0, readmeMaintainerIndex), /npm link/u);
+  assert.doesNotMatch(readme.slice(0, readmeMaintainerIndex), /npm run build/u);
+  assert.match(readme.slice(readmeMaintainerIndex), /^npm link$/mu);
+  assert.match(
+    readme,
+    /npm --prefix "\$\(npm root --global\)\/barbaro" run study:horse/u,
+  );
+
+  const registryIndex = install.indexOf("npm install --global barbaro");
+  const assetIndex = install.indexOf("## Install a GitHub release asset");
+  const maintainerIndex = install.indexOf(
+    "## Maintainer-only checkout development",
+  );
+  assert.notEqual(registryIndex, -1);
+  assert.ok(registryIndex < assetIndex, "registry installation must come first");
+  assert.ok(assetIndex < maintainerIndex, "release asset must be a user path");
+  assert.doesNotMatch(install, /barbaro@alpha/u);
+  assert.match(
+    install,
+    /releases\/download\/v0\.1\.0-alpha\.3\/barbaro-0\.1\.0-alpha\.3\.tgz/u,
+  );
+  assert.match(install, /^npm install --global \.\/barbaro-0\.1\.0-alpha\.3\.tgz$/mu);
+  assert.match(install, /barbaro-0\.1\.0-alpha\.3\.tgz\.sha256/u);
+  assert.match(
+    install,
+    /github:d4j3y2k\/barbaro#v0\.1\.0-alpha\.3[\s\S]+source tags do\s+not contain/u,
+  );
+  assert.match(install, /\[public-alpha limitations\]\(ALPHA\.md\)/u);
+  assert.match(install, /\[security policy\]\(SECURITY\.md\)/u);
+  assert.doesNotMatch(install.slice(0, maintainerIndex), /npm link/u);
+  assert.doesNotMatch(install.slice(0, maintainerIndex), /npm run build/u);
+  assert.match(install.slice(maintainerIndex), /^npm link$/mu);
+  assert.match(
+    install.slice(maintainerIndex),
+    /^npm publish --dry-run --tag latest$/mu,
+  );
+});
+
 test("README documents consent-gated, workstream-scoped await", async () => {
   const readme = await readFile("README.md", "utf8");
   assert.match(readme, /barbaro await/u);
@@ -112,7 +176,7 @@ test("README documents consent-gated, workstream-scoped await", async () => {
 test("README teaches the gated Codex-builder and Claude-reviewer loop", async () => {
   const readme = await readFile("README.md", "utf8");
   const quickstart = readme.match(
-    /^## Cowork quickstart:[\s\S]+?(?=^## Build and verify$)/mu,
+    /^## Cowork quickstart:[\s\S]+?(?=^## Maintainer-only checkout development$)/mu,
   )?.[0];
 
   assert.ok(quickstart, "README must include the cowork quickstart");
