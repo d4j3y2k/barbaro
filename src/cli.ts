@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -57,6 +57,18 @@ import {
   runTui,
 } from "./tui/index.js";
 
+class UsageError extends TypeError {}
+
+const HELP_FLAGS = new Set(["--help", "-h"]);
+const SIMPLE_HELP_COMMANDS = new Set(["context", "tui", "watch", "await"]);
+const PROVIDER_HELP_COMMANDS = new Set([
+  "status",
+  "ingest",
+  "hook",
+  "hook-ingest",
+]);
+const WORKSTREAM_HELP_COMMANDS = new Set(["list", "show", "new"]);
+
 export async function main(
   argv: readonly string[],
   io: {
@@ -69,7 +81,16 @@ export async function main(
   runLiveTui: typeof runTui = runTui,
   runAwait: typeof awaitUnreadPeerTurns = awaitUnreadPeerTurns,
 ): Promise<number> {
-  if (argv.length === 0 || argv.includes("--help") || argv.includes("-h")) {
+  if (argv.length === 1 && argv[0] === "--version") {
+    io.stdout(`${packageVersion()}\n`);
+    return 0;
+  }
+
+  if (
+    argv.length === 0 ||
+    ((argv.includes("--help") || argv.includes("-h")) &&
+      isRecognizedHelpTarget(argv))
+  ) {
     io.stdout(helpText());
     return 0;
   }
@@ -186,7 +207,7 @@ export async function main(
       !flags.has("once") &&
       (flags.has("width") || flags.has("height"))
     ) {
-      throw new TypeError("--width and --height are only valid with --once");
+      throw new UsageError("--width and --height are only valid with --once");
     }
     const intervalMs = positiveIntegerFlag(
       flags,
@@ -225,7 +246,7 @@ export async function main(
         ? undefined
         : await new WorkstreamStore(projectRoot).get(workstreamId);
     if (workstreamId !== undefined && workstream === undefined) {
-      throw new TypeError(
+      throw new UsageError(
         `no workstream named ${JSON.stringify(
           flags.get("workstream") ?? workstreamId,
         )}`,
@@ -311,7 +332,7 @@ export async function main(
       DEFAULT_AWAIT_TIMEOUT_MS,
     );
     if (timeoutMs > MAX_AWAIT_TIMEOUT_MS) {
-      throw new TypeError(
+      throw new UsageError(
         `--timeout-ms must be at most ${MAX_AWAIT_TIMEOUT_MS}`,
       );
     }
@@ -449,7 +470,7 @@ export async function main(
     (argv[1] === "hook" || argv[1] === "hook-ingest")
   ) {
     if (argv.length !== 2) {
-      throw new TypeError(`barbaro claude ${argv[1]} takes no arguments`);
+      throw new UsageError(`barbaro claude ${argv[1]} takes no arguments`);
     }
     const raw = await readStdin();
     let input: unknown;
@@ -490,7 +511,7 @@ export async function main(
     (argv[1] === "hook" || argv[1] === "hook-ingest")
   ) {
     if (argv.length !== 2) {
-      throw new TypeError(`barbaro codex ${argv[1]} takes no arguments`);
+      throw new UsageError(`barbaro codex ${argv[1]} takes no arguments`);
     }
     const raw = await readStdin();
     let input: unknown;
@@ -514,6 +535,40 @@ export async function main(
   return 2;
 }
 
+function isRecognizedHelpTarget(argv: readonly string[]): boolean {
+  const command = argv[0];
+  if (command === undefined || HELP_FLAGS.has(command)) return true;
+  if (SIMPLE_HELP_COMMANDS.has(command)) return true;
+
+  const subcommand = argv[1];
+  if (command === "workstream") {
+    return (
+      subcommand !== undefined &&
+      (HELP_FLAGS.has(subcommand) || WORKSTREAM_HELP_COMMANDS.has(subcommand))
+    );
+  }
+  if (command === "codex" || command === "claude") {
+    return (
+      subcommand !== undefined &&
+      (HELP_FLAGS.has(subcommand) || PROVIDER_HELP_COMMANDS.has(subcommand))
+    );
+  }
+  return false;
+}
+
+function packageVersion(): string {
+  const manifestPath = fileURLToPath(
+    new URL("../../package.json", import.meta.url),
+  );
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as {
+    readonly version?: unknown;
+  };
+  if (typeof manifest.version !== "string" || manifest.version.length === 0) {
+    throw new Error(`package manifest has no version: ${manifestPath}`);
+  }
+  return manifest.version;
+}
+
 /** Distinguishes observation as nobody from refused session impersonation. */
 const WATCH_SELF_REFUSED: unique symbol = Symbol("watch-self-refused");
 
@@ -532,20 +587,20 @@ function assertAwaitIdentityFlags(flags: ReadonlyMap<string, string>): void {
     self !== undefined &&
     (provider !== undefined || nativeSessionId !== undefined)
   ) {
-    throw new TypeError(
+    throw new UsageError(
       "--self is mutually exclusive with --provider/--session-id",
     );
   }
   if ((provider === undefined) !== (nativeSessionId === undefined)) {
-    throw new TypeError("--provider and --session-id must be supplied together");
+    throw new UsageError("--provider and --session-id must be supplied together");
   }
   if (self === undefined && provider === undefined) {
-    throw new TypeError(
+    throw new UsageError(
       "barbaro await requires --self or --provider/--session-id",
     );
   }
   if (flags.has("all-workstreams")) {
-    throw new TypeError(
+    throw new UsageError(
       "barbaro await cannot use --all-workstreams with a session cursor",
     );
   }
@@ -563,7 +618,7 @@ async function resolveAwaitCursor(
 
   if (self !== undefined) {
     if (!/^ses_[0-9a-f]{32}$/u.test(self)) {
-      throw new TypeError("--self must be a stable ses_<32 hex> session id");
+      throw new UsageError("--self must be a stable ses_<32 hex> session id");
     }
     const matches: {
       readonly provider: ParticipatingProvider;
@@ -594,7 +649,7 @@ async function resolveAwaitCursor(
       (rawProvider !== "claude" && rawProvider !== "codex") ||
       nativeSessionId === undefined
     ) {
-      throw new TypeError(`Unknown provider: ${String(rawProvider)}`);
+      throw new UsageError(`Unknown provider: ${String(rawProvider)}`);
     }
     provider = rawProvider;
     participation = await store.read(provider, nativeSessionId);
@@ -619,10 +674,10 @@ async function resolveAwaitCursor(
       explicit,
     );
     if (resolvedWorkstream === undefined) {
-      throw new TypeError(`no workstream named ${JSON.stringify(explicit)}`);
+      throw new UsageError(`no workstream named ${JSON.stringify(explicit)}`);
     }
     if (resolvedWorkstream.workstream_id !== membership.workstream_id) {
-      throw new TypeError(
+      throw new UsageError(
         "barbaro await cannot reinterpret this session's cursor for a different workstream",
       );
     }
@@ -652,16 +707,16 @@ async function resolveWatchSelf(
     self !== undefined &&
     (provider !== undefined || nativeSessionId !== undefined)
   ) {
-    throw new TypeError(
+    throw new UsageError(
       "--self is mutually exclusive with --provider/--session-id",
     );
   }
   if ((provider === undefined) !== (nativeSessionId === undefined)) {
-    throw new TypeError("--provider and --session-id must be supplied together");
+    throw new UsageError("--provider and --session-id must be supplied together");
   }
   if (self !== undefined) {
     if (!/^ses_[0-9a-f]{32}$/.test(self)) {
-      throw new TypeError("--self must be a stable ses_<32 hex> session id");
+      throw new UsageError("--self must be a stable ses_<32 hex> session id");
     }
     const participation = (
       await new SessionParticipationStore(projectRoot).list()
@@ -683,7 +738,7 @@ async function resolveWatchSelf(
     return {};
   }
   if (provider !== "claude" && provider !== "codex") {
-    throw new TypeError(`Unknown provider: ${provider}`);
+    throw new UsageError(`Unknown provider: ${provider}`);
   }
   // Resolving through the participation store doubles as the consent gate: a
   // session that never joined publishes nothing and has no standing to watch
@@ -721,7 +776,7 @@ async function resolveWorkstreamScope(
   const explicit = flags.get("workstream");
   if (flags.has("all-workstreams")) {
     if (explicit !== undefined) {
-      throw new TypeError(
+      throw new UsageError(
         "--all-workstreams is mutually exclusive with --workstream",
       );
     }
@@ -730,7 +785,7 @@ async function resolveWorkstreamScope(
   if (explicit !== undefined) {
     const workstream = await new WorkstreamStore(projectRoot).resolve(explicit);
     if (workstream === undefined) {
-      throw new TypeError(`no workstream named ${JSON.stringify(explicit)}`);
+      throw new UsageError(`no workstream named ${JSON.stringify(explicit)}`);
     }
     return workstream.workstream_id;
   }
@@ -738,11 +793,11 @@ async function resolveWorkstreamScope(
   const provider = flags.get("provider");
   const nativeSessionId = flags.get("session-id");
   if ((provider === undefined) !== (nativeSessionId === undefined)) {
-    throw new TypeError("--provider and --session-id must be supplied together");
+    throw new UsageError("--provider and --session-id must be supplied together");
   }
   if (provider === undefined || nativeSessionId === undefined) return undefined;
   if (provider !== "claude" && provider !== "codex") {
-    throw new TypeError(`Unknown provider: ${provider}`);
+    throw new UsageError(`Unknown provider: ${provider}`);
   }
   const participation = await new SessionParticipationStore(projectRoot).read(
     provider,
@@ -774,18 +829,18 @@ function parseFlags(
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]!;
     if (!argument.startsWith("--")) {
-      throw new TypeError(`Unexpected argument: ${argument}`);
+      throw new UsageError(`Unexpected argument: ${argument}`);
     }
     const name = argument.slice(2);
-    if (!allowed.has(name)) throw new TypeError(`Unknown flag: --${name}`);
-    if (flags.has(name)) throw new TypeError(`Duplicate flag: --${name}`);
+    if (!allowed.has(name)) throw new UsageError(`Unknown flag: --${name}`);
+    if (flags.has(name)) throw new UsageError(`Duplicate flag: --${name}`);
     if (booleans.has(name)) {
       flags.set(name, "true");
       continue;
     }
     const value = argv[index + 1];
     if (!value || value.startsWith("--")) {
-      throw new TypeError(`Missing value for --${name}`);
+      throw new UsageError(`Missing value for --${name}`);
     }
     flags.set(name, value);
     index += 1;
@@ -802,7 +857,7 @@ function positiveIntegerFlag(
   if (raw === undefined) return fallback;
   const value = Number(raw);
   if (!Number.isSafeInteger(value) || value <= 0) {
-    throw new TypeError(`--${name} must be a positive integer`);
+    throw new UsageError(`--${name} must be a positive integer`);
   }
   return value;
 }
@@ -815,14 +870,14 @@ function integerFlagAtLeast(
 ): number {
   const value = positiveIntegerFlag(flags, name, fallback);
   if (value < minimum) {
-    throw new TypeError(`--${name} must be at least ${minimum}`);
+    throw new UsageError(`--${name} must be at least ${minimum}`);
   }
   return value;
 }
 
 function requiredFlag(flags: ReadonlyMap<string, string>, name: string): string {
   const value = flags.get(name);
-  if (!value) throw new TypeError(`Missing required flag --${name}`);
+  if (!value) throw new UsageError(`Missing required flag --${name}`);
   return value;
 }
 
@@ -895,12 +950,13 @@ async function runWorkstreamCommand(
       io.stdout(`${stableStringify(workstream)}\n`);
       return 0;
     } catch (error: unknown) {
-      if (
-        error instanceof WorkstreamNameTakenError ||
-        error instanceof InvalidWorkstreamNameError
-      ) {
+      if (error instanceof WorkstreamNameTakenError) {
         io.stderr(`${error.message}\n`);
         return 1;
+      }
+      if (error instanceof InvalidWorkstreamNameError) {
+        io.stderr(`${error.message}\n`);
+        return 2;
       }
       throw error;
     }
@@ -915,13 +971,14 @@ function takePositional(
 ): { readonly positional: string; readonly rest: readonly string[] } {
   const positional = argv[0];
   if (positional === undefined || positional.startsWith("--")) {
-    throw new TypeError(`Usage: barbaro ${usage}`);
+    throw new UsageError(`Usage: barbaro ${usage}`);
   }
   return { positional, rest: argv.slice(1) };
 }
 
 function helpText(): string {
   return `barbaro\n\n` +
+    `  barbaro --version\n\n` +
     `  Session opt-in: \`/barbaro new|join <name>\` in Claude Code,\n` +
     `                  \`$barbaro new|join <name>\` in Codex; a bare\n` +
     `                  invocation lists workstreams and joins nothing\n\n` +
@@ -987,7 +1044,7 @@ if (invokedPath && isExecutedModule(import.meta.url, invokedPath)) {
     (code) => { process.exitCode = code; },
     (error: unknown) => {
       process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
-      process.exitCode = 1;
+      process.exitCode = error instanceof UsageError ? 2 : 1;
     },
   );
 }

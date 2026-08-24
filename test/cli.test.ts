@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -30,6 +30,55 @@ test("the built CLI runs when process.argv[1] is an npm-style symlink", async (t
   assert.match(stdout, /^barbaro\n/);
   assert.match(stdout, /barbaro codex hook-ingest/);
   assert.equal(stderr, "");
+});
+
+test("the executable reports its package version and uses exit 2 for usage errors", async () => {
+  const builtCli = fileURLToPath(new URL("../src/cli.js", import.meta.url));
+  const manifest = JSON.parse(await readFile("package.json", "utf8")) as {
+    readonly version: string;
+  };
+  const version = await execFileAsync(
+    process.execPath,
+    [builtCli, "--version"],
+    { timeout: 10_000 },
+  );
+  assert.equal(version.stdout, `${manifest.version}\n`);
+  assert.equal(version.stderr, "");
+
+  const usageErrors: readonly {
+    readonly args: readonly string[];
+    readonly message: RegExp;
+  }[] = [
+    { args: ["not-a-command"], message: /Unknown command/u },
+    { args: ["not-a-command", "--help"], message: /Unknown command/u },
+    { args: ["workstream"], message: /Unknown workstream command/u },
+    { args: ["workstream", "bogus"], message: /Unknown workstream command/u },
+    { args: ["workstream", "show"], message: /Usage: barbaro workstream show/u },
+    { args: ["workstream", "new", "Bad_Name"], message: /invalid workstream name/u },
+    { args: ["context", "--project-root"], message: /Missing value/u },
+    {
+      args: ["context", "--provider", "codex"],
+      message: /--provider and --session-id must be supplied together/u,
+    },
+    { args: ["context", "--unknown"], message: /Unknown flag/u },
+  ];
+
+  for (const { args, message } of usageErrors) {
+    await assert.rejects(
+      execFileAsync(process.execPath, [builtCli, ...args], { timeout: 10_000 }),
+      (error: unknown) => {
+        const failure = error as Error & {
+          readonly code?: number;
+          readonly stdout?: string;
+          readonly stderr?: string;
+        };
+        assert.equal(failure.code, 2, args.join(" "));
+        assert.equal(failure.stdout, "", args.join(" "));
+        assert.match(failure.stderr ?? "", message, args.join(" "));
+        return true;
+      },
+    );
+  }
 });
 
 test("session status is read-only and reports the derived current-session key", async (t) => {
@@ -146,7 +195,7 @@ test("workstream commands create, list, and show; status names the workstream", 
 
   assert.equal(await main(["workstream", "new", "tui-design", "--project-root", project], io), 1);
   assert.match(errors.pop()!, /already exists/u);
-  assert.equal(await main(["workstream", "new", "Bad Name", "--project-root", project], io), 1);
+  assert.equal(await main(["workstream", "new", "Bad Name", "--project-root", project], io), 2);
   assert.match(errors.pop()!, /invalid workstream name/u);
 
   assert.equal(await main(["workstream", "show", "tui-design", "--project-root", project], io), 0);
