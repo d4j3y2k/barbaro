@@ -517,6 +517,100 @@ test("does not echo read-only observation of generated Barbaro context", () => {
   assert.deepEqual(terminal.turns[0]?.actions, []);
 });
 
+test("digest excludes only whole-command Barbaro await and context observations", () => {
+  const normalizer = new CodexTurnNormalizer();
+  bootstrap(normalizer);
+
+  const retainedCustomCommand = "barbaro context && echo retained";
+  for (const [index, command] of [
+    "  barbaro await --provider codex --timeout-ms 120000  ",
+    "barbaro context --provider codex --project-root /repo",
+    retainedCustomCommand,
+  ].entries()) {
+    const callId = `barbaro-observation-${index}`;
+    normalizer.accept(
+      line(`2026-08-16T10:00:02.${index}00Z`, "response_item", {
+        type: "custom_tool_call",
+        id: `call-${callId}`,
+        call_id: callId,
+        name: "exec",
+        input: `await tools.exec_command(${JSON.stringify({ cmd: command })});`,
+        internal_chat_message_metadata_passthrough: { turn_id: TURN_NATIVE },
+      }),
+      source(index * 2 + 3),
+    );
+    normalizer.accept(
+      line(`2026-08-16T10:00:02.${index}50Z`, "response_item", {
+        type: "custom_tool_call_output",
+        id: `output-${callId}`,
+        call_id: callId,
+        output: JSON.stringify({ exit_code: 0, output: "observed\n" }),
+        internal_chat_message_metadata_passthrough: { turn_id: TURN_NATIVE },
+      }),
+      source(index * 2 + 4),
+    );
+  }
+
+  const retainedCommands = [
+    "barbaro await --timeout-ms 1000; echo done",
+    "barbaro await --timeout-ms 1000 && echo done",
+    "barbaro context || echo failed",
+    "barbaro context | jq .",
+    "barbaro context > /tmp/context.json",
+    "barbaro context\npwd",
+    "barbaro context $(pwd)",
+    "node dist/src/cli.js await --timeout-ms 1000",
+  ];
+  const projectedCommands = [
+    "barbaro await --provider codex --timeout-ms 120000",
+    "barbaro context --provider codex --project-root /repo",
+    ...retainedCommands,
+  ];
+  for (const [index, command] of projectedCommands.entries()) {
+    normalizer.accept(
+      line(`2026-08-16T10:00:03.${index}00Z`, "event_msg", {
+        type: "item_completed",
+        thread_id: SESSION_NATIVE,
+        turn_id: TURN_NATIVE,
+        item: {
+          type: "CommandExecution",
+          id: `command-${index}`,
+          command: ["/bin/zsh", "-lc", command],
+          cwd: "/repo",
+          parsed_cmd: [{ type: "unknown", cmd: command }],
+          source: "unified_exec_startup",
+          process_id: `process-${index}`,
+          status: "completed",
+          exit_code: 0,
+          stdout: "ok\n",
+          stderr: "",
+          aggregated_output: "ok\n",
+        },
+        started_at_ms: 1786874403000 + index * 100,
+        completed_at_ms: 1786874403050 + index * 100,
+      }),
+      source(index + 9),
+    );
+  }
+
+  const terminal = normalizer.accept(
+    line("2026-08-16T10:00:04.000Z", "event_msg", {
+      type: "task_complete",
+      turn_id: TURN_NATIVE,
+      last_agent_message: "Caught up.",
+    }),
+    source(19),
+  );
+  assert.deepEqual(
+    terminal.turns[0]?.actions.map((action) =>
+      action.kind === "command" || action.kind === "test"
+        ? action.command.text
+        : action.kind,
+    ),
+    [retainedCustomCommand, ...retainedCommands],
+  );
+});
+
 test("normalizer snapshots resume an in-flight turn without replaying prior lines", () => {
   const first = new CodexTurnNormalizer();
   bootstrap(first);

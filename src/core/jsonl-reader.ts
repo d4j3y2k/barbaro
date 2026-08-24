@@ -1,5 +1,6 @@
-import type { PathLike } from "node:fs";
+import { constants, type PathLike } from "node:fs";
 import { open } from "node:fs/promises";
+import { Readable } from "node:stream";
 
 import {
   type CheckpointAnchor,
@@ -23,10 +24,20 @@ export interface JsonlReadOptions<T> {
    * than half-consumed.
    */
   readonly endOffset?: number;
+  /** Pin an omitted endOffset to the size observed on the opened handle. */
+  readonly pinEnd?: boolean;
   /** Optional parser layered over JSON.parse. */
   readonly parse?: (raw: string) => T;
   readonly highWaterMark?: number;
   readonly signal?: AbortSignal;
+  /** Refuse a final-path symbolic link at open time. */
+  readonly noFollow?: boolean;
+  /** Refuse files with another hard link. */
+  readonly requireSingleLink?: boolean;
+  /** Bound the whole physical file observed by this read. */
+  readonly maxFileBytes?: number;
+  /** Bound one physical line before allocation/decoding. */
+  readonly maxLineBytes?: number;
 }
 
 export interface JsonlLineBase {
@@ -95,7 +106,7 @@ export async function* iterateJsonlForward<T = unknown>(
   const firstLineNumber = options.nextLineNumber ?? 1;
   assertSafeNonNegativeInteger(startOffset, "startOffset");
   assertSafePositiveInteger(firstLineNumber, "nextLineNumber");
-  const endOffset = options.endOffset;
+  let endOffset = options.endOffset;
   if (endOffset !== undefined) {
     assertSafeNonNegativeInteger(endOffset, "endOffset");
     if (endOffset < startOffset) {
@@ -108,30 +119,56 @@ export async function* iterateJsonlForward<T = unknown>(
   ) {
     throw new RangeError("highWaterMark must be a positive safe integer");
   }
+  if (options.pinEnd !== undefined && typeof options.pinEnd !== "boolean") {
+    throw new TypeError("pinEnd must be a boolean");
+  }
+  assertOptionalSafeNonNegativeInteger(
+    options.maxFileBytes,
+    "maxFileBytes",
+  );
+  assertOptionalSafeNonNegativeInteger(
+    options.maxLineBytes,
+    "maxLineBytes",
+  );
 
-  const handle = await open(filePath, "r");
+  const handle = await open(filePath, readFlags(options.noFollow));
   try {
-    const initialSnapshot = snapshotFromStats(
-      await handle.stat({ bigint: true }),
-    );
+    const initialStats = await handle.stat({ bigint: true });
+    if (options.requireSingleLink === true && initialStats.nlink !== 1n) {
+      throw new TypeError("JSONL path has multiple hard links");
+    }
+    const initialSnapshot = snapshotFromStats(initialStats);
+    if (
+      options.maxFileBytes !== undefined &&
+      initialSnapshot.size > options.maxFileBytes
+    ) {
+      throw new RangeError(`JSONL path exceeds ${options.maxFileBytes} bytes`);
+    }
     if (startOffset > initialSnapshot.size) {
       throw new RangeError("startOffset is beyond the current end of the file");
+    }
+    if (options.pinEnd === true && endOffset === undefined) {
+      endOffset = initialSnapshot.size;
     }
   } catch (error: unknown) {
     await handle.close();
     throw error;
   }
 
-  let stream: ReturnType<typeof handle.createReadStream>;
+  let stream: ReturnType<typeof handle.createReadStream> | Readable;
   try {
-    stream = handle.createReadStream({
-      autoClose: false,
-      start: startOffset,
-      ...(options.highWaterMark === undefined
-        ? {}
-        : { highWaterMark: options.highWaterMark }),
-      ...(options.signal === undefined ? {} : { signal: options.signal }),
-    });
+    stream =
+      endOffset === startOffset
+        ? Readable.from([])
+        : handle.createReadStream({
+            autoClose: false,
+            start: startOffset,
+            ...(endOffset === undefined ? {} : { end: endOffset - 1 }),
+            ...(options.highWaterMark === undefined
+              ? {}
+              : { highWaterMark: options.highWaterMark }),
+            ...(options.signal === undefined ? {} : { signal: options.signal }),
+          });
   } catch (error: unknown) {
     await handle.close();
     throw error;
@@ -164,6 +201,10 @@ export async function* iterateJsonlForward<T = unknown>(
 
       while (newlineIndex !== -1) {
         const segment = chunk.subarray(segmentStart, newlineIndex);
+        assertLineWithinLimit(
+          fragmentBytes + segment.byteLength,
+          options.maxLineBytes,
+        );
         if (
           endOffset !== undefined &&
           checkpointOffset + fragmentBytes + segment.byteLength + 1 > endOffset
@@ -235,6 +276,10 @@ export async function* iterateJsonlForward<T = unknown>(
 
       if (segmentStart < chunk.byteLength) {
         const remainder = chunk.subarray(segmentStart);
+        assertLineWithinLimit(
+          fragmentBytes + remainder.byteLength,
+          options.maxLineBytes,
+        );
         fragments.push(remainder);
         fragmentBytes += remainder.byteLength;
       }
@@ -243,7 +288,17 @@ export async function* iterateJsonlForward<T = unknown>(
       }
     }
 
-    const finalSnapshot = snapshotFromStats(await handle.stat({ bigint: true }));
+    const finalStats = await handle.stat({ bigint: true });
+    if (options.requireSingleLink === true && finalStats.nlink !== 1n) {
+      throw new TypeError("JSONL path gained another hard link during read");
+    }
+    const finalSnapshot = snapshotFromStats(finalStats);
+    if (
+      options.maxFileBytes !== undefined &&
+      finalSnapshot.size > options.maxFileBytes
+    ) {
+      throw new RangeError(`JSONL path exceeds ${options.maxFileBytes} bytes`);
+    }
     if (finalSnapshot.size < checkpointOffset) {
       throw new RangeError("JSONL file was truncated while it was being read");
     }
@@ -276,6 +331,33 @@ export async function* iterateJsonlForward<T = unknown>(
   } finally {
     stream.destroy();
     await handle.close();
+  }
+}
+
+function readFlags(noFollow: boolean | undefined): string | number {
+  if (noFollow !== true) return "r";
+  const flag = constants.O_NOFOLLOW;
+  if (typeof flag !== "number") {
+    throw new TypeError("This platform cannot refuse JSONL symlinks");
+  }
+  return constants.O_RDONLY | flag;
+}
+
+function assertLineWithinLimit(
+  byteLength: number,
+  maximumBytes: number | undefined,
+): void {
+  if (maximumBytes !== undefined && byteLength > maximumBytes) {
+    throw new RangeError(`JSONL line exceeds ${maximumBytes} bytes`);
+  }
+}
+
+function assertOptionalSafeNonNegativeInteger(
+  value: number | undefined,
+  name: string,
+): void {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value < 0)) {
+    throw new TypeError(`${name} must be a non-negative safe integer`);
   }
 }
 

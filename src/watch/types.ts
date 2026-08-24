@@ -39,6 +39,12 @@ export interface WatchArmedEvent extends WatchEventBase {
   readonly live_sessions: number;
   readonly enrolled_sessions: number;
   readonly self_session_id?: string;
+  /**
+   * Present when the watcher is scoped to one workstream: counts above are
+   * then that workstream's, and turn/join/stale events from sessions outside
+   * it are not delivered.
+   */
+  readonly workstream_id?: string;
 }
 
 /** A peer completed a turn. The payload is a bounded reader projection. */
@@ -46,14 +52,16 @@ export interface WatchTurnEvent extends WatchEventBase {
   readonly kind: "turn";
   readonly provider: string;
   readonly session_id: string;
+  readonly workstream_id?: string;
   readonly turn: ReaderProjection<ReaderTurnSummary>;
 }
 
-/** A session enrolled in this project. */
+/** A session enrolled or moved into its current workstream. */
 export interface WatchJoinEvent extends WatchEventBase {
   readonly kind: "join";
   readonly provider: string;
   readonly session_id: string;
+  readonly workstream_id?: string;
   readonly joined_at: string;
   readonly initiated_by: "user_prompt";
 }
@@ -65,6 +73,7 @@ export interface WatchIncidentEvent extends WatchEventBase {
   readonly incident_id: string;
   readonly incident_kind: IncidentKind;
   readonly event?: string;
+  readonly workstream_id?: string;
   readonly occurred_at: string;
 }
 
@@ -79,6 +88,7 @@ export interface WatchStaleEvent extends WatchEventBase {
   readonly kind: "stale";
   readonly provider: string;
   readonly session_id: string;
+  readonly workstream_id?: string;
   readonly agent_id: string;
   readonly last_state: "working" | "waiting" | "blocked";
   readonly updated_at: string;

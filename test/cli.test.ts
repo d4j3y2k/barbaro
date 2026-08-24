@@ -70,7 +70,7 @@ test("session status is read-only and reports the derived current-session key", 
     provider: "codex",
     nativeSessionId,
     event: "UserPromptSubmit",
-    prompt: "$barbaro",
+    prompt: "$barbaro new lane",
   });
   assert.equal(
     await main(
@@ -90,5 +90,203 @@ test("session status is read-only and reports the derived current-session key", 
   assert.equal(joined.joined, true);
   assert.equal(joined.session_id, createSessionId("codex", nativeSessionId));
   assert.equal(typeof joined.joined_at, "string");
+  assert.deepEqual(joined.memberships, [
+    {
+      workstream_id: (joined.workstream as { workstream_id: string })
+        .workstream_id,
+      from: joined.joined_at,
+    },
+  ]);
+  assert.deepEqual(errors, []);
+});
+
+test("workstream commands create, list, and show; status names the workstream", async (t) => {
+  const project = await mkdtemp(join(tmpdir(), "barbaro-cli-ws-"));
+  t.after(async () => {
+    await rm(project, { recursive: true, force: true });
+  });
+  const output: string[] = [];
+  const errors: string[] = [];
+  const io = {
+    stdout: (text: string) => {
+      output.push(text);
+    },
+    stderr: (text: string) => {
+      errors.push(text);
+    },
+  };
+
+  assert.equal(await main(["workstream", "list", "--project-root", project], io), 0);
+  assert.deepEqual(JSON.parse(output.pop()!), {
+    workstreams: [],
+    shown: 0,
+    total: 0,
+    invalid_records: 0,
+  });
+
+  assert.equal(
+    await main(
+      ["workstream", "new", "tui-design", "--title", "Control terminal", "--project-root", project],
+      io,
+    ),
+    0,
+  );
+  const created = JSON.parse(output.pop()!) as {
+    workstream_id: string;
+    name: string;
+    title: string;
+    status: string;
+    created_by: unknown;
+  };
+  assert.match(created.workstream_id, /^ws_[0-9a-f]{32}$/u);
+  assert.equal(created.name, "tui-design");
+  assert.equal(created.title, "Control terminal");
+  assert.equal(created.status, "open");
+  assert.deepEqual(created.created_by, { kind: "cli" });
+
+  assert.equal(await main(["workstream", "new", "tui-design", "--project-root", project], io), 1);
+  assert.match(errors.pop()!, /already exists/u);
+  assert.equal(await main(["workstream", "new", "Bad Name", "--project-root", project], io), 1);
+  assert.match(errors.pop()!, /invalid workstream name/u);
+
+  assert.equal(await main(["workstream", "show", "tui-design", "--project-root", project], io), 0);
+  assert.equal(
+    (JSON.parse(output.pop()!) as { workstream_id: string }).workstream_id,
+    created.workstream_id,
+  );
+  assert.equal(await main(["workstream", "show", "nope", "--project-root", project], io), 1);
+  assert.match(errors.pop()!, /no workstream named "nope"/u);
+
+  await admitHookSession({
+    projectRoot: project,
+    provider: "claude",
+    nativeSessionId: "member",
+    event: "UserPromptSubmit",
+    prompt: "/barbaro join tui-design",
+  });
+  assert.equal(
+    await main(["claude", "status", "--session-id", "member", "--project-root", project], io),
+    0,
+  );
+  const status = JSON.parse(output.pop()!) as {
+    joined: boolean;
+    joined_at: string;
+    workstream?: { workstream_id: string; name: string; status: string };
+    memberships: { workstream_id: string; from: string }[];
+    unscoped?: boolean;
+  };
+  assert.equal(status.joined, true);
+  assert.deepEqual(status.workstream, {
+    workstream_id: created.workstream_id,
+    name: "tui-design",
+    status: "open",
+  });
+  assert.deepEqual(status.memberships, [
+    { workstream_id: created.workstream_id, from: status.joined_at },
+  ]);
+  assert.equal(status.unscoped, undefined);
+
+  assert.equal(
+    await main(["workstream", "new", "next", "--project-root", project], io),
+    0,
+  );
+  const next = JSON.parse(output.pop()!) as { workstream_id: string };
+  await admitHookSession({
+    projectRoot: project,
+    provider: "claude",
+    nativeSessionId: "member",
+    event: "UserPromptSubmit",
+    prompt: "/barbaro join next",
+  });
+  assert.equal(
+    await main(["claude", "status", "--session-id", "member", "--project-root", project], io),
+    0,
+  );
+  const movedStatus = JSON.parse(output.pop()!) as {
+    workstream: { workstream_id: string; name: string; status: string };
+    memberships: { workstream_id: string; from: string }[];
+  };
+  assert.deepEqual(movedStatus.workstream, {
+    workstream_id: next.workstream_id,
+    name: "next",
+    status: "open",
+  });
+  assert.deepEqual(
+    movedStatus.memberships.map((membership) => membership.workstream_id),
+    [created.workstream_id, next.workstream_id],
+  );
+
+  assert.equal(await main(["workstream", "list", "--project-root", project], io), 0);
+  const listed = JSON.parse(output.pop()!) as {
+    shown: number;
+    total: number;
+    workstreams: { name: string }[];
+  };
+  assert.equal(listed.shown, 2);
+  assert.equal(listed.total, 2);
+  assert.deepEqual(
+    listed.workstreams.map((workstream) => workstream.name).sort(),
+    ["next", "tui-design"],
+  );
+  assert.deepEqual(errors, []);
+});
+
+test("context and watch scope to the session's workstream", async (t) => {
+  const project = await mkdtemp(join(tmpdir(), "barbaro-cli-scope-"));
+  t.after(async () => {
+    await rm(project, { recursive: true, force: true });
+  });
+  const output: string[] = [];
+  const errors: string[] = [];
+  const io = {
+    stdout: (text: string) => {
+      output.push(text);
+    },
+    stderr: (text: string) => {
+      errors.push(text);
+    },
+  };
+  assert.equal(await main(["workstream", "new", "lane", "--project-root", project], io), 0);
+  const created = JSON.parse(output.pop()!) as { workstream_id: string };
+  await admitHookSession({
+    projectRoot: project,
+    provider: "claude",
+    nativeSessionId: "scoped",
+    event: "UserPromptSubmit",
+    prompt: "/barbaro join lane",
+  });
+  const scopeOf = (line: string): string | undefined =>
+    (JSON.parse(line) as { value: { workstream_id?: string } }).value.workstream_id;
+
+  assert.equal(
+    await main(["context", "--provider", "claude", "--session-id", "scoped", "--project-root", project], io),
+    0,
+  );
+  assert.equal(scopeOf(output.pop()!), created.workstream_id);
+  assert.equal(await main(["context", "--workstream", "lane", "--project-root", project], io), 0);
+  assert.equal(scopeOf(output.pop()!), created.workstream_id);
+  assert.equal(
+    await main(
+      ["context", "--provider", "claude", "--session-id", "scoped", "--all-workstreams", "--project-root", project],
+      io,
+    ),
+    0,
+  );
+  assert.equal(scopeOf(output.pop()!), undefined);
+  await assert.rejects(
+    main(["context", "--workstream", "nope", "--project-root", project], io),
+    /no workstream named "nope"/u,
+  );
+
+  assert.equal(
+    await main(
+      ["watch", "--once", "--json", "--provider", "claude", "--session-id", "scoped", "--project-root", project],
+      io,
+    ),
+    0,
+  );
+  const armed = JSON.parse(output.shift()!) as { kind: string; workstream_id?: string };
+  assert.equal(armed.kind, "armed");
+  assert.equal(armed.workstream_id, created.workstream_id);
   assert.deepEqual(errors, []);
 });

@@ -13,6 +13,7 @@ import {
   createSessionId,
   createTurnId,
 } from "../../core/id.js";
+import { isDigestExcludedBarbaroCommand } from "../../core/barbaro-command.js";
 import {
   excerptContent,
   isGeneratedBarbaroPath,
@@ -192,6 +193,11 @@ interface TurnBuilder {
     string,
     { texts: string[]; uuid: string; at: string; line: number }
   >;
+  /**
+   * Response groups that carried `end_turn`. A turn continued by its own
+   * background work produces more than one; the digest keeps each of them.
+   */
+  readonly terminalGroupKeys: Set<string>;
   terminal: boolean;
   lastToolName?: string;
   /**
@@ -314,6 +320,39 @@ export class ClaudeTurnNormalizer {
     return this.#barbaroSessionId;
   }
 
+  /**
+   * True when the open turn could close at a `turn_duration` record right
+   * now: terminal, with no background launch that could still continue it.
+   */
+  get openTurnClosable(): boolean {
+    return (
+      this.#open !== undefined &&
+      this.#open.terminal &&
+      this.#open.pendingBackground.size === 0
+    );
+  }
+
+  /** Whether the open turn has reached its terminal assistant response. */
+  get openTurnTerminal(): boolean {
+    return this.#open?.terminal === true;
+  }
+
+  /** Outstanding background tool-use IDs that can still extend the turn. */
+  get openTurnPendingBackgroundIds(): readonly string[] {
+    return [...(this.#open?.pendingBackground ?? [])].sort();
+  }
+
+  /**
+   * Whether this trace has shown a `turn_duration` record at all. A Stop
+   * ingest waits for one only when the provider has demonstrated it writes
+   * them; older providers never do, and waiting would buy nothing.
+   */
+  get turnDurationSeen(): boolean {
+    return this.#turnDurationSeen;
+  }
+
+  #turnDurationSeen = false;
+
   /** True while a turn is open, i.e. the current position is mid-turn. */
   get hasOpenTurn(): boolean {
     return this.#open !== undefined;
@@ -377,7 +416,7 @@ export class ClaudeTurnNormalizer {
       case "system":
         return this.#acceptSystem(envelope, source);
       case "attachment":
-        return EMPTY_BATCH;
+        return this.#acceptAttachment(envelope);
       default:
         this.#unknownRecordTypes.set(
           envelope.type,
@@ -466,6 +505,39 @@ export class ClaudeTurnNormalizer {
 
   // --- record handlers -----------------------------------------------------
 
+  /**
+   * Claude can deliver a detached Bash completion without a later user
+   * message. In that in-turn shape the UUID-less queue-operation rows are
+   * bookkeeping duplicates; the DAG-bearing queued_command attachment is the
+   * authoritative completion record. It settles only the named launch and
+   * contributes no turn content of its own.
+   */
+  #acceptAttachment(envelope: ClaudeEnvelope): ClaudeNormalizationBatch {
+    if (this.#isOffBranch(envelope.uuid)) return EMPTY_BATCH;
+    const attachment = isObject(envelope.raw.attachment)
+      ? envelope.raw.attachment
+      : undefined;
+    if (
+      attachment === undefined ||
+      stringField(attachment, "type") !== "queued_command" ||
+      stringField(attachment, "commandMode") !== "task-notification"
+    ) {
+      return EMPTY_BATCH;
+    }
+    const completed = taskNotificationToolUseId(
+      stringField(attachment, "prompt"),
+    );
+    if (completed !== undefined) this.#recordCompletedToolUse(completed);
+    return EMPTY_BATCH;
+  }
+
+  #recordCompletedToolUse(toolUseId: string): void {
+    this.#completedToolUseIds.add(toolUseId);
+    // The report has landed, so this launch can no longer extend the open
+    // turn. Other launches remain outstanding and continue to withhold it.
+    this.#open?.pendingBackground.delete(toolUseId);
+  }
+
   #acceptUser(
     envelope: ClaudeEnvelope,
     source: ClaudeSourceLocation,
@@ -505,10 +577,7 @@ export class ClaudeTurnNormalizer {
         );
         if (completed) {
           // Completion/linkage is recorded no matter which turn launched it.
-          this.#completedToolUseIds.add(completed);
-          // The report has landed, so the launch can no longer extend the
-          // turn that issued it: the growth hazard is over.
-          this.#open?.pendingBackground.delete(completed);
+          this.#recordCompletedToolUse(completed);
           // But it only CONTINUES the turn that is currently open. A
           // notification for work launched by an earlier or superseded turn
           // must not annex its span into whatever turn is open now.
@@ -644,6 +713,7 @@ export class ClaudeTurnNormalizer {
       actions: [],
       nextCallOrder: 0,
       responseGroups: new Map(),
+      terminalGroupKeys: new Set(),
       evidenceIds: [],
       pendingCalls: new Map(),
       pendingBackground: new Set(),
@@ -774,7 +844,13 @@ export class ClaudeTurnNormalizer {
     // stop_reason repeats on every line of one API response, including the
     // first. Closing here would drop the text blocks that follow, so the turn
     // is only marked terminal; it is emitted at the next prompt or at finish().
-    if (message.stopReason === "end_turn") builder.terminal = true;
+    if (message.stopReason === "end_turn") {
+      builder.terminal = true;
+      // Remember which response carried the end-turn: a turn continued by its
+      // own background work produces more than one, and the digest keeps each
+      // of them rather than only the last.
+      builder.terminalGroupKeys.add(groupKey);
+    }
     return EMPTY_BATCH;
   }
 
@@ -849,6 +925,7 @@ export class ClaudeTurnNormalizer {
     source: ClaudeSourceLocation,
   ): ClaudeNormalizationBatch {
     const subtype = stringField(envelope.raw, "subtype");
+    if (subtype === "turn_duration") return this.#acceptTurnDuration(envelope);
     if (subtype !== "compact_boundary") return EMPTY_BATCH;
     if (this.#isOffBranch(envelope.uuid)) {
       // A boundary on a rewound path is not evidence for the live turn.
@@ -880,6 +957,34 @@ export class ClaudeTurnNormalizer {
     if (this.#open) this.#open.providerEvents.push(event);
     else this.#pendingEvents.push(event);
     return EMPTY_BATCH;
+  }
+
+  /**
+   * `turn_duration` is the provider's own end-of-turn record: written once per
+   * turn, after the stop hooks, after every row of the final response. A
+   * terminal turn with no outstanding background launch can no longer grow
+   * once it appears, so it closes here — in the stream, exactly as a successor
+   * prompt would close it — and the asynchronous Stop ingest can publish it
+   * moments after the turn ends instead of one turn late.
+   *
+   * A turn whose background launch can still report back stays open: the
+   * report CONTINUES it, and only that arrival, a successor prompt, or a
+   * source-final ingest settles it. A foreign span's end-of-turn is not the
+   * human turn's, and a record on a rewound path is not evidence at all.
+   */
+  #acceptTurnDuration(envelope: ClaudeEnvelope): ClaudeNormalizationBatch {
+    // Any such record, on any branch, proves this provider writes them.
+    this.#turnDurationSeen = true;
+    const builder = this.#open;
+    if (!builder || !builder.terminal || builder.pendingBackground.size > 0) {
+      return EMPTY_BATCH;
+    }
+    if (this.#suppressed) return EMPTY_BATCH;
+    if (this.#isOffBranch(envelope.uuid)) {
+      this.#offBranchRecords += 1;
+      return EMPTY_BATCH;
+    }
+    return this.#closeTurn(builder, "turn-duration");
   }
 
   // --- action materialization ---------------------------------------------
@@ -950,6 +1055,10 @@ export class ClaudeTurnNormalizer {
 
     if (pending.name === "Bash") {
       const command = stringField(pending.input, "command") ?? "";
+      if (isDigestExcludedBarbaroCommand(command)) {
+        this.#selfActionsDropped += 1;
+        return;
+      }
       // An exit code is copied only when the result is explicitly an error
       // AND the exact leading "Exit code N" marker is present. Successful
       // output frequently mentions exit codes in prose; without both gates a
@@ -1174,7 +1283,7 @@ export class ClaudeTurnNormalizer {
 
   #closeTurn(
     builder: TurnBuilder,
-    reason: "next-prompt" | "eof" | "external",
+    reason: "next-prompt" | "turn-duration" | "eof" | "external",
   ): ClaudeNormalizationBatch {
     this.#open = undefined;
     this.#unpairedToolUses += builder.pendingCalls.size;
@@ -1219,8 +1328,10 @@ export class ClaudeTurnNormalizer {
       });
     }
 
-    const groups = [...builder.responseGroups.values()];
-    const terminalGroup = groups.pop();
+    const groupEntries = [...builder.responseGroups.entries()];
+    const lastGroupKey = groupEntries.at(-1)?.[0];
+    const groups = groupEntries.map(([, group]) => group);
+    groups.pop();
     for (const [index, prior] of groups
       .map((group) => ({
         text: group.texts.join("\n"),
@@ -1275,9 +1386,20 @@ export class ClaudeTurnNormalizer {
     }
 
     const outcome = this.#deriveOutcome(builder, reason);
-    const response = terminalGroup
-      ? claudeResponseContent(terminalGroup.texts.join("\n"))
-      : undefined;
+    // The digest's response is every response that ended the turn, in order —
+    // a turn continued by its own background work says something before it
+    // waits and something after, and dropping the first loses the conclusion
+    // the human actually read — plus the last response when it never reached
+    // end_turn. An ordinary turn has exactly one.
+    const responseTexts = groupEntries
+      .filter(
+        ([key]) => builder.terminalGroupKeys.has(key) || key === lastGroupKey,
+      )
+      .map(([, group]) => group.texts.join("\n"));
+    const response =
+      responseTexts.length > 0
+        ? claudeResponseContent(responseTexts.join("\n\n"))
+        : undefined;
 
     const subagents = [...builder.subagents.values()];
     const byRole = new Map<string, number>();
@@ -1347,7 +1469,7 @@ export class ClaudeTurnNormalizer {
 
   #deriveOutcome(
     builder: TurnBuilder,
-    reason: "next-prompt" | "eof" | "external",
+    reason: "next-prompt" | "turn-duration" | "eof" | "external",
   ): BarbaroTurnOutcome {
     const hasDenied = builder.actions.some((a) => a.action.outcome === "denied");
     const hasFailed = builder.actions.some((a) => a.action.outcome === "failed");

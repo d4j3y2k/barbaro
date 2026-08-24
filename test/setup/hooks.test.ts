@@ -286,7 +286,14 @@ test("missing events and subcommands warn while the CLI still runs", async () =>
     );
     assert.deepEqual(
       diagnostic.facts.find((fact) => fact.key === "events_missing")?.value,
-      ["PostToolUse", "PreToolUse", "SessionEnd", "Stop", "UserPromptSubmit"],
+      [
+        "PermissionRequest",
+        "PostToolUse",
+        "PreToolUse",
+        "SessionEnd",
+        "Stop",
+        "UserPromptSubmit",
+      ],
     );
   });
 });

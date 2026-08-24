@@ -16,6 +16,11 @@ function short(id: string): string {
   return id.slice(0, 12);
 }
 
+/** ` ws=7a3f45e1` for a stamped record; nothing for an unscoped one. */
+function scope(workstreamId: string | undefined): string {
+  return workstreamId === undefined ? "" : ` ws=${workstreamId.slice(3, 11)}`;
+}
+
 function excerpt(text: string, limit: number = EXCERPT_LIMIT): string {
   const flat = text.replace(/\s+/gu, " ").trim();
   if (flat.length <= limit) return flat;
@@ -45,7 +50,7 @@ function formatArmed(event: WatchArmedEvent): string {
       ? ""
       : ` self=${short(event.self_session_id)}`;
   return (
-    `WATCH armed${self} live=${event.live_sessions} ` +
+    `WATCH armed${self}${scope(event.workstream_id)} live=${event.live_sessions} ` +
     `enrolled=${event.enrolled_sessions} — turns, joins, incidents, stale leases`
   );
 }
@@ -53,7 +58,7 @@ function formatArmed(event: WatchArmedEvent): string {
 function formatTurn(event: WatchTurnEvent): string {
   const turn = event.turn.value;
   const head = [
-    `TURN [${event.provider} ${short(event.session_id)}] ` +
+    `TURN [${event.provider} ${short(event.session_id)}${scope(event.workstream_id)}] ` +
       `seq=${turn.sequence} ${turn.outcome}`,
   ];
   if (turn.subagents.total > 0) head.push(`subagents=${turn.subagents.total}`);
@@ -101,13 +106,15 @@ function formatTurn(event: WatchTurnEvent): string {
 
 function formatJoin(event: WatchJoinEvent): string {
   return (
-    `JOIN [${event.provider} ${short(event.session_id)}] ` +
+    `JOIN [${event.provider} ${short(event.session_id)}${scope(event.workstream_id)}] ` +
     `at=${event.joined_at} via=${event.initiated_by}`
   );
 }
 
 function formatIncident(event: WatchIncidentEvent): string {
-  const parts = [`INCIDENT [${event.provider} ${event.incident_kind}]`];
+  const parts = [
+    `INCIDENT [${event.provider} ${event.incident_kind}${scope(event.workstream_id)}]`,
+  ];
   if (event.event !== undefined) parts.push(`event=${event.event}`);
   parts.push(`at=${event.occurred_at}`);
   return parts.join(" ");
@@ -115,7 +122,7 @@ function formatIncident(event: WatchIncidentEvent): string {
 
 function formatStale(event: WatchStaleEvent): string {
   const parts = [
-    `STALE [${event.provider} ${short(event.session_id)}/${event.agent_id}]`,
+    `STALE [${event.provider} ${short(event.session_id)}/${event.agent_id}${scope(event.workstream_id)}]`,
     `lease expired ${Math.round(event.lapsed_ms / 1000)}s ago`,
     `last_state=${event.last_state}`,
     `claims=${event.claims}`,

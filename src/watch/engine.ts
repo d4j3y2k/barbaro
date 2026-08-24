@@ -6,7 +6,10 @@ import type { ActiveLeaseV1 } from "../active/types.js";
 import type { BarbaroTurnV1 } from "../contracts/v1.js";
 import { iterateJsonlForward } from "../core/jsonl-reader.js";
 import { listIncidents } from "../hooks/incidents.js";
-import { SessionParticipationStore } from "../hooks/participation.js";
+import {
+  participationMemberships,
+  SessionParticipationStore,
+} from "../hooks/participation.js";
 import { projectTurn } from "../reader/projection.js";
 import {
   isTurnV1,
@@ -27,6 +30,7 @@ import {
 } from "./types.js";
 
 const SESSION_ID_PATTERN = /^ses_[0-9a-f]{32}$/;
+const WORKSTREAM_ID_PATTERN = /^ws_[0-9a-f]{32}$/;
 
 /**
  * Ceiling for retrying a turn whose minimum projection exceeds the normal
@@ -39,6 +43,12 @@ export interface WatchEngineOptions {
   readonly projectRoot: string;
   /** Stable session id whose own publications are never events. */
   readonly selfSessionId?: string;
+  /**
+   * Scope to one workstream: turn, join, and stale events are delivered only
+   * for sessions stamped with this id, and incidents only when they name
+   * this workstream or none. Unset means project-wide, as before.
+   */
+  readonly workstreamId?: string;
   /** Injectable wall clock, primarily for deterministic tests. */
   readonly clock?: () => Date;
   /** Byte budget for each turn event's bounded projection. */
@@ -120,6 +130,7 @@ export function watchErrorEvent(
 export class WatchEngine {
   readonly #projectRoot: string;
   readonly #self: string | undefined;
+  readonly #workstream: string | undefined;
   readonly #clock: () => Date;
   readonly #turnByteBudget: number;
   readonly #activeStore: ActiveLeaseStore;
@@ -128,7 +139,10 @@ export class WatchEngine {
   /** Path → first unread byte, always at the start of a physical line. */
   readonly #feedCursors = new Map<string, number>();
   readonly #seenIncidents = new Set<string>();
+  /** provider/session/current-workstream tuples already observed. */
   readonly #knownSessions = new Set<string>();
+  /** provider/session → its workstream, or undefined for an unscoped session. */
+  readonly #sessionWorkstream = new Map<string, string | undefined>();
   readonly #leases = new Map<
     string,
     { readonly updatedAt: string; readonly reported: boolean }
@@ -147,8 +161,17 @@ export class WatchEngine {
         `Invalid selfSessionId: ${JSON.stringify(options.selfSessionId)}`,
       );
     }
+    if (
+      options.workstreamId !== undefined &&
+      !WORKSTREAM_ID_PATTERN.test(options.workstreamId)
+    ) {
+      throw new TypeError(
+        `Invalid workstreamId: ${JSON.stringify(options.workstreamId)}`,
+      );
+    }
     this.#projectRoot = options.projectRoot;
     this.#self = options.selfSessionId;
+    this.#workstream = options.workstreamId;
     this.#clock = options.clock ?? (() => new Date());
     this.#turnByteBudget =
       options.turnByteBudget ?? DEFAULT_WATCH_TURN_BYTE_BUDGET;
@@ -171,11 +194,15 @@ export class WatchEngine {
 
     const live = new Set<string>();
     for (const lease of await this.#activeStore.listActive({ now })) {
-      if (lease.session_id !== this.#self) live.add(lease.session_id);
+      if (lease.session_id === this.#self) continue;
+      if (!this.#inScope(lease.workstream_id)) continue;
+      live.add(lease.session_id);
     }
     let enrolled = 0;
-    for (const key of this.#knownSessions) {
-      if (!key.endsWith(`/${this.#self}`)) enrolled += 1;
+    for (const [key, workstream] of this.#sessionWorkstream) {
+      if (key.endsWith(`/${this.#self}`)) continue;
+      if (!this.#inScope(workstream)) continue;
+      enrolled += 1;
     }
     return {
       schema: WATCH_EVENT_SCHEMA,
@@ -184,7 +211,19 @@ export class WatchEngine {
       live_sessions: live.size,
       enrolled_sessions: enrolled,
       ...(this.#self === undefined ? {} : { self_session_id: this.#self }),
+      ...(this.#workstream === undefined
+        ? {}
+        : { workstream_id: this.#workstream }),
     };
+  }
+
+  /**
+   * An unscoped watcher sees the whole project. A scoped one sees its own
+   * workstream only; records without a stamp (pre-workstream sessions) are
+   * outside every scope.
+   */
+  #inScope(workstreamId: string | undefined): boolean {
+    return this.#workstream === undefined || workstreamId === this.#workstream;
   }
 
   /** One tick: everything that became true since the previous scan. */
@@ -203,19 +242,27 @@ export class WatchEngine {
 
   async #scanJoins(sink: WatchEvent[] | undefined): Promise<void> {
     for (const participation of await this.#participationStore.list()) {
-      const key = `${participation.provider}/${participation.session_id}`;
+      const sessionKey = `${participation.provider}/${participation.session_id}`;
+      const key = `${sessionKey}/${participation.workstream_id ?? "unscoped"}`;
+      this.#sessionWorkstream.set(sessionKey, participation.workstream_id);
       if (this.#knownSessions.has(key)) continue;
       this.#knownSessions.add(key);
       if (sink === undefined || participation.session_id === this.#self) {
         continue;
       }
+      if (!this.#inScope(participation.workstream_id)) continue;
       sink.push({
         schema: WATCH_EVENT_SCHEMA,
         kind: "join",
         observed_at: this.#clock().toISOString(),
         provider: participation.provider,
         session_id: participation.session_id,
-        joined_at: participation.joined_at,
+        ...(participation.workstream_id === undefined
+          ? {}
+          : { workstream_id: participation.workstream_id }),
+        joined_at:
+          participationMemberships(participation).at(-1)?.from ??
+          participation.joined_at,
         initiated_by: participation.initiated_by,
       });
     }
@@ -284,6 +331,7 @@ export class WatchEngine {
       }
       if (sink === undefined) continue;
       if (isEchoTurn(value)) continue;
+      if (!this.#inScope(value.workstream_id)) continue;
       pending.push(this.#turnEvent(value));
     }
   }
@@ -304,6 +352,9 @@ export class WatchEngine {
       observed_at: this.#clock().toISOString(),
       provider: turn.provider,
       session_id: turn.session_id,
+      ...(turn.workstream_id === undefined
+        ? {}
+        : { workstream_id: turn.workstream_id }),
       turn: projection,
     };
   }
@@ -314,6 +365,16 @@ export class WatchEngine {
       if (this.#seenIncidents.has(key)) continue;
       this.#seenIncidents.add(key);
       if (sink === undefined) continue;
+      // A marker that names a workstream belongs to it; an unscoped marker
+      // (a dormant session, a pre-workstream failure) is project news that
+      // every watcher hears.
+      const incidentWorkstream = record.incident.workstream_id;
+      if (
+        incidentWorkstream !== undefined &&
+        !this.#inScope(incidentWorkstream)
+      ) {
+        continue;
+      }
       // The filename is a per-condition dedup digest, so a new file is a
       // distinct condition rather than a repeat of one already reported.
       sink.push({
@@ -326,6 +387,9 @@ export class WatchEngine {
         ...(record.incident.event === undefined
           ? {}
           : { event: record.incident.event }),
+        ...(incidentWorkstream === undefined
+          ? {}
+          : { workstream_id: incidentWorkstream }),
         occurred_at: record.incident.occurred_at,
       });
     }
@@ -370,7 +434,12 @@ export class WatchEngine {
         const worthTelling =
           lease.state !== "idle" &&
           (lease.agent_id === "main" || sessionGone);
-        if (sink !== undefined && prior !== undefined && worthTelling) {
+        if (
+          sink !== undefined &&
+          prior !== undefined &&
+          worthTelling &&
+          this.#inScope(lease.workstream_id)
+        ) {
           sink.push(this.#staleEvent(lease, nowMs - expiresMs, now));
         }
         reported = true;
@@ -399,6 +468,9 @@ export class WatchEngine {
       observed_at: now.toISOString(),
       provider: lease.provider,
       session_id: lease.session_id,
+      ...(lease.workstream_id === undefined
+        ? {}
+        : { workstream_id: lease.workstream_id }),
       agent_id: lease.agent_id,
       last_state: lease.state,
       updated_at: lease.updated_at,

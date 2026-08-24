@@ -13,6 +13,7 @@ const PROVIDER_PATTERN = /^[a-z][a-z0-9_-]*$/;
 const LEASE_ID_PATTERN = /^lease_[0-9a-f]{32}$/;
 const SESSION_ID_PATTERN = /^ses_[0-9a-f]{32}$/;
 const TURN_ID_PATTERN = /^turn_[0-9a-f]{32}$/;
+const WORKSTREAM_ID_PATTERN = /^ws_[0-9a-f]{32}$/;
 const EXTENSION_KEY_PATTERN = /^[a-z][a-z0-9_-]*$/;
 const RFC3339_PATTERN =
   /^(\d{4})-(\d{2})-(\d{2})[Tt](\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:[Zz]|[+-](\d{2}):(\d{2}))$/;
@@ -22,6 +23,7 @@ const TOP_LEVEL_KEYS = new Set([
   "lease_id",
   "provider",
   "session_id",
+  "workstream_id",
   "turn_id",
   "agent_id",
   "state",
@@ -487,6 +489,14 @@ export function validateActiveLease(
   validateString(value.lease_id, "$.lease_id", issues, LEASE_ID_PATTERN);
   validateString(value.provider, "$.provider", issues, PROVIDER_PATTERN);
   validateString(value.session_id, "$.session_id", issues, SESSION_ID_PATTERN);
+  if (value.workstream_id !== undefined) {
+    validateString(
+      value.workstream_id,
+      "$.workstream_id",
+      issues,
+      WORKSTREAM_ID_PATTERN,
+    );
+  }
   if (value.turn_id !== undefined) {
     validateString(value.turn_id, "$.turn_id", issues, TURN_ID_PATTERN);
   }

@@ -32,6 +32,8 @@ export interface BarbaroIncidentV1 {
   readonly provider: string;
   readonly kind: IncidentKind;
   readonly event?: string;
+  /** The joined session's workstream, when the hook knew it. */
+  readonly workstream_id?: string;
   readonly detail?: BarbaroContent;
   readonly occurred_at: string;
 }
@@ -60,6 +62,8 @@ export async function recordIncident(options: {
   readonly event?: string;
   /** Salts the dedup key only. Never stored. */
   readonly dedupKey?: string;
+  /** Stored on the marker; not part of the dedup key. */
+  readonly workstreamId?: string;
   readonly detail?: string;
   readonly now?: Date;
 }): Promise<void> {
@@ -98,6 +102,9 @@ export async function recordIncident(options: {
       provider: options.provider,
       kind: options.kind,
       ...(options.event === undefined ? {} : { event: options.event }),
+      ...(options.workstreamId === undefined
+        ? {}
+        : { workstream_id: options.workstreamId }),
       ...(detail === undefined ? {} : { detail }),
       occurred_at: occurredAt,
     };
@@ -219,7 +226,12 @@ function parseIncident(
     !INCIDENT_KINDS.includes(record.kind as IncidentKind) ||
     typeof record.occurred_at !== "string" ||
     !Number.isFinite(Date.parse(record.occurred_at)) ||
-    (record.event !== undefined && typeof record.event !== "string")
+    (record.event !== undefined && typeof record.event !== "string") ||
+    (record.workstream_id !== undefined &&
+      !(
+        typeof record.workstream_id === "string" &&
+        /^ws_[0-9a-f]{32}$/.test(record.workstream_id)
+      ))
   ) {
     throw new TypeError("Incident marker is structurally invalid");
   }

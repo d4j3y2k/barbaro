@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import {
   appendFile,
+  link,
   mkdtemp,
   rename,
   rm,
+  symlink,
   truncate,
   writeFile,
 } from "node:fs/promises";
@@ -100,4 +102,26 @@ test("starts from zero when no checkpoint exists", async () => {
   assert.equal(resolution.startOffset, 0);
   assert.equal(resolution.nextLineNumber, 1);
   assert.equal(resolution.snapshot?.size, 3);
+});
+
+test("safe resolution refuses final symlinks, hard links, and oversized files", async () => {
+  const target = join(testDirectory, "safe-target.jsonl");
+  await writeFile(target, "{}\n", "utf8");
+
+  const symbolic = join(testDirectory, "safe-symbolic.jsonl");
+  await symlink(target, symbolic, "file");
+  await assert.rejects(
+    resolveJsonlCheckpoint(symbolic, undefined, { noFollow: true }),
+  );
+
+  const hard = join(testDirectory, "safe-hard.jsonl");
+  await link(target, hard);
+  await assert.rejects(
+    resolveJsonlCheckpoint(hard, undefined, { requireSingleLink: true }),
+    /multiple hard links/u,
+  );
+  await assert.rejects(
+    resolveJsonlCheckpoint(target, undefined, { maxFileBytes: 2 }),
+    /exceeds 2 bytes/u,
+  );
 });

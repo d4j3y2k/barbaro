@@ -156,3 +156,74 @@ test("rejects a start offset beyond EOF", async () => {
     /beyond the current end/,
   );
 });
+
+test("optional file and physical-line bounds fail before unbounded parsing", async () => {
+  const completePath = join(testDirectory, "bounded-complete.jsonl");
+  await writeFile(completePath, `${JSON.stringify({ text: "x".repeat(64) })}\n`);
+  await assert.rejects(
+    readJsonlForward(completePath, () => undefined, {
+      highWaterMark: 3,
+      maxLineBytes: 32,
+    }),
+    /line exceeds 32 bytes/u,
+  );
+  await assert.rejects(
+    readJsonlForward(completePath, () => undefined, { maxFileBytes: 32 }),
+    /path exceeds 32 bytes/u,
+  );
+
+  const partialPath = join(testDirectory, "bounded-partial.jsonl");
+  await writeFile(partialPath, "x".repeat(64));
+  await assert.rejects(
+    readJsonlForward(partialPath, () => undefined, {
+      highWaterMark: 2,
+      maxLineBytes: 32,
+    }),
+    /line exceeds 32 bytes/u,
+  );
+});
+
+test("a pinned end never drains bytes appended while the visitor runs", async () => {
+  const filePath = join(testDirectory, "pinned-end.jsonl");
+  await writeFile(filePath, "1\n", "utf8");
+  const seen: number[] = [];
+  const summary = await readJsonlForward<number>(
+    filePath,
+    async (event) => {
+      assert.equal(event.kind, "record");
+      seen.push(event.value);
+      await appendFile(filePath, "2\n", "utf8");
+    },
+    { endOffset: 2, highWaterMark: 1 },
+  );
+  assert.deepEqual(seen, [1]);
+  assert.equal(summary.bytesRead, 2);
+  assert.equal(summary.checkpointOffset, 2);
+
+  const empty = await readJsonlForward(
+    filePath,
+    () => assert.fail("an empty pinned range must not visit a line"),
+    { startOffset: 2, endOffset: 2 },
+  );
+  assert.equal(empty.bytesRead, 0);
+  assert.equal(empty.checkpointOffset, 2);
+});
+
+test("pinEnd snapshots the opened handle before the visitor can append", async () => {
+  const filePath = join(testDirectory, "automatic-pinned-end.jsonl");
+  await writeFile(filePath, "1\n", "utf8");
+  const seen: number[] = [];
+  const summary = await readJsonlForward<number>(
+    filePath,
+    async (event) => {
+      assert.equal(event.kind, "record");
+      seen.push(event.value);
+      await appendFile(filePath, "2\n", "utf8");
+    },
+    { pinEnd: true, highWaterMark: 1 },
+  );
+  assert.deepEqual(seen, [1]);
+  assert.equal(summary.bytesRead, 2);
+  assert.equal(summary.checkpointOffset, 2);
+  assert.equal(summary.observedSize, 4);
+});

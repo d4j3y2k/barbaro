@@ -1,5 +1,14 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -10,6 +19,7 @@ import type {
   BarbaroTurnV1,
 } from "../../src/contracts/v1.js";
 import { handleClaudeIngestHook } from "../../src/hooks/claude.js";
+import type { BarbaroIngestAttemptJournalV2 } from "../../src/hooks/ingest-attempt.js";
 import { admitHookSession } from "../../src/hooks/participation.js";
 import {
   claudeRunnerStatePath,
@@ -23,13 +33,16 @@ const FIXTURE_WORKSPACE = "/tmp/demo-workspace";
 async function joinClaudeSession(
   projectRoot: string,
   nativeSessionId: string,
-): Promise<void> {
-  await admitHookSession({
+  name = "lane",
+  now?: Date,
+) {
+  return admitHookSession({
     projectRoot,
     provider: "claude",
     nativeSessionId,
     event: "UserPromptSubmit",
-    prompt: "/barbaro",
+    prompt: `/barbaro new ${name}`,
+    ...(now === undefined ? {} : { now }),
   });
 }
 
@@ -80,8 +93,61 @@ async function readJsonl<T>(filePath: string): Promise<T[]> {
     .map((line) => JSON.parse(line) as T);
 }
 
+async function rewriteTraceRows(
+  tracePath: string,
+  transform: (
+    row: Record<string, unknown>,
+  ) => Record<string, unknown> | undefined,
+): Promise<void> {
+  const rows = (await readFile(tracePath, "utf8"))
+    .trimEnd()
+    .split("\n")
+    .map((line) => transform(JSON.parse(line) as Record<string, unknown>))
+    .filter((row): row is Record<string, unknown> => row !== undefined);
+  await writeFile(
+    tracePath,
+    `${rows.map((row) => JSON.stringify(row)).join("\n")}\n`,
+    "utf8",
+  );
+}
+
+async function latestClaudeIngestAttempt(
+  projectRoot: string,
+  sessionId: string,
+): Promise<BarbaroIngestAttemptJournalV2["attempts"][number]> {
+  const journal = JSON.parse(
+    await readFile(
+      join(
+        projectRoot,
+        ".barbaro",
+        "logs",
+        "ingest",
+        "claude",
+        `${sessionId}.json`,
+      ),
+      "utf8",
+    ),
+  ) as BarbaroIngestAttemptJournalV2;
+  const attempt = journal.attempts.at(-1);
+  assert.ok(attempt);
+  return attempt;
+}
+
 const SUBAGENT = "33333333-3333-4333-8333-333333333333";
 const FAILED_LOOP = "22222222-2222-4222-8222-222222222222";
+const BACKGROUND_CONTINUATION = "99999999-9999-4999-8999-999999999999";
+const PRETOOL_ATTACHMENT_FORK = "12121212-1212-4212-8212-121212121212";
+const PRETOOL_TOOL_USE = "c1200000-0000-4000-8000-000000000005";
+const PRETOOL_TOOL_RESULT = "c1200000-0000-4000-8000-000000000008";
+const PRETOOL_HOOK_SUCCESS = "c1200000-0000-4000-8000-000000000006";
+const PRETOOL_HOOK_CONTEXT = "c1200000-0000-4000-8000-000000000007";
+const PRETOOL_TURN_DURATION = "c1200000-0000-4000-8000-000000000013";
+const PRETOOL_VERDICT = "CHECKPOINT 1 APPROVED — replay verdict.";
+const STOP_READ_RACE = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const QUEUED_BACKGROUND_COMPLETION = "fefefefe-fefe-4efe-8efe-fefefefefefe";
+const PRETOOL_CONTEXT_COMMAND =
+  'barbaro context --provider claude --session-id "$CLAUDE_CODE_SESSION_ID" ' +
+  '--project-root "$PWD" >/dev/null 2>&1 && date -u';
 
 test("subagent files are discovered at both nesting depths", async () => {
   const { tracePath } = await stageScenario("subagent-join", SUBAGENT);
@@ -1029,7 +1095,10 @@ test("async SubagentStop ingestion waits for trace-attested completion", async (
   const { projectRoot, tracePath } = await stageScenario("async-child", ASYNC_CHILD);
   await joinClaudeSession(projectRoot, ASYNC_CHILD);
   const full = (await readFile(tracePath, "utf8")).split("\n").filter(Boolean);
-  const beforeCompletion = full.filter((line) => !line.includes("task-notification"));
+  const completionIndex = full.findIndex((line) => line.includes("task-notification"));
+  assert.ok(completionIndex > 0);
+  const beforeCompletion = full.slice(0, completionIndex);
+  const completion = full.slice(completionIndex);
   await writeFile(tracePath, `${beforeCompletion.join("\n")}\n`, "utf8");
 
   const ingesting = handleClaudeIngestHook(
@@ -1043,7 +1112,7 @@ test("async SubagentStop ingestion waits for trace-attested completion", async (
     { pollIntervalMs: 10, timeoutMs: 2_000 },
   );
   await delay(40);
-  await writeFile(tracePath, `${full.join("\n")}\n`, "utf8");
+  await appendFile(tracePath, `${completion.join("\n")}\n`, "utf8");
 
   const result = await ingesting;
   assert.ok(result.ingested);
@@ -1683,6 +1752,153 @@ test("a post-pointer rewind from an earlier ancestor is withheld", async () => {
   assert.equal(result.output.evidence_appended, 0);
 });
 
+test("an attachment-only PreToolUse fork publishes at its own Stop", async () => {
+  const { projectRoot, tracePath } = await stageScenario(
+    "pretool-attachment-fork",
+    PRETOOL_ATTACHMENT_FORK,
+  );
+  await joinClaudeSession(projectRoot, PRETOOL_ATTACHMENT_FORK);
+
+  const stopped = await handleClaudeIngestHook(
+    {
+      hook_event_name: "Stop",
+      session_id: PRETOOL_ATTACHMENT_FORK,
+      cwd: projectRoot,
+      transcript_path: tracePath,
+    },
+    { pollIntervalMs: 1, trailingTimeoutMs: 100 },
+  );
+  const ingested = stopped.ingested;
+  assert.ok(ingested);
+  assert.equal(ingested.input.withheld_reason, undefined);
+  assert.equal(ingested.output.turns_appended, 1);
+  assert.equal(ingested.input.trailing_turn_open, false);
+  assert.equal(ingested.input.trailing_turns_withheld, 0);
+
+  const { computeActiveAncestry } = await import("../../src/runner/claude.js");
+  const ancestry = await computeActiveAncestry(tracePath);
+  assert.ok(ancestry?.has(PRETOOL_TOOL_USE));
+  assert.ok(ancestry?.has(PRETOOL_TOOL_RESULT));
+  assert.ok(ancestry?.has(PRETOOL_TURN_DURATION));
+  assert.ok(!ancestry?.has(PRETOOL_HOOK_SUCCESS));
+  assert.ok(!ancestry?.has(PRETOOL_HOOK_CONTEXT));
+
+  const turns = await readJsonl<BarbaroTurnV1>(
+    join(
+      projectRoot,
+      ".barbaro",
+      "feed",
+      "claude",
+      `${ingested.session_id}.jsonl`,
+    ),
+  );
+  assert.equal(turns.length, 1, "the Stop-blocked continuation stays one turn");
+  const turn = turns[0]!;
+  assert.deepEqual(turn.response?.text.split("\n\n"), [
+    PRETOOL_VERDICT,
+    PRETOOL_VERDICT,
+  ]);
+  assert.equal(turn.response?.text.split("\n\n").at(-1), PRETOOL_VERDICT);
+  const contextRead = turn.actions.find(
+    (action) =>
+      action.kind === "command" && action.command.text === PRETOOL_CONTEXT_COMMAND,
+  );
+  assert.ok(contextRead && contextRead.kind === "command");
+});
+
+test("a reentrant Stop waits for its suppressed hook-feedback response", async () => {
+  const { projectRoot, tracePath } = await stageScenario(
+    "pretool-attachment-fork",
+    PRETOOL_ATTACHMENT_FORK,
+  );
+  const rows = (await readFile(tracePath, "utf8")).trimEnd().split("\n");
+  // Through the blocking Stop feedback prompt, but before its resent response.
+  await writeFile(tracePath, `${rows.slice(0, 14).join("\n")}\n`, "utf8");
+  await joinClaudeSession(projectRoot, PRETOOL_ATTACHMENT_FORK);
+  let clock = 0;
+  let appended = false;
+
+  const stopped = await handleClaudeIngestHook(
+    {
+      hook_event_name: "Stop",
+      session_id: PRETOOL_ATTACHMENT_FORK,
+      cwd: projectRoot,
+      transcript_path: tracePath,
+      stop_hook_active: true,
+      // Deliberately identical to the prior response at row 11. The feedback
+      // prompt at row 12 must clear that stale candidate.
+      last_assistant_message: PRETOOL_VERDICT,
+    },
+    {
+      now: () => clock,
+      pollIntervalMs: 50,
+      timeoutMs: 500,
+      trailingTimeoutMs: 500,
+      sleep: async (milliseconds) => {
+        clock += milliseconds;
+        if (!appended) {
+          await assert.rejects(
+            stat(
+              claudeRunnerStatePath(
+                tracePath,
+                join(projectRoot, ".barbaro"),
+              ),
+            ),
+            { code: "ENOENT" },
+          );
+          appended = true;
+          await appendFile(tracePath, `${rows.slice(14).join("\n")}\n`, "utf8");
+        }
+      },
+    },
+  );
+
+  assert.equal(clock, 50, "the identical prior verdict cannot attest reentry");
+  assert.equal(stopped.ignored, undefined);
+  assert.equal(stopped.ingested?.input.stop_turn_visible, true);
+  assert.equal(
+    stopped.ingested?.input.latest_terminal_response_message_id,
+    "msg_probe_4",
+  );
+});
+
+test("an attachment sidecar does not hide a genuine post-pointer message fork", async () => {
+  const { projectRoot, tracePath } = await stageScenario(
+    "pretool-attachment-fork",
+    PRETOOL_ATTACHMENT_FORK,
+  );
+  await joinClaudeSession(projectRoot, PRETOOL_ATTACHMENT_FORK);
+  const semanticFork = JSON.stringify({
+    parentUuid: PRETOOL_TOOL_USE,
+    isSidechain: false,
+    promptId: "prompt-rewind",
+    type: "user",
+    message: { role: "user", content: "Choose a different continuation." },
+    uuid: "c1200000-0000-4000-8000-000000000014",
+    timestamp: "2026-08-23T17:23:02.000Z",
+    origin: { kind: "human" },
+    promptSource: "typed",
+    userType: "external",
+    cwd: projectRoot,
+    sessionId: PRETOOL_ATTACHMENT_FORK,
+  });
+  await writeFile(
+    tracePath,
+    `${await readFile(tracePath, "utf8")}${semanticFork}\n`,
+    "utf8",
+  );
+
+  const result = await runClaudeTrace({
+    tracePath,
+    projectRoot,
+    final: true,
+    sourceFinal: false,
+  });
+  assert.equal(result.input.withheld_reason, "ambiguous_pointer_continuation");
+  assert.equal(result.output.turns_appended, 0);
+  assert.equal(result.output.evidence_appended, 0);
+});
+
 test("a torn last-prompt replacement publishes nothing", async () => {
   // last-prompt is rewritten in place. Catching it mid-write means the branch
   // it names is unknown, and any turn published now may be contradicted once
@@ -2222,4 +2438,1058 @@ test("a withheld run records no checkpoint progress", async () => {
   // Still "start", not "resume": the refused run left no progress behind.
   const again = await runClaudeTrace({ tracePath, projectRoot, final: false });
   assert.equal(again.checkpoint_status, "start");
+});
+
+test("published records carry the session's workstream, identically from hook and manual ingest", async () => {
+  const { projectRoot, tracePath } = await stageScenario("failed-tool-loop", FAILED_LOOP);
+  await joinClaudeSession(
+    projectRoot,
+    FAILED_LOOP,
+    "lane",
+    new Date("2026-08-01T00:00:00.000Z"),
+  );
+  const { SessionParticipationStore } = await import("../../src/hooks/participation.js");
+  const participation = await new SessionParticipationStore(projectRoot).read(
+    "claude",
+    FAILED_LOOP,
+  );
+  assert.ok(participation?.workstream_id, "the session joined a workstream");
+
+  const manual = await runClaudeTrace({
+    tracePath,
+    projectRoot,
+    final: true,
+    sourceFinal: true,
+  });
+  assert.ok(manual.output.turns_appended > 0);
+  const feed = await readJsonl<BarbaroTurnV1>(
+    join(projectRoot, ".barbaro", "feed", "claude", `${manual.session_id}.jsonl`),
+  );
+  assert.ok(feed.length > 0);
+  for (const turn of feed) {
+    assert.equal(turn.workstream_id, participation.workstream_id, turn.turn_id);
+  }
+  const evidence = await readJsonl<BarbaroEvidenceV1>(
+    join(projectRoot, ".barbaro", "evidence", "claude", `${manual.session_id}.jsonl`),
+  );
+  for (const record of evidence) {
+    assert.equal(record.workstream_id, participation.workstream_id, record.evidence_id);
+  }
+
+  // A full re-ingest recomputes byte-identical records: nothing conflicts and
+  // nothing is appended twice.
+  const again = await runClaudeTrace({
+    tracePath,
+    projectRoot,
+    reset: true,
+    final: true,
+    sourceFinal: true,
+  });
+  assert.equal(again.output.conflicted, 0);
+  assert.equal(again.output.turns_appended, 0);
+  const after = await readJsonl<BarbaroTurnV1>(
+    join(projectRoot, ".barbaro", "feed", "claude", `${manual.session_id}.jsonl`),
+  );
+  assert.equal(after.length, feed.length);
+});
+
+const TURN_DURATION_CLOSE = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+
+test("Claude stamps each turn and evidence record with its membership at that time", async () => {
+  const { projectRoot, tracePath } = await stageScenario(
+    "turn-duration-close",
+    TURN_DURATION_CLOSE,
+  );
+  const joined = await joinClaudeSession(
+    projectRoot,
+    TURN_DURATION_CLOSE,
+    "alpha",
+    new Date("2026-08-16T15:59:00.000Z"),
+  );
+  const alpha = joined.participation?.workstream_id;
+  assert.ok(alpha);
+
+  const first = await runClaudeTrace({
+    tracePath,
+    projectRoot,
+    final: true,
+    sourceFinal: true,
+  });
+  assert.equal(first.output.turns_appended, 1);
+
+  const moved = await joinClaudeSession(
+    projectRoot,
+    TURN_DURATION_CLOSE,
+    "beta",
+    new Date("2026-08-16T16:04:00.000Z"),
+  );
+  const beta = moved.participation?.workstream_id;
+  assert.ok(beta && beta !== alpha);
+
+  const base = {
+    isSidechain: false,
+    userType: "external",
+    cwd: projectRoot,
+    version: "2.1.239",
+    gitBranch: "main",
+    entrypoint: "cli",
+    sessionId: TURN_DURATION_CLOSE,
+  };
+  const secondRows = [
+    {
+      ...base,
+      parentUuid: "ad000000-0000-4000-8000-000000000004",
+      type: "user",
+      message: { role: "user", content: [{ type: "text", text: "Next request." }] },
+      promptId: "p-d002",
+      promptSource: "typed",
+      origin: { kind: "human" },
+      permissionMode: "default",
+      uuid: "ad000000-0000-4000-8000-000000000009",
+      timestamp: "2026-08-16T16:05:00.000Z",
+    },
+    {
+      ...base,
+      parentUuid: "ad000000-0000-4000-8000-000000000009",
+      type: "assistant",
+      requestId: "req_d002",
+      message: {
+        id: "msg_d002",
+        type: "message",
+        role: "assistant",
+        model: "claude-opus-5",
+        content: [{ type: "text", text: "CHECKPOINT 1 APPROVED." }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 5, output_tokens: 6 },
+      },
+      uuid: "ad000000-0000-4000-8000-00000000000a",
+      timestamp: "2026-08-16T16:05:09.000Z",
+    },
+    {
+      ...base,
+      parentUuid: "ad000000-0000-4000-8000-00000000000a",
+      type: "system",
+      subtype: "stop_hook_summary",
+      hookCount: 2,
+      hookInfos: [],
+      hookErrors: [],
+      hookAdditionalContext: [],
+      preventedContinuation: false,
+      stopReason: "",
+      hasOutput: false,
+      level: "suggestion",
+      uuid: "ad000000-0000-4000-8000-00000000000b",
+      timestamp: "2026-08-16T16:05:09.500Z",
+    },
+    {
+      ...base,
+      parentUuid: "ad000000-0000-4000-8000-00000000000b",
+      type: "system",
+      subtype: "turn_duration",
+      durationMs: 9_600,
+      messageCount: 3,
+      uuid: "ad000000-0000-4000-8000-00000000000c",
+      timestamp: "2026-08-16T16:05:09.600Z",
+    },
+  ];
+  await writeFile(
+    tracePath,
+    `${await readFile(tracePath, "utf8")}${secondRows
+      .map((row) => `${JSON.stringify(row)}\n`)
+      .join("")}`,
+    "utf8",
+  );
+
+  const second = await runClaudeTrace({
+    tracePath,
+    projectRoot,
+    final: true,
+    sourceFinal: true,
+  });
+  assert.equal(second.output.turns_appended, 1);
+  assert.equal(second.output.conflicted, 0);
+  const feedPath = join(
+    projectRoot,
+    ".barbaro",
+    "feed",
+    "claude",
+    `${second.session_id}.jsonl`,
+  );
+  const evidencePath = join(
+    projectRoot,
+    ".barbaro",
+    "evidence",
+    "claude",
+    `${second.session_id}.jsonl`,
+  );
+  const turns = await readJsonl<BarbaroTurnV1>(feedPath);
+  assert.deepEqual(
+    turns.map((turn) => [turn.request.text, turn.workstream_id]),
+    [
+      ["Review the plan.", alpha],
+      ["Next request.", beta],
+    ],
+  );
+  const evidence = await readJsonl<BarbaroEvidenceV1>(evidencePath);
+  assert.ok(evidence.some((record) => record.workstream_id === alpha));
+  assert.ok(evidence.some((record) => record.workstream_id === beta));
+  for (const record of evidence) {
+    assert.equal(
+      record.workstream_id,
+      record.occurred_at < "2026-08-16T16:04:00.000Z" ? alpha : beta,
+      record.evidence_id,
+    );
+  }
+
+  const feedBytes = await readFile(feedPath, "utf8");
+  const evidenceBytes = await readFile(evidencePath, "utf8");
+  const reset = await runClaudeTrace({
+    tracePath,
+    projectRoot,
+    reset: true,
+    final: true,
+    sourceFinal: true,
+  });
+  assert.equal(reset.output.conflicted, 0);
+  assert.equal(reset.output.turns_appended, 0);
+  assert.equal(await readFile(feedPath, "utf8"), feedBytes);
+  assert.equal(await readFile(evidencePath, "utf8"), evidenceBytes);
+});
+
+test("a terminal turn with no background work publishes at its own Stop", async () => {
+  const { projectRoot, tracePath } = await stageScenario(
+    "turn-duration-close",
+    TURN_DURATION_CLOSE,
+  );
+  await joinClaudeSession(projectRoot, TURN_DURATION_CLOSE);
+  const stopped = await handleClaudeIngestHook(
+    {
+      hook_event_name: "Stop",
+      session_id: TURN_DURATION_CLOSE,
+      cwd: projectRoot,
+      transcript_path: tracePath,
+    },
+    { pollIntervalMs: 10, trailingTimeoutMs: 500 },
+  );
+  assert.ok(stopped.ingested);
+  assert.equal(stopped.ingested.output.turns_appended, 1);
+  assert.equal(stopped.ingested.input.trailing_turn_open, false);
+  assert.equal(stopped.ingested.input.trailing_turns_withheld, 0);
+  const feedPath = join(
+    projectRoot,
+    ".barbaro",
+    "feed",
+    "claude",
+    `${stopped.ingested.session_id}.jsonl`,
+  );
+  const feed = await readJsonl<BarbaroTurnV1>(feedPath);
+  assert.equal(feed.length, 1);
+  assert.equal(feed[0]!.response?.text, "PLAN APPROVED — the phases are sound.");
+
+  // A successor prompt appended later recomputes the same bytes: nothing new,
+  // nothing conflicting, and the new open turn is withheld as usual.
+  const successor = {
+    isSidechain: false,
+    userType: "external",
+    cwd: projectRoot,
+    version: "2.1.239",
+    gitBranch: "main",
+    entrypoint: "cli",
+    sessionId: TURN_DURATION_CLOSE,
+    parentUuid: "ad000000-0000-4000-8000-000000000004",
+    type: "user",
+    message: { role: "user", content: [{ type: "text", text: "Next request." }] },
+    promptId: "p-d002",
+    promptSource: "typed",
+    origin: { kind: "human" },
+    permissionMode: "default",
+    uuid: "ad000000-0000-4000-8000-000000000009",
+    timestamp: "2026-08-16T16:05:00.000Z",
+  };
+  await writeFile(
+    tracePath,
+    `${await readFile(tracePath, "utf8")}${JSON.stringify(successor)}\n`,
+    "utf8",
+  );
+  const again = await runClaudeTrace({ tracePath, projectRoot, final: true });
+  assert.equal(again.output.conflicted, 0);
+  assert.equal(again.output.turns_appended, 0);
+  assert.equal((await readJsonl<BarbaroTurnV1>(feedPath)).length, 1);
+});
+
+test("a terminal background continuation is named in the Stop attempt journal", async () => {
+  const { projectRoot, tracePath } = await stageScenario(
+    "background-continuation",
+    BACKGROUND_CONTINUATION,
+  );
+  const rows = (await readFile(tracePath, "utf8")).trimEnd().split("\n");
+  await writeFile(tracePath, `${rows.slice(0, 4).join("\n")}\n`, "utf8");
+  await joinClaudeSession(projectRoot, BACKGROUND_CONTINUATION);
+
+  const stopped = await handleClaudeIngestHook(
+    {
+      hook_event_name: "Stop",
+      session_id: BACKGROUND_CONTINUATION,
+      cwd: projectRoot,
+      transcript_path: tracePath,
+      last_assistant_message: "Watcher armed.",
+    },
+    {
+      now: () => 0,
+      sleep: async () =>
+        assert.fail("a non-closable background turn must not poll"),
+    },
+  );
+  assert.ok(stopped.ingested);
+  assert.equal(stopped.ingested.input.trailing_turn_terminal, true);
+  assert.equal(stopped.ingested.input.trailing_turn_closable, false);
+  assert.deepEqual(stopped.ingested.input.pending_background_ids, ["toolu_BG"]);
+  assert.equal(stopped.ingested.input.pending_background_count, 1);
+
+  const journal = JSON.parse(
+    await readFile(
+      join(
+        projectRoot,
+        ".barbaro",
+        "logs",
+        "ingest",
+        "claude",
+        `${stopped.ingested.session_id}.json`,
+      ),
+      "utf8",
+    ),
+  ) as BarbaroIngestAttemptJournalV2;
+  const attempt = journal.attempts.at(-1);
+  assert.ok(attempt);
+  assert.deepEqual(attempt.pending_background_ids, ["toolu_BG"]);
+  assert.equal(attempt.runner_input?.pending_background_count, 1);
+  assert.equal(attempt.publish_blocker, "pending_background");
+  assert.equal(attempt.outcome, "ok");
+});
+
+test("an in-turn queued-command completion publishes without a background blocker", async () => {
+  const { projectRoot, tracePath } = await stageScenario(
+    "queued-background-completion",
+    QUEUED_BACKGROUND_COMPLETION,
+  );
+  await joinClaudeSession(projectRoot, QUEUED_BACKGROUND_COMPLETION);
+
+  const stopped = await handleClaudeIngestHook(
+    {
+      hook_event_name: "Stop",
+      session_id: QUEUED_BACKGROUND_COMPLETION,
+      cwd: projectRoot,
+      transcript_path: tracePath,
+      last_assistant_message: "CHECKPOINT 1 APPROVED.",
+    },
+    {
+      now: () => 0,
+      sleep: async () => assert.fail("the completed turn is already closed"),
+    },
+  );
+  assert.ok(stopped.ingested);
+  assert.equal(stopped.ingested.output.turns_appended, 1);
+  assert.equal(stopped.ingested.input.trailing_turn_open, false);
+  assert.deepEqual(stopped.ingested.input.pending_background_ids, []);
+  assert.equal(stopped.ingested.input.pending_background_count, 0);
+
+  const attempt = await latestClaudeIngestAttempt(
+    projectRoot,
+    stopped.ingested.session_id,
+  );
+  assert.deepEqual(attempt.pending_background_ids, []);
+  assert.equal(attempt.runner_input?.pending_background_count, 0);
+  assert.equal(attempt.publish_blocker, undefined);
+  assert.equal(attempt.outcome, "ok");
+});
+
+test("a failed queued background report also settles its named launch", async () => {
+  const { projectRoot, tracePath } = await stageScenario(
+    "queued-background-completion",
+    QUEUED_BACKGROUND_COMPLETION,
+  );
+  await rewriteTraceRows(tracePath, (row) => {
+    if (row.uuid !== "af000000-0000-4000-8000-000000000006") return row;
+    const attachment = row.attachment as Record<string, unknown>;
+    const prompt = attachment.prompt as string;
+    return {
+      ...row,
+      attachment: {
+        ...attachment,
+        prompt: prompt.replace(
+          "<status>completed</status>",
+          "<status>failed</status>",
+        ),
+      },
+    };
+  });
+  await joinClaudeSession(projectRoot, QUEUED_BACKGROUND_COMPLETION);
+
+  const stopped = await handleClaudeIngestHook(
+    {
+      hook_event_name: "Stop",
+      session_id: QUEUED_BACKGROUND_COMPLETION,
+      cwd: projectRoot,
+      transcript_path: tracePath,
+      last_assistant_message: "CHECKPOINT 1 APPROVED.",
+    },
+    {
+      now: () => 0,
+      sleep: async () => assert.fail("a terminal failure is already settled"),
+    },
+  );
+  assert.ok(stopped.ingested);
+  assert.equal(stopped.ingested.output.turns_appended, 1);
+  assert.deepEqual(stopped.ingested.input.pending_background_ids, []);
+  const attempt = await latestClaudeIngestAttempt(
+    projectRoot,
+    stopped.ingested.session_id,
+  );
+  assert.equal(attempt.publish_blocker, undefined);
+});
+
+test("queue duplicates and non-authoritative attachments cannot settle a background turn", async () => {
+  const { projectRoot, tracePath } = await stageScenario(
+    "queued-background-completion",
+    QUEUED_BACKGROUND_COMPLETION,
+  );
+  // Strip only the completion payload from the authoritative on-branch row.
+  // The UUID and parent edge remain so branch selection is byte-for-byte the
+  // same; the queue-operation duplicates, off-branch completion, and on-path
+  // Monitor notification are all still present and must remain inert.
+  await rewriteTraceRows(tracePath, (row) =>
+    row.uuid === "af000000-0000-4000-8000-000000000006"
+      ? {
+          ...row,
+          attachment: {
+            type: "total_tokens_reminder",
+            text: "<total_tokens>1000 tokens left</total_tokens>",
+          },
+        }
+      : row,
+  );
+  await joinClaudeSession(projectRoot, QUEUED_BACKGROUND_COMPLETION);
+
+  const stopped = await handleClaudeIngestHook(
+    {
+      hook_event_name: "Stop",
+      session_id: QUEUED_BACKGROUND_COMPLETION,
+      cwd: projectRoot,
+      transcript_path: tracePath,
+      last_assistant_message: "CHECKPOINT 1 APPROVED.",
+    },
+    {
+      now: () => 0,
+      sleep: async () =>
+        assert.fail("a non-closable background turn must not poll"),
+    },
+  );
+  assert.ok(stopped.ingested);
+  assert.equal(stopped.ingested.output.turns_appended, 0);
+  assert.equal(stopped.ingested.input.trailing_turn_terminal, true);
+  assert.equal(stopped.ingested.input.trailing_turn_closable, false);
+  assert.deepEqual(stopped.ingested.input.pending_background_ids, [
+    "toolu_QUEUE_BG",
+  ]);
+
+  const attempt = await latestClaudeIngestAttempt(
+    projectRoot,
+    stopped.ingested.session_id,
+  );
+  assert.deepEqual(attempt.pending_background_ids, ["toolu_QUEUE_BG"]);
+  assert.equal(attempt.publish_blocker, "pending_background");
+  assert.equal(attempt.outcome, "ok");
+});
+
+test("a queued-command completion clears only its named background launch", async () => {
+  const { projectRoot, tracePath } = await stageScenario(
+    "queued-background-completion",
+    QUEUED_BACKGROUND_COMPLETION,
+  );
+  await rewriteTraceRows(tracePath, (row) => {
+    if (row.uuid === "af000000-0000-4000-8000-000000000002") {
+      const message = row.message as Record<string, unknown>;
+      const content = message.content as unknown[];
+      return {
+        ...row,
+        message: {
+          ...message,
+          content: [
+            ...content,
+            {
+              type: "tool_use",
+              id: "toolu_QUEUE_OTHER",
+              name: "Bash",
+              input: { command: "tail -f app.log", run_in_background: true },
+            },
+          ],
+        },
+      };
+    }
+    if (row.uuid === "af000000-0000-4000-8000-000000000003") {
+      const message = row.message as Record<string, unknown>;
+      const content = message.content as unknown[];
+      return {
+        ...row,
+        message: {
+          ...message,
+          content: [
+            ...content,
+            {
+              tool_use_id: "toolu_QUEUE_OTHER",
+              type: "tool_result",
+              content: "Command running in background with ID bg_other",
+              is_error: false,
+            },
+          ],
+        },
+      };
+    }
+    return row;
+  });
+  await joinClaudeSession(projectRoot, QUEUED_BACKGROUND_COMPLETION);
+
+  const stopped = await handleClaudeIngestHook(
+    {
+      hook_event_name: "Stop",
+      session_id: QUEUED_BACKGROUND_COMPLETION,
+      cwd: projectRoot,
+      transcript_path: tracePath,
+      last_assistant_message: "CHECKPOINT 1 APPROVED.",
+    },
+    {
+      now: () => 0,
+      sleep: async () =>
+        assert.fail("the other live background launch must not poll"),
+    },
+  );
+  assert.ok(stopped.ingested);
+  assert.equal(stopped.ingested.output.turns_appended, 0);
+  assert.deepEqual(stopped.ingested.input.pending_background_ids, [
+    "toolu_QUEUE_OTHER",
+  ]);
+  const attempt = await latestClaudeIngestAttempt(
+    projectRoot,
+    stopped.ingested.session_id,
+  );
+  assert.deepEqual(attempt.pending_background_ids, ["toolu_QUEUE_OTHER"]);
+  assert.equal(attempt.publish_blocker, "pending_background");
+});
+
+test("a completed background turn before turn_duration keeps the truthful close blocker", async () => {
+  const { projectRoot, tracePath } = await stageScenario(
+    "queued-background-completion",
+    QUEUED_BACKGROUND_COMPLETION,
+  );
+  await rewriteTraceRows(tracePath, (row) =>
+    row.type === "system" && row.subtype === "turn_duration" ? undefined : row,
+  );
+  await joinClaudeSession(projectRoot, QUEUED_BACKGROUND_COMPLETION);
+
+  const stopped = await handleClaudeIngestHook(
+    {
+      hook_event_name: "Stop",
+      session_id: QUEUED_BACKGROUND_COMPLETION,
+      cwd: projectRoot,
+      transcript_path: tracePath,
+      last_assistant_message: "CHECKPOINT 1 APPROVED.",
+    },
+    {
+      now: () => 0,
+      sleep: async () =>
+        assert.fail("the first observed turn_duration is not polled for"),
+    },
+  );
+  assert.ok(stopped.ingested);
+  assert.equal(stopped.ingested.output.turns_appended, 0);
+  assert.equal(stopped.ingested.input.trailing_turn_terminal, true);
+  assert.equal(stopped.ingested.input.trailing_turn_closable, true);
+  assert.deepEqual(stopped.ingested.input.pending_background_ids, []);
+
+  const attempt = await latestClaudeIngestAttempt(
+    projectRoot,
+    stopped.ingested.session_id,
+  );
+  assert.deepEqual(attempt.pending_background_ids, []);
+  assert.equal(attempt.publish_blocker, "trailing_turn_not_closed");
+  assert.equal(attempt.outcome, "ok");
+});
+
+test("the Stop ingest waits briefly for turn_duration to land", async () => {
+  // The synchronous hooks return before Claude writes stop_hook_summary and
+  // turn_duration; the asynchronous ingest polls through that gap — once the
+  // trace has shown that this provider writes the record at all. Turn 1 from
+  // the fixture supplies that evidence; turn 2 is appended live.
+  const { projectRoot, tracePath } = await stageScenario(
+    "turn-duration-close",
+    TURN_DURATION_CLOSE,
+  );
+  await joinClaudeSession(projectRoot, TURN_DURATION_CLOSE);
+  const base = {
+    isSidechain: false,
+    userType: "external",
+    cwd: projectRoot,
+    version: "2.1.239",
+    gitBranch: "main",
+    entrypoint: "cli",
+    sessionId: TURN_DURATION_CLOSE,
+  };
+  const secondPrompt = {
+    ...base,
+    parentUuid: "ad000000-0000-4000-8000-000000000004",
+    type: "user",
+    message: { role: "user", content: [{ type: "text", text: "And the checkpoint?" }] },
+    promptId: "p-d002",
+    promptSource: "typed",
+    origin: { kind: "human" },
+    permissionMode: "default",
+    uuid: "ad000000-0000-4000-8000-000000000009",
+    timestamp: "2026-08-16T16:05:00.000Z",
+  };
+  const secondAnswer = {
+    ...base,
+    parentUuid: "ad000000-0000-4000-8000-000000000009",
+    type: "assistant",
+    requestId: "req_d002",
+    message: {
+      id: "msg_d002",
+      type: "message",
+      role: "assistant",
+      model: "claude-opus-5",
+      content: [{ type: "text", text: "CHECKPOINT 1 APPROVED." }],
+      stop_reason: "end_turn",
+      usage: { input_tokens: 5, output_tokens: 6 },
+    },
+    uuid: "ad000000-0000-4000-8000-00000000000a",
+    timestamp: "2026-08-16T16:05:09.000Z",
+  };
+  const secondSummary = {
+    ...base,
+    parentUuid: "ad000000-0000-4000-8000-00000000000a",
+    type: "system",
+    subtype: "stop_hook_summary",
+    hookCount: 2,
+    hookInfos: [],
+    hookErrors: [],
+    hookAdditionalContext: [],
+    preventedContinuation: false,
+    stopReason: "",
+    hasOutput: false,
+    level: "suggestion",
+    uuid: "ad000000-0000-4000-8000-00000000000b",
+    timestamp: "2026-08-16T16:05:09.500Z",
+  };
+  const secondDuration = {
+    ...base,
+    parentUuid: "ad000000-0000-4000-8000-00000000000b",
+    type: "system",
+    subtype: "turn_duration",
+    durationMs: 9500,
+    messageCount: 2,
+    isMeta: false,
+    uuid: "ad000000-0000-4000-8000-00000000000c",
+    timestamp: "2026-08-16T16:05:09.600Z",
+  };
+  const line = (row: unknown): string => `${JSON.stringify(row)}\n`;
+  await appendFile(
+    tracePath,
+    `${line(secondPrompt)}${line(secondAnswer)}`,
+    "utf8",
+  );
+
+  const ingesting = handleClaudeIngestHook(
+    {
+      hook_event_name: "Stop",
+      session_id: TURN_DURATION_CLOSE,
+      cwd: projectRoot,
+      transcript_path: tracePath,
+    },
+    { pollIntervalMs: 10, trailingTimeoutMs: 2_000 },
+  );
+  await delay(60);
+  await appendFile(
+    tracePath,
+    `${line(secondSummary)}${line(secondDuration)}`,
+    "utf8",
+  );
+  const result = await ingesting;
+  assert.equal(result.ingested?.output.turns_appended, 1, "turn 2 published by the waiting Stop");
+  assert.equal(result.ingested?.input.trailing_turn_open, false);
+  const feed = await readJsonl<BarbaroTurnV1>(
+    join(projectRoot, ".barbaro", "feed", "claude", `${result.ingested!.session_id}.jsonl`),
+  );
+  assert.deepEqual(
+    feed.map((turn) => turn.response?.text),
+    ["PLAN APPROVED — the phases are sound.", "CHECKPOINT 1 APPROVED."],
+  );
+});
+
+test("Stop re-reads until its announced turn lands, then publishes it", async () => {
+  const { projectRoot, tracePath } = await stageScenario(
+    "stop-read-race",
+    STOP_READ_RACE,
+  );
+  const rows = (await readFile(tracePath, "utf8")).trimEnd().split("\n");
+  await writeFile(tracePath, `${rows.slice(0, 4).join("\n")}\n`, "utf8");
+  await joinClaudeSession(projectRoot, STOP_READ_RACE);
+
+  const prior = await runClaudeTrace({
+    tracePath,
+    projectRoot,
+    final: true,
+    sourceFinal: true,
+  });
+  assert.equal(prior.output.turns_appended, 1);
+  await appendFile(tracePath, `${rows[4]}\n`, "utf8");
+  const beforeSize = (await stat(tracePath)).size;
+  let clock = 0;
+  let finalRowsAppended = false;
+  const sleeps: number[] = [];
+  const announced = "CHECKPOINT 3 APPROVED — replayed after flush.";
+
+  const stopped = await handleClaudeIngestHook(
+    {
+      hook_event_name: "Stop",
+      session_id: STOP_READ_RACE,
+      cwd: projectRoot,
+      transcript_path: tracePath,
+      stop_hook_active: true,
+      last_assistant_message: `\n${announced}\n`,
+    },
+    {
+      now: () => clock,
+      pollIntervalMs: 50,
+      timeoutMs: 1_000,
+      trailingTimeoutMs: 1_000,
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+        clock += milliseconds;
+        if (clock >= 200 && !finalRowsAppended) {
+          finalRowsAppended = true;
+          await appendFile(tracePath, `${rows.slice(5).join("\n")}\n`, "utf8");
+        }
+      },
+    },
+  );
+
+  assert.deepEqual(sleeps, [50, 50, 50, 50]);
+  assert.equal(stopped.ignored, undefined);
+  assert.equal(stopped.ingested?.input.stop_turn_visible, true);
+  assert.equal(stopped.ingested?.output.turns_appended, 1);
+  const afterSize = (await stat(tracePath)).size;
+  const feed = await readJsonl<BarbaroTurnV1>(
+    join(
+      projectRoot,
+      ".barbaro",
+      "feed",
+      "claude",
+      `${stopped.ingested!.session_id}.jsonl`,
+    ),
+  );
+  assert.equal(
+    feed.at(-1)?.response?.text,
+    "CHECKPOINT 3 APPROVED\n — replayed after flush.",
+  );
+
+  const journal = JSON.parse(
+    await readFile(
+      join(
+        projectRoot,
+        ".barbaro",
+        "logs",
+        "ingest",
+        "claude",
+        `${stopped.ingested!.session_id}.json`,
+      ),
+      "utf8",
+    ),
+  ) as BarbaroIngestAttemptJournalV2;
+  const attempt = journal.attempts.at(-1);
+  assert.ok(attempt);
+  assert.equal(attempt.outcome, "ok");
+  assert.equal(attempt.trigger?.stop_hook_active, true);
+  assert.equal(attempt.turns_appended, 1);
+  assert.deepEqual(
+    attempt.observations.size_transitions.map((item) => item.observed_size),
+    [beforeSize, afterSize],
+  );
+  assert.ok(attempt.observations.size_transitions[0]!.repeat_count > 1);
+});
+
+test("Stop does not mistake a whitespace-collapsed prior verdict for its turn", async () => {
+  const { projectRoot, tracePath } = await stageScenario(
+    "stop-read-race",
+    STOP_READ_RACE,
+  );
+  const rows = (await readFile(tracePath, "utf8")).trimEnd().split("\n");
+  await writeFile(tracePath, `${rows.slice(0, 2).join("\n")}\n`, "utf8");
+  await joinClaudeSession(projectRoot, STOP_READ_RACE);
+  let clock = 0;
+  let appended = false;
+  const stopped = await handleClaudeIngestHook(
+    {
+      hook_event_name: "Stop",
+      session_id: STOP_READ_RACE,
+      cwd: projectRoot,
+      transcript_path: tracePath,
+      last_assistant_message:
+        "CHECKPOINT 3 APPROVED — replayed after flush.",
+    },
+    {
+      now: () => clock,
+      pollIntervalMs: 50,
+      timeoutMs: 1_000,
+      sleep: async (milliseconds) => {
+        clock += milliseconds;
+        if (!appended) {
+          await assert.rejects(
+            stat(
+              claudeRunnerStatePath(
+                tracePath,
+                join(projectRoot, ".barbaro"),
+              ),
+            ),
+            { code: "ENOENT" },
+          );
+          await assert.rejects(
+            stat(join(projectRoot, ".barbaro", "feed", "claude")),
+            { code: "ENOENT" },
+          );
+          appended = true;
+          await appendFile(tracePath, `${rows.slice(2).join("\n")}\n`, "utf8");
+        }
+      },
+    },
+  );
+
+  assert.equal(clock, 50, "the prior double-space response must not attest");
+  assert.equal(stopped.ingested?.input.stop_turn_visible, true);
+  assert.equal(stopped.ingested?.output.turns_appended, 2);
+  const feed = await readJsonl<BarbaroTurnV1>(
+    join(
+      projectRoot,
+      ".barbaro",
+      "feed",
+      "claude",
+      `${stopped.ingested!.session_id}.jsonl`,
+    ),
+  );
+  assert.deepEqual(
+    feed.map((turn) => turn.response?.text),
+    [
+      "CHECKPOINT 3  APPROVED — replayed after flush.",
+      "CHECKPOINT 3 APPROVED\n — replayed after flush.",
+    ],
+  );
+});
+
+test("Stop records an honest timeout without publishing or checkpointing", async () => {
+  const { projectRoot, tracePath } = await stageScenario(
+    "stop-read-race",
+    STOP_READ_RACE,
+  );
+  const rows = (await readFile(tracePath, "utf8")).trimEnd().split("\n");
+  await writeFile(tracePath, `${rows.slice(0, 4).join("\n")}\n`, "utf8");
+  await joinClaudeSession(projectRoot, STOP_READ_RACE);
+  const prior = await runClaudeTrace({
+    tracePath,
+    projectRoot,
+    final: true,
+    sourceFinal: true,
+  });
+  await appendFile(tracePath, `${rows.slice(4, 6).join("\n")}\n`, "utf8");
+  let clock = 0;
+  const sleeps: number[] = [];
+
+  const stopped = await handleClaudeIngestHook(
+    {
+      hook_event_name: "Stop",
+      session_id: STOP_READ_RACE,
+      cwd: projectRoot,
+      transcript_path: tracePath,
+      last_assistant_message:
+        "CHECKPOINT 3 APPROVED — replayed after flush.",
+    },
+    {
+      now: () => clock,
+      pollIntervalMs: 50,
+      timeoutMs: 100,
+      trailingTimeoutMs: 10_000,
+      sleep: async (milliseconds) => {
+        sleeps.push(milliseconds);
+        clock += milliseconds;
+      },
+    },
+  );
+
+  assert.deepEqual(sleeps, [50, 50], "identity uses the single main deadline");
+  assert.match(stopped.ignored ?? "", /Stop turn not visible/u);
+  assert.equal(stopped.ingested?.input.stop_turn_visible, false);
+  assert.equal(stopped.ingested?.output.turns_appended, 0);
+  assert.deepEqual(
+    stopped.ingested?.observation.checkpoint_after,
+    prior.observation.checkpoint_after,
+  );
+  const feed = await readJsonl<BarbaroTurnV1>(
+    join(
+      projectRoot,
+      ".barbaro",
+      "feed",
+      "claude",
+      `${prior.session_id}.jsonl`,
+    ),
+  );
+  assert.equal(feed.length, 1);
+
+  const journal = JSON.parse(
+    await readFile(
+      join(
+        projectRoot,
+        ".barbaro",
+        "logs",
+        "ingest",
+        "claude",
+        `${prior.session_id}.json`,
+      ),
+      "utf8",
+    ),
+  ) as BarbaroIngestAttemptJournalV2;
+  const attempt = journal.attempts.at(-1);
+  assert.ok(attempt);
+  assert.equal(attempt.outcome, "stop_turn_not_visible");
+  assert.equal(attempt.turns_appended, 0);
+  assert.equal(attempt.withheld_reason, "stop_turn_not_visible");
+  assert.equal(attempt.publish_blocker, "stop_turn_not_visible");
+  assert.equal(attempt.observations.size_transitions.length, 1);
+});
+
+test("Stop without a message uses structural visibility without polling", async () => {
+  for (const lastAssistantMessage of [undefined, "", " \n "] as const) {
+    const { projectRoot, tracePath } = await stageScenario(
+      "stop-read-race",
+      STOP_READ_RACE,
+    );
+    const rows = (await readFile(tracePath, "utf8")).trimEnd().split("\n");
+    await writeFile(tracePath, `${rows.slice(0, 2).join("\n")}\n`, "utf8");
+    await joinClaudeSession(projectRoot, STOP_READ_RACE);
+
+    const stopped = await handleClaudeIngestHook(
+      {
+        hook_event_name: "Stop",
+        session_id: STOP_READ_RACE,
+        cwd: projectRoot,
+        transcript_path: tracePath,
+        ...(lastAssistantMessage === undefined
+          ? {}
+          : { last_assistant_message: lastAssistantMessage }),
+      },
+      {
+        now: () => 0,
+        sleep: async () => assert.fail("structural visibility must not poll"),
+      },
+    );
+    assert.equal(stopped.ignored, undefined);
+    assert.equal(stopped.ingested?.input.stop_turn_identity_required, false);
+    assert.equal(stopped.ingested?.input.stop_turn_visible, true);
+    assert.equal(stopped.ingested?.output.turns_appended, 0);
+    const journal = JSON.parse(
+      await readFile(
+        join(
+          projectRoot,
+          ".barbaro",
+          "logs",
+          "ingest",
+          "claude",
+          `${stopped.ingested!.session_id}.json`,
+        ),
+        "utf8",
+      ),
+    ) as BarbaroIngestAttemptJournalV2;
+    assert.equal(journal.attempts.at(-1)?.outcome, "ok");
+    assert.equal(
+      journal.attempts.at(-1)?.trigger?.last_assistant_message,
+      undefined,
+    );
+  }
+});
+
+test("Stop without a message reports a structural miss without polling", async () => {
+  for (const lastAssistantMessage of [undefined, "", " \n "] as const) {
+    const { projectRoot, tracePath } = await stageScenario(
+      "stop-read-race",
+      STOP_READ_RACE,
+    );
+    const rows = (await readFile(tracePath, "utf8")).trimEnd().split("\n");
+    await writeFile(tracePath, `${rows.slice(0, 5).join("\n")}\n`, "utf8");
+    await joinClaudeSession(projectRoot, STOP_READ_RACE);
+    const stopped = await handleClaudeIngestHook(
+      {
+        hook_event_name: "Stop",
+        session_id: STOP_READ_RACE,
+        cwd: projectRoot,
+        transcript_path: tracePath,
+        ...(lastAssistantMessage === undefined
+          ? {}
+          : { last_assistant_message: lastAssistantMessage }),
+      },
+      {
+        now: () => 0,
+        sleep: async () => assert.fail("an unidentified Stop must not poll"),
+      },
+    );
+    assert.match(stopped.ignored ?? "", /Stop turn not visible/u);
+    assert.equal(stopped.ingested?.input.stop_turn_visible, false);
+    assert.equal(stopped.ingested?.output.turns_appended, 0);
+    await assert.rejects(
+      stat(
+        claudeRunnerStatePath(tracePath, join(projectRoot, ".barbaro")),
+      ),
+      { code: "ENOENT" },
+    );
+    const journal = JSON.parse(
+      await readFile(
+        join(
+          projectRoot,
+          ".barbaro",
+          "logs",
+          "ingest",
+          "claude",
+          `${stopped.ingested!.session_id}.json`,
+        ),
+        "utf8",
+      ),
+    ) as BarbaroIngestAttemptJournalV2;
+    assert.equal(journal.attempts.at(-1)?.outcome, "stop_turn_not_visible");
+  }
+});
+
+test("non-Stop events ignore last_assistant_message identity", async () => {
+  for (const event of [
+    "StopFailure",
+    "SubagentStop",
+    "SessionEnd",
+  ] as const) {
+    const { projectRoot, tracePath } = await stageScenario(
+      "stop-read-race",
+      STOP_READ_RACE,
+    );
+    const rows = (await readFile(tracePath, "utf8")).trimEnd().split("\n");
+    await writeFile(tracePath, `${rows.slice(0, 2).join("\n")}\n`, "utf8");
+    await joinClaudeSession(projectRoot, STOP_READ_RACE);
+    const result = await handleClaudeIngestHook(
+      {
+        hook_event_name: event,
+        session_id: STOP_READ_RACE,
+        cwd: projectRoot,
+        transcript_path: tracePath,
+        last_assistant_message: "a deliberately different response",
+      },
+      {
+        now: () => 0,
+        sleep: async () => assert.fail("non-Stop identity must not poll"),
+      },
+    );
+    assert.equal(result.ignored, undefined, event);
+    assert.equal(result.ingested?.input.stop_turn_visible, undefined, event);
+  }
 });

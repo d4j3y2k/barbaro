@@ -15,6 +15,7 @@ import {
 } from "../core/safe-store.js";
 import { compareUtf16CodeUnits } from "../core/stable-json.js";
 import {
+  DirectoryLockReleaseError,
   UnsafeDirectoryLockPathError,
   withDirectoryLock,
 } from "../output/directory-lock.js";
@@ -326,54 +327,97 @@ export class ActiveLeaseStore {
   ): Promise<ActiveLeaseUpdateResult> {
     const path = this.actorPath(actor);
     const ttlMs = positiveTtl(options.ttlMs ?? this.defaultTtlMs, "ttlMs");
+    if (
+      options.onWriteFailure !== undefined &&
+      typeof options.onWriteFailure !== "function"
+    ) {
+      throw new TypeError("onWriteFailure must be a function");
+    }
+    if (
+      options.onLockReleaseFailure !== undefined &&
+      typeof options.onLockReleaseFailure !== "function"
+    ) {
+      throw new TypeError("onLockReleaseFailure must be a function");
+    }
 
-    return enqueueActorWrite(path, () =>
-      withActiveActorLock(path, async () => {
-        const current = await this.readPath(path);
-        if (
-          current !== undefined &&
-          !sameActor(actor, actorFromLease(current))
-        ) {
-          throw new Error(
-            `Active lease at ${path} does not match its actor path`,
+    try {
+      return await enqueueActorWrite(path, () =>
+        withActiveActorLock(path, async () => {
+          const current = await this.readPath(path);
+          if (
+            current !== undefined &&
+            !sameActor(actor, actorFromLease(current))
+          ) {
+            throw new Error(
+              `Active lease at ${path} does not match its actor path`,
+            );
+          }
+          const decision = await decide(
+            current === undefined ? undefined : cloneLease(current),
           );
-        }
-        const decision = await decide(
-          current === undefined ? undefined : cloneLease(current),
-        );
-        if ("ignore" in decision) {
-          return { ignored: decision.ignore };
-        }
-        assertUpdateDoesNotSetGeneratedFields(decision.write);
-        const template = this.buildLease(decision.write, 1, 0, 1);
-        validateActiveLease(template);
-        const detached = cloneLease(template);
-        if (!sameActor(actor, actorFromLease(detached))) {
-          throw new Error("Active lease update must target the locked actor");
-        }
-        this.assertCurrentIdentity(current, detached);
-        const actualRevision = current?.revision ?? 0;
-        if (actualRevision >= Number.MAX_SAFE_INTEGER) {
-          throw new RangeError("Active lease revision is exhausted");
-        }
-        const now = timeMillis(options.now ?? this.clock(), "now");
-        const expires = now + ttlMs;
-        if (!Number.isFinite(expires)) {
-          throw new RangeError(
-            "Lease expiry is outside the supported date range",
-          );
-        }
-        const lease: ActiveLeaseV1 = {
-          ...detached,
-          revision: actualRevision + 1,
-          updated_at: new Date(now).toISOString(),
-          expires_at: new Date(expires).toISOString(),
-        };
-        validateActiveLease(lease);
-        await this.atomicReplace(path, lease);
-        return { lease };
-      }),
-    );
+          if ("ignore" in decision) {
+            return { ignored: decision.ignore };
+          }
+          try {
+            assertUpdateDoesNotSetGeneratedFields(decision.write);
+            const template = this.buildLease(decision.write, 1, 0, 1);
+            validateActiveLease(template);
+            const detached = cloneLease(template);
+            if (!sameActor(actor, actorFromLease(detached))) {
+              throw new Error(
+                "Active lease update must target the locked actor",
+              );
+            }
+            this.assertCurrentIdentity(current, detached);
+            const actualRevision = current?.revision ?? 0;
+            if (actualRevision >= Number.MAX_SAFE_INTEGER) {
+              throw new RangeError("Active lease revision is exhausted");
+            }
+            const now = timeMillis(options.now ?? this.clock(), "now");
+            const expires = now + ttlMs;
+            if (!Number.isFinite(expires)) {
+              throw new RangeError(
+                "Lease expiry is outside the supported date range",
+              );
+            }
+            const lease: ActiveLeaseV1 = {
+              ...detached,
+              revision: actualRevision + 1,
+              updated_at: new Date(now).toISOString(),
+              expires_at: new Date(expires).toISOString(),
+            };
+            validateActiveLease(lease);
+            await this.atomicReplace(path, lease);
+            return { lease };
+          } catch (error: unknown) {
+            if (options.onWriteFailure !== undefined) {
+              try {
+                await options.onWriteFailure(error);
+              } catch (rollbackError: unknown) {
+                throw new AggregateError(
+                  [error, rollbackError],
+                  "Active lease write and failure compensation both failed",
+                );
+              }
+            }
+            throw error;
+          }
+        }),
+      );
+    } catch (error: unknown) {
+      if (
+        error instanceof DirectoryLockReleaseError &&
+        error.resourcePath === path &&
+        options.onLockReleaseFailure !== undefined
+      ) {
+        const observer = options.onLockReleaseFailure;
+        void Promise.resolve()
+          .then(() => observer(error.releaseError))
+          .catch(() => undefined);
+        return error.result as ActiveLeaseUpdateResult;
+      }
+      throw error;
+    }
   }
 
   /**
@@ -706,6 +750,9 @@ export function idleLeaseUpdate(
     state: "idle",
     claims: [],
     unknown_write_scope: false,
+    ...(identity.workstream_id === undefined
+      ? {}
+      : { workstream_id: identity.workstream_id }),
     ...(identity.turn_id === undefined ? {} : { turn_id: identity.turn_id }),
     ...(identity.source_refs === undefined
       ? {}

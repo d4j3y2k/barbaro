@@ -20,9 +20,32 @@ import {
   UnsafeDirectoryLockPathError,
   UnsafeDerivedOutputPathError,
 } from "../../src/output/jsonl-store.js";
-import { withDirectoryLock } from "../../src/output/directory-lock.js";
+import {
+  DirectoryLockReleaseError,
+  withDirectoryLock,
+} from "../../src/output/directory-lock.js";
 
 const execFileAsync = promisify(execFile);
+
+test("lock cleanup failures preserve an already-committed result", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "barbaro-lock-release-"));
+  t.after(async () => {
+    await rm(directory, { recursive: true, force: true });
+  });
+  const resource = join(directory, "committed.json");
+  const error = await withDirectoryLock(resource, async () => {
+    await writeFile(resource, "committed\n", "utf8");
+    await writeFile(join(`${resource}.lock`, "prevent-release"), "held\n");
+    return { committed: true } as const;
+  }).then(
+    () => undefined,
+    (caught: unknown) => caught,
+  );
+
+  assert.ok(error instanceof DirectoryLockReleaseError);
+  assert.deepEqual(error.result, { committed: true });
+  assert.equal(await readFile(resource, "utf8"), "committed\n");
+});
 
 test("evidence dedupe uses the caller's evidence ID, not its parent turn ID", async (t) => {
   const directory = await mkdtemp(join(tmpdir(), "barbaro-evidence-dedupe-"));

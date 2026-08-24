@@ -71,6 +71,7 @@ export interface ReaderTurnSummary {
   readonly turn_id: string;
   readonly provider: string;
   readonly session_id: string;
+  readonly workstream_id?: string;
   readonly sequence: number;
   readonly agent_id: string;
   readonly parent_turn_id?: string;
@@ -89,6 +90,7 @@ export interface ReaderActiveSummary {
   readonly lease_id: string;
   readonly provider: string;
   readonly session_id: string;
+  readonly workstream_id?: string;
   readonly turn_id?: string;
   readonly agent_id: string;
   readonly state: "working" | "waiting" | "blocked";
@@ -123,6 +125,8 @@ export interface ReaderDiagnostics {
 
 export interface ReaderContextV1 {
   readonly schema: typeof READER_CONTEXT_SCHEMA;
+  /** Present when the projection was scoped to one workstream. */
+  readonly workstream_id?: string;
   readonly active: ReaderBoundedItems<ReaderActiveSummary>;
   readonly turns: ReaderBoundedItems<ReaderTurnSummary>;
   readonly diagnostics: ReaderDiagnostics;
@@ -155,6 +159,7 @@ export interface ReaderEvidenceV1 {
   readonly turn_id: string;
   readonly provider: string;
   readonly session_id: string;
+  readonly workstream_id?: string;
   readonly agent_id: string;
   readonly parent_turn_id?: string;
   readonly parent_link?: {
@@ -175,6 +180,11 @@ export interface ReaderProjectionOptions {
 
 export interface ReaderContextOptions extends ReaderProjectionOptions {
   readonly now?: Date | number | string;
+  /**
+   * Scope to one workstream: only leases and turns stamped with this id are
+   * projected. Unset reads the whole project, as before.
+   */
+  readonly workstreamId?: string;
   readonly turnsPerSession?: number;
   readonly maxFileBytes?: number;
   readonly maxRecordBytes?: number;

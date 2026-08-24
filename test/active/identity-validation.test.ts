@@ -119,3 +119,14 @@ test("consumer visibility excludes idle and leases at their expiry instant", () 
     false,
   );
 });
+
+test("a lease may carry its session's workstream, and only a well-formed one", () => {
+  validateActiveLease({
+    ...VALID_LEASE,
+    workstream_id: "ws_0123456789abcdef0123456789abcdef",
+  });
+  assert.throws(
+    () => validateActiveLease({ ...VALID_LEASE, workstream_id: "tui-design" }),
+    ActiveLeaseValidationError,
+  );
+});

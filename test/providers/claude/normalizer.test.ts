@@ -52,6 +52,125 @@ async function runFixture(
   return { turns, evidence, diagnostics: normalizer.diagnostics() };
 }
 
+function runCanonicalBashCommands(commands: readonly string[]): Run {
+  const sessionId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+  const normalizer = new ClaudeTurnNormalizer({
+    nativeSessionId: sessionId,
+    actorId: "main",
+    workspaceRoot: WORKSPACE,
+  });
+  const turns: BarbaroTurnV1[] = [];
+  const evidence: BarbaroEvidenceV1[] = [];
+  let sequence = 0;
+  let parentUuid: string | null = null;
+
+  const accept = (record: Readonly<Record<string, unknown>>): void => {
+    sequence += 1;
+    const uuid = `d0000000-0000-4000-8000-${sequence.toString(16).padStart(12, "0")}`;
+    const batch = normalizer.accept(
+      {
+        parentUuid,
+        isSidechain: false,
+        userType: "external",
+        cwd: WORKSPACE,
+        sessionId,
+        version: "2.1.233",
+        gitBranch: "main",
+        entrypoint: "cli",
+        timestamp: `2026-08-16T12:00:${sequence.toString().padStart(2, "0")}.000Z`,
+        ...record,
+        uuid,
+      },
+      {
+        traceId: `claude:${sessionId}`,
+        lineNumber: sequence,
+      },
+    );
+    turns.push(...batch.turns);
+    evidence.push(...batch.evidence);
+    parentUuid = uuid;
+  };
+
+  accept({
+    type: "user",
+    promptId: "p-digest-exclusion",
+    promptSource: "typed",
+    origin: { kind: "human" },
+    permissionMode: "default",
+    message: {
+      role: "user",
+      content: [{ type: "text", text: "Wait for a peer, then continue." }],
+    },
+  });
+
+  commands.forEach((command, index) => {
+    const toolUseId = `toolu_digest_${index}`;
+    accept({
+      type: "assistant",
+      requestId: `req_digest_${index}`,
+      effort: "medium",
+      message: {
+        id: `msg_digest_${index}`,
+        type: "message",
+        role: "assistant",
+        model: "claude-opus-5",
+        content: [
+          {
+            type: "tool_use",
+            id: toolUseId,
+            name: "Bash",
+            input: { command },
+          },
+        ],
+        stop_reason: "tool_use",
+        stop_sequence: null,
+      },
+    });
+    accept({
+      type: "user",
+      promptId: "p-digest-exclusion",
+      message: {
+        role: "user",
+        content: [
+          {
+            tool_use_id: toolUseId,
+            type: "tool_result",
+            content: "",
+            is_error: false,
+          },
+        ],
+      },
+      toolUseResult: {
+        stdout: "",
+        stderr: "",
+        interrupted: false,
+        isImage: false,
+        noOutputExpected: false,
+      },
+    });
+  });
+
+  accept({
+    type: "assistant",
+    requestId: "req_digest_done",
+    effort: "medium",
+    message: {
+      id: "msg_digest_done",
+      type: "message",
+      role: "assistant",
+      model: "claude-opus-5",
+      content: [{ type: "text", text: "Done." }],
+      stop_reason: "end_turn",
+      stop_sequence: null,
+    },
+  });
+
+  const tail = normalizer.finish();
+  turns.push(...tail.turns);
+  evidence.push(...tail.evidence);
+  return { turns, evidence, diagnostics: normalizer.diagnostics() };
+}
+
 
 /** Replay only the first `lines` records, as an ingest firing at Stop sees. */
 async function runPrefix(sessionId: string, lines: number): Promise<Run> {
@@ -237,6 +356,36 @@ test("a failing shell command is `failed` and carries its real exit code", async
   // succeeded: no "Exit code 0" is ever recorded.
   assert.equal(passing.outcome, "unknown");
   assert.ok(!("exit_code" in passing));
+});
+
+test("digest excludes only whole simple barbaro await and context Bash commands", () => {
+  const excluded = [
+    "barbaro await --provider claude --timeout-ms 120000",
+    '  barbaro context --provider claude --project-root "$PWD"  ',
+  ];
+  const preserved = [
+    "barbaro await; echo done",
+    "barbaro context && echo done",
+    "barbaro await || true",
+    "barbaro context | jq .",
+    "barbaro await > /tmp/result",
+    "barbaro context\npwd",
+    "barbaro await $(whoami)",
+    "node dist/src/cli.js await --timeout-ms 120000",
+  ];
+  const run = runCanonicalBashCommands([...excluded, ...preserved]);
+  const turn = run.turns[0];
+  assert.ok(turn);
+
+  assert.equal(run.diagnostics.barbaro_self_actions_dropped, excluded.length);
+  assert.deepEqual(
+    turn.actions.map((action) =>
+      action.kind === "command" || action.kind === "test"
+        ? action.command.text
+        : undefined,
+    ),
+    preserved,
+  );
 });
 
 test("exit-code parsing is anchored and cannot be fooled by prose", async () => {
@@ -610,4 +759,111 @@ test("an unrecognized promptSource is a barrier, never assumed human", async () 
   // But a source we do not recognize is not evidence of a person.
   assert.equal(build({ promptSource: "automation_v9" }).kind, "unknown-provenance");
   assert.equal(build({ promptSource: "sdk" }).kind, "sdk");
+});
+
+const TURN_DURATION_CLOSE = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const BACKGROUND_DURATION = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const QUEUED_BACKGROUND_COMPLETION = "fefefefe-fefe-4efe-8efe-fefefefefefe";
+
+/**
+ * Like runFixture, but keeps what the stream emitted apart from what
+ * finish() flushed, optionally stopping after `lines` rows.
+ */
+async function runStream(
+  scenario: string,
+  sessionId: string,
+  lines = Number.POSITIVE_INFINITY,
+): Promise<{
+  streamed: BarbaroTurnV1[];
+  tail: BarbaroTurnV1[];
+  evidence: BarbaroEvidenceV1[];
+}> {
+  const tracePath = join(
+    FIXTURES,
+    scenario,
+    "projects",
+    "-tmp-demo-workspace",
+    `${sessionId}.jsonl`,
+  );
+  const normalizer = new ClaudeTurnNormalizer({
+    nativeSessionId: sessionId,
+    actorId: "main",
+    workspaceRoot: WORKSPACE,
+  });
+  const streamed: BarbaroTurnV1[] = [];
+  const evidence: BarbaroEvidenceV1[] = [];
+  await readJsonlForward(tracePath, (event) => {
+    if (event.kind === "malformed") return;
+    if (event.lineNumber > lines) return;
+    const batch = normalizer.accept(event.value, {
+      traceId: `claude:${sessionId}`,
+      lineNumber: event.lineNumber,
+      byteStart: event.byteStart,
+      byteEndExclusive: event.byteEndExclusive,
+    });
+    streamed.push(...batch.turns);
+    evidence.push(...batch.evidence);
+  });
+  const flushed = normalizer.finish();
+  evidence.push(...flushed.evidence);
+  return { streamed, tail: [...flushed.turns], evidence };
+}
+
+test("a terminal turn closes at its turn_duration record, in the stream", async () => {
+  // Claude writes `turn_duration` after the stop hooks, after every row of the
+  // final response. With no background launch outstanding the turn cannot
+  // grow past it, so it closes there — not at the next prompt, and not only
+  // when finish() is told the source is final.
+  const run = await runStream("turn-duration-close", TURN_DURATION_CLOSE);
+  assert.equal(run.streamed.length, 1, "closed while streaming");
+  assert.equal(run.tail.length, 0, "nothing left for finish() to flush");
+  const turn = run.streamed[0]!;
+  assert.equal(turn.sequence, 1);
+  assert.equal(turn.outcome, "success");
+  assert.equal(turn.response?.text, "PLAN APPROVED — the phases are sound.");
+  assert.equal(turn.ended_at, "2026-08-16T16:00:10.000Z");
+});
+
+test("turn_duration does not close a turn whose background launch can still report back", async () => {
+  // The first end-turn is followed by turn_duration while `tail -f` is still
+  // outstanding: the turn must stay open, because the report continues it.
+  const beforeReport = await runStream("background-duration", BACKGROUND_DURATION, 6);
+  assert.equal(beforeReport.streamed.length, 0);
+  assert.equal(beforeReport.tail.length, 0, "finish() still refuses: the launch is live");
+
+  // Once the report lands and the continuation reaches its own turn_duration,
+  // the turn closes in the stream — and its digest keeps BOTH responses the
+  // human read, not only the last one.
+  const complete = await runStream("background-duration", BACKGROUND_DURATION);
+  assert.equal(complete.streamed.length, 1);
+  assert.equal(complete.tail.length, 0);
+  const turn = complete.streamed[0]!;
+  assert.equal(
+    turn.response?.text,
+    "Watcher armed.\n\nHandled the watcher output.",
+  );
+  assert.equal(turn.ended_at, "2026-08-16T16:02:10.000Z");
+  assert.equal(turn.actions.length, 2);
+  // The earlier response is still evidence too, as before.
+  assert.equal(
+    complete.evidence.filter((item) => item.kind === "response").length,
+    1,
+  );
+});
+
+test("an on-branch queued-command completion closes its background turn in-stream", async () => {
+  // Sanitized from the first 331 rows of reviewer transcript 6d347ab3-…:
+  // queue-operation duplicates, an off-branch completion attachment, and a
+  // Monitor attachment all precede the one authoritative on-branch record.
+  const run = await runStream(
+    "queued-background-completion",
+    QUEUED_BACKGROUND_COMPLETION,
+  );
+  assert.equal(run.streamed.length, 1, "turn_duration publishes this turn");
+  assert.equal(run.tail.length, 0, "no pending background launch remains");
+  const turn = run.streamed[0]!;
+  assert.equal(turn.request.text, "Review the checkpoint.");
+  assert.equal(turn.response?.text, "CHECKPOINT 1 APPROVED.");
+  assert.equal(turn.actions.length, 1);
+  assert.equal(turn.ended_at, "2026-08-23T22:41:22.792Z");
 });

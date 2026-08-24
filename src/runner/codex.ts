@@ -14,18 +14,30 @@ import {
   iterateJsonlForward,
   readJsonlForward,
   resolveJsonlCheckpoint,
+  type FileIdentity,
+  type JsonlCheckpoint,
 } from "../core/index.js";
 import { withDirectoryLock } from "../output/directory-lock.js";
 import { appendUniqueJsonl } from "../output/jsonl-store.js";
 import {
   CodexTurnNormalizer,
+  timestampFromUnixSeconds,
   type CodexNormalizerStateV1,
 } from "../providers/codex/normalizer.js";
+import { decodeCodexEnvelope } from "../providers/codex/envelope.js";
 import {
   readCodexRunnerState,
   writeCodexRunnerState,
   type CodexRunnerStateV1,
 } from "./state.js";
+import {
+  resolveSessionMemberships,
+  stampEvidenceByMembership,
+  stampTurnsByMembership,
+} from "./workstream-stamp.js";
+
+/** History modes the normalizer understands; anything else fails closed. */
+const SUPPORTED_HISTORY_MODES: ReadonlySet<string> = new Set(["legacy", "paginated"]);
 
 export interface RunCodexTraceOptions {
   readonly tracePath: string;
@@ -43,9 +55,22 @@ export interface CodexTraceIdentity {
   readonly workspaceRoot?: string;
 }
 
+export interface CodexTurnAttestation {
+  readonly identity?: CodexTraceIdentity;
+  readonly latestStartedTurnId?: string;
+  readonly malformedLines: number;
+  readonly partialFinalLine: boolean;
+}
+
 export interface RunCodexTraceResult {
   readonly trace_id: string;
   readonly checkpoint_status: string;
+  readonly observation: {
+    readonly observed_size: number;
+    readonly file_identity: FileIdentity;
+    readonly checkpoint_before?: JsonlCheckpoint;
+    readonly checkpoint_after: JsonlCheckpoint;
+  };
   readonly input: {
     readonly complete_lines: number;
     readonly parsed_lines: number;
@@ -129,10 +154,10 @@ export async function runCodexTrace(
       "Codex hook session_id does not match transcript session_meta.session_id",
     );
   }
-  if (canonicalSession.historyMode !== "legacy") {
+  if (!SUPPORTED_HISTORY_MODES.has(canonicalSession.historyMode)) {
     throw new Error(
       `Unsupported Codex history_mode: ${canonicalSession.historyMode}; ` +
-        "this runner currently supports legacy histories only",
+        "this runner supports legacy and paginated histories only",
     );
   }
   const nativeSessionId = canonicalSession.nativeSessionId;
@@ -198,27 +223,40 @@ export async function runCodexTrace(
     throw new Error("Codex output was produced before canonical session metadata");
   }
 
+  // Membership comes from the append-only consent log and each record is
+  // stamped from its own timestamp, so later moves cannot change reset
+  // re-ingestion of earlier history.
+  const memberships =
+    sessionId && normalizerState.session
+      ? await resolveSessionMemberships(
+          projectRoot,
+          "codex",
+          normalizerState.session.nativeSessionId,
+        )
+      : [];
+
   // Evidence is published first so a crash can leave only harmless orphan
   // evidence, never a visible digest with dangling evidence_refs.
   const evidenceResult = sessionId
     ? await appendUniqueJsonl(
         join(barbaroDirectory, "evidence", "codex", `${sessionId}.jsonl`),
-        evidenceRecords,
+        stampEvidenceByMembership(evidenceRecords, memberships),
         (item) => item.evidence_id,
       )
     : { appended: 0, skipped: 0, conflicted: 0, conflictedIds: [] };
   const turnResult = sessionId
     ? await appendUniqueJsonl(
         join(barbaroDirectory, "feed", "codex", `${sessionId}.jsonl`),
-        feedTurns,
+        stampTurnsByMembership(feedTurns, memberships),
         (turn) => turn.turn_id,
       )
     : { appended: 0, skipped: 0, conflictedIds: [], conflicted: 0 };
 
+  const nextCheckpoint = createJsonlCheckpoint(summary);
   const runnerState: CodexRunnerStateV1 = {
     schema: "barbaro.codex-runner-state.v1",
     trace_id: traceId,
-    checkpoint: createJsonlCheckpoint(summary),
+    checkpoint: nextCheckpoint,
     normalizer: normalizerState,
   };
   await writeCodexRunnerState(statePath, runnerState);
@@ -226,6 +264,14 @@ export async function runCodexTrace(
     return {
       trace_id: traceId,
       checkpoint_status: resolution.status,
+      observation: {
+        observed_size: summary.observedSize,
+        file_identity: summary.fileIdentity,
+        ...(saved?.checkpoint === undefined
+          ? {}
+          : { checkpoint_before: saved.checkpoint }),
+        checkpoint_after: nextCheckpoint,
+      },
       input: {
         complete_lines: summary.completeLines,
         parsed_lines: summary.parsedLines,
@@ -349,24 +395,100 @@ export async function readCodexTraceIdentity(
     if (event.byteEndExclusive > 256 * 1024 || event.lineNumber > 64) {
       return undefined;
     }
-    if (event.kind !== "record" || !isObject(event.value)) continue;
-    if (event.value.type !== "session_meta" || !isObject(event.value.payload)) continue;
-    const sessionId = nonEmptyString(event.value.payload.session_id)
-      ?? nonEmptyString(event.value.payload.id);
-    if (sessionId) {
-      return {
-        nativeSessionId: sessionId,
-        nativeThreadId:
-          nonEmptyString(event.value.payload.id) ?? sessionId,
-        historyMode:
-          nonEmptyString(event.value.payload.history_mode) ?? "legacy",
-        ...(nonEmptyString(event.value.payload.cwd) === undefined
-          ? {}
-          : { workspaceRoot: nonEmptyString(event.value.payload.cwd)! }),
-      };
-    }
+    if (event.kind !== "record") continue;
+    const identity = codexTraceIdentityFromRecord(event.value);
+    if (identity !== undefined) return identity;
   }
   return undefined;
+}
+
+/**
+ * Read the native start time for one Codex turn using the same timestamp
+ * precedence as the normalizer. Codex persists `task_started` before running
+ * UserPromptSubmit hooks, so a join/move hook can make its append-only
+ * membership effective at the start of the prompt turn without changing the
+ * runner's stamp-by-`started_at` rule.
+ */
+export async function readCodexTurnStartedAt(
+  tracePath: string,
+  nativeTurnId: string,
+): Promise<string | undefined> {
+  for await (const event of iterateJsonlForward(tracePath)) {
+    if (event.kind !== "record") continue;
+    const decoded = decodeCodexEnvelope(event.value);
+    if (!decoded.ok || decoded.envelope.type !== "event_msg") continue;
+    const payload = decoded.envelope.payload;
+    if (!isObject(payload)) continue;
+    const eventType = nonEmptyString(payload.type);
+    if (eventType !== "task_started" && eventType !== "turn_started") continue;
+    if (nonEmptyString(payload.turn_id) !== nativeTurnId) continue;
+    return (
+      timestampFromUnixSeconds(payload.started_at) ?? decoded.envelope.timestamp
+    );
+  }
+  return undefined;
+}
+
+/**
+ * Read identity, the latest started turn, and tail integrity from one handle
+ * pinned to its opening size. Stop hooks use this attestation when Codex
+ * starts an internal goal continuation without firing UserPromptSubmit.
+ */
+export async function readCodexTurnAttestation(
+  tracePath: string,
+): Promise<CodexTurnAttestation> {
+  let identity: CodexTraceIdentity | undefined;
+  let latestStartedTurnId: string | undefined;
+  const summary = await readJsonlForward(
+    tracePath,
+    (event) => {
+      if (event.kind !== "record") return;
+      if (
+        identity === undefined &&
+        event.byteEndExclusive <= 256 * 1024 &&
+        event.lineNumber <= 64
+      ) {
+        identity = codexTraceIdentityFromRecord(event.value);
+      }
+      const decoded = decodeCodexEnvelope(event.value);
+      if (!decoded.ok || decoded.envelope.type !== "event_msg") return;
+      const payload = decoded.envelope.payload;
+      if (!isObject(payload)) return;
+      const eventType = nonEmptyString(payload.type);
+      if (eventType !== "task_started" && eventType !== "turn_started") return;
+      const turnId = nonEmptyString(payload.turn_id);
+      if (turnId !== undefined) latestStartedTurnId = turnId;
+    },
+    { pinEnd: true },
+  );
+  return {
+    ...(identity === undefined ? {} : { identity }),
+    ...(latestStartedTurnId === undefined ? {} : { latestStartedTurnId }),
+    malformedLines: summary.malformedLines,
+    partialFinalLine: summary.partialFinalLine !== undefined,
+  };
+}
+
+function codexTraceIdentityFromRecord(
+  value: unknown,
+): CodexTraceIdentity | undefined {
+  if (
+    !isObject(value) ||
+    value.type !== "session_meta" ||
+    !isObject(value.payload)
+  ) {
+    return undefined;
+  }
+  const sessionId = nonEmptyString(value.payload.session_id)
+    ?? nonEmptyString(value.payload.id);
+  if (sessionId === undefined) return undefined;
+  const workspaceRoot = nonEmptyString(value.payload.cwd);
+  return {
+    nativeSessionId: sessionId,
+    nativeThreadId: nonEmptyString(value.payload.id) ?? sessionId,
+    historyMode: nonEmptyString(value.payload.history_mode) ?? "legacy",
+    ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
+  };
 }
 
 function nonEmptyString(value: unknown): string | undefined {

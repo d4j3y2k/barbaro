@@ -340,3 +340,68 @@ test("canonical readers reject symlinks, hard links, and oversized files", async
     }
   });
 });
+
+test("a scoped context keeps only records stamped with the workstream", async () => {
+  const { project, feedPath } = await createFeedProject();
+  const NOW = "2026-08-16T20:05:00.000Z";
+  try {
+    const ws = "ws_0123456789abcdef0123456789abcdef";
+    const other = "ws_fedcba9876543210fedcba9876543210";
+    await writeFile(
+      feedPath,
+      [
+        stableJsonLine({ ...turn(1, "2026-08-16T20:01:00.000Z"), workstream_id: ws }),
+        stableJsonLine({ ...turn(2, "2026-08-16T20:02:00.000Z"), workstream_id: other }),
+        stableJsonLine(turn(3, "2026-08-16T20:03:00.000Z")),
+      ].join(""),
+      "utf8",
+    );
+    const store = new ActiveLeaseStore(join(project, ".barbaro", "active"));
+    await store.write(
+      {
+        lease_id: `lease_${"1".repeat(32)}`,
+        provider: "codex",
+        session_id: SESSION_ID,
+        workstream_id: ws,
+        agent_id: "root",
+        state: "working",
+        claims: [],
+        unknown_write_scope: false,
+      },
+      { now: NOW },
+    );
+    await store.write(
+      {
+        lease_id: `lease_${"2".repeat(32)}`,
+        provider: "codex",
+        session_id: SESSION_ID,
+        agent_id: "helper",
+        state: "working",
+        claims: [],
+        unknown_write_scope: false,
+      },
+      { now: NOW },
+    );
+
+    const scoped = await readProjectContext(project, {
+      byteBudget: 65_536,
+      now: NOW,
+      workstreamId: ws,
+    });
+    assert.equal(scoped.value.workstream_id, ws);
+    assert.deepEqual(scoped.value.turns.items.map((item) => item.sequence), [1]);
+    assert.deepEqual(scoped.value.active.items.map((item) => item.agent_id), ["root"]);
+
+    const wide = await readProjectContext(project, { byteBudget: 65_536, now: NOW });
+    assert.equal(wide.value.workstream_id, undefined);
+    assert.deepEqual(wide.value.turns.items.map((item) => item.sequence), [3, 2, 1]);
+    assert.equal(wide.value.active.items.length, 2);
+
+    await assert.rejects(
+      readProjectContext(project, { byteBudget: 65_536, workstreamId: "nope" }),
+      TypeError,
+    );
+  } finally {
+    await rm(project, { recursive: true, force: true });
+  }
+});

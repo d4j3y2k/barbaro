@@ -4,6 +4,7 @@ import {
   createSessionId,
   createTurnId,
 } from "../../core/id.js";
+import { isDigestExcludedBarbaroCommand } from "../../core/barbaro-command.js";
 import { compareUtf16CodeUnits } from "../../core/stable-json.js";
 import type {
   BarbaroAction,
@@ -50,6 +51,7 @@ const KNOWN_EVENT_TYPES = new Set([
   "agent_reasoning",
   "context_compacted",
   "image_generation_end",
+  "item_completed",
   "mcp_tool_call_end",
   "patch_apply_end",
   "sub_agent_activity",
@@ -181,6 +183,13 @@ interface PendingCall {
   readonly input?: string;
   readonly argumentsJson?: string;
   readonly source: CodexSourceLocation;
+  /**
+   * Paginated rollouts project an exec call's work as `item_completed`
+   * records that land while the call is still open. Counting them here lets
+   * the call's own output stand down instead of becoming a second action.
+   * Serialized with the call; absent means none.
+   */
+  projectedItems?: number;
 }
 
 interface MutableSubagent {
@@ -517,6 +526,22 @@ export class CodexTurnNormalizer {
         this.#considerResponse(builder, message, phase);
         return emptyBatch();
       }
+      case "item_completed": {
+        // The canonical paginated projection of one completed turn item.
+        // Commands and file changes are taken from it because a paginated
+        // rollout writes no `patch_apply_end` and its unified exec inputs are
+        // scripts the legacy command parser cannot read. UserMessage,
+        // AgentMessage, Reasoning, SubAgentActivity and the rest project
+        // response items already normalized, or carry no action.
+        const item = isObject(payload.item) ? payload.item : undefined;
+        const itemType = item ? stringField(item, "type") : undefined;
+        if (item && itemType === "CommandExecution") {
+          this.#acceptCommandExecutionItem(builder, payload, item, source);
+        } else if (item && itemType === "FileChange") {
+          this.#acceptFileChangeItem(builder, payload, item, source);
+        }
+        return emptyBatch();
+      }
       case "patch_apply_end":
         this.#acceptPatchApply(builder, payload, source);
         return emptyBatch();
@@ -773,7 +798,12 @@ export class CodexTurnNormalizer {
         : [];
     const output = inspectToolOutput(outputPayload?.output);
     for (const command of commands) {
-      if (isGeneratedBarbaroReadCommand(command.command)) continue;
+      if (
+        isGeneratedBarbaroReadCommand(command.command) ||
+        isDigestExcludedBarbaroCommand(command.command)
+      ) {
+        continue;
+      }
       const sourceRefs = [
         sourceRef(pending.source, compactIds(pending.nativeId, pending.callId)),
         ...(outputSource
@@ -812,6 +842,10 @@ export class CodexTurnNormalizer {
     }
 
     if (commands.length > 0) return;
+    // A paginated rollout already projected this call's work as
+    // item_completed records, turned into actions as they landed; the call's
+    // own output is not a second action.
+    if ((pending.projectedItems ?? 0) > 0) return;
     if (pending.namespace === "collaboration") return;
     if (isGeneratedBarbaroReadTool(pending)) return;
     if (
@@ -845,6 +879,121 @@ export class CodexTurnNormalizer {
           : []),
       ],
     });
+  }
+
+  /**
+   * Paginated rollouts (`history_mode: "paginated"`, Codex Desktop 0.149+)
+   * write the canonical projection of each completed turn item as
+   * `event_msg.item_completed`. A `CommandExecution` item carries the command
+   * as an argv array with its exit code and status, which is everything the
+   * command action needs and more than the unified exec input (a script) can
+   * give. Only what the record states is used: a completed item is judged by
+   * its exit code, an item the provider marks failed is failed, anything else
+   * stays unknown rather than guessed.
+   */
+  #acceptCommandExecutionItem(
+    builder: TurnBuilder,
+    eventPayload: Record<string, unknown>,
+    item: Record<string, unknown>,
+    source: CodexSourceLocation,
+  ): void {
+    this.#markExecProjected(builder);
+    const commandText = renderCommandArray(item.command);
+    if (
+      !commandText ||
+      isGeneratedBarbaroReadCommand(commandText) ||
+      isDigestExcludedBarbaroCommand(commandText)
+    ) {
+      return;
+    }
+    const itemId = stringField(item, "id");
+    const status = stringField(item, "status");
+    const exitCode =
+      typeof item.exit_code === "number" && Number.isSafeInteger(item.exit_code)
+        ? item.exit_code
+        : undefined;
+    const outcome: BarbaroActionOutcome =
+      status === "completed"
+        ? exitCode === undefined
+          ? "unknown"
+          : exitCode === 0
+            ? "success"
+            : "failed"
+        : status === "failed"
+          ? "failed"
+          : "unknown";
+    // aggregated_output is the interleaved stream the user saw; it already
+    // contains stderr, so it is used whole rather than stitched from parts.
+    const failureText =
+      stringField(item, "aggregated_output") ??
+      [stringField(item, "stderr"), stringField(item, "stdout")]
+        .filter((entry): entry is string => Boolean(entry))
+        .join("\n");
+    const common = {
+      action_id: createActionId(
+        builder.barbaroTurnId,
+        sourceIdentity(source, itemId),
+        0,
+      ),
+      outcome,
+      command: verbatimContent(commandText),
+      ...(exitCode === undefined ? {} : { exit_code: exitCode }),
+      ...(outcome === "failed" && failureText
+        ? { failure_excerpt: redactedExcerptContent(failureText, 4096) }
+        : {}),
+      source_refs: [
+        sourceRef(source, compactIds(itemId, stringField(eventPayload, "turn_id"))),
+      ],
+    };
+    builder.actions.push(
+      isTestCommand(commandText)
+        ? { ...common, kind: "test" }
+        : { ...common, kind: "command" },
+    );
+  }
+
+  /**
+   * A `FileChange` item carries the same `changes` map a legacy
+   * `patch_apply_end` event did — path → add/update/delete with content or a
+   * unified diff — so it flows through the same file-change materialization.
+   */
+  #acceptFileChangeItem(
+    builder: TurnBuilder,
+    eventPayload: Record<string, unknown>,
+    item: Record<string, unknown>,
+    source: CodexSourceLocation,
+  ): void {
+    this.#markExecProjected(builder);
+    const itemId = stringField(item, "id");
+    const turnId = stringField(eventPayload, "turn_id");
+    this.#acceptPatchApply(
+      builder,
+      {
+        success: stringField(item, "status") === "completed",
+        changes: item.changes,
+        ...(itemId ? { call_id: itemId } : {}),
+        ...(turnId ? { turn_id: turnId } : {}),
+        ...(item.stderr === undefined ? {} : { stderr: item.stderr }),
+        ...(item.stdout === undefined ? {} : { stdout: item.stdout }),
+      },
+      source,
+    );
+  }
+
+  /**
+   * Attribute a projected item to the exec call that is open when it lands —
+   * the most recently issued, still-unanswered `exec` custom tool call. Exec
+   * calls run to completion before their output is written, so the open one
+   * is the one doing the work.
+   */
+  #markExecProjected(builder: TurnBuilder): void {
+    let latest: PendingCall | undefined;
+    for (const call of builder.pendingCalls.values()) {
+      if (call.rootType === "custom_tool_call" && call.name === "exec") {
+        latest = call;
+      }
+    }
+    if (latest) latest.projectedItems = (latest.projectedItems ?? 0) + 1;
   }
 
   #acceptPatchApply(
@@ -1257,6 +1406,26 @@ function compactIds(...values: readonly (string | undefined)[]): string[] {
   );
 }
 
+/**
+ * The command a reader recognizes from a `CommandExecution` item's argv. A
+ * `<shell> -lc <script>` triple is the script; anything else is the argv
+ * joined by spaces; a string is itself.
+ */
+function renderCommandArray(value: unknown): string | undefined {
+  if (typeof value === "string") return value.length > 0 ? value : undefined;
+  if (
+    !Array.isArray(value) ||
+    !value.every((part): part is string => typeof part === "string")
+  ) {
+    return undefined;
+  }
+  if (value.length === 3 && /^-l?c$/.test(value[1]!)) {
+    return value[2]!.length > 0 ? value[2]! : undefined;
+  }
+  const joined = value.join(" ");
+  return joined.length > 0 ? joined : undefined;
+}
+
 function callSourceIdentity(call: PendingCall): string {
   if (call.nativeId) return `response_item:id:${call.nativeId}`;
   if (call.callId) return `call_id:${call.callId}`;
@@ -1350,7 +1519,12 @@ function abortedOutcome(reason: string, builder: TurnBuilder): BarbaroTurnOutcom
   return /user|cancel|interrupt/i.test(reason) ? "cancelled" : "unknown";
 }
 
-function timestampFromUnixSeconds(value: unknown): string | undefined {
+/**
+ * Decode Codex's canonical numeric event time. Hook enrollment uses the same
+ * helper so a membership move and the turn it belongs to share one exact
+ * `started_at` boundary.
+ */
+export function timestampFromUnixSeconds(value: unknown): string | undefined {
   if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
   const millis = value * 1000;
   const date = new Date(millis);

@@ -22,6 +22,10 @@ import {
   type ActiveLeaseUpdate,
 } from "../../src/active/index.js";
 import { UnsafeStorePathError } from "../../src/core/safe-store.js";
+import {
+  DirectoryLockReleaseError,
+  withDirectoryLock,
+} from "../../src/output/directory-lock.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -398,6 +402,104 @@ test("update carries the decision's view of previous forward atomically", async 
     assert.equal(settled.lease?.revision, 2);
     assert.equal(settled.lease?.state, "waiting");
     assert.deepEqual(settled.lease?.intent, intent);
+  });
+});
+
+test("update returns a committed lease when only lock cleanup fails", async () => {
+  await withActiveDirectory(async (directory) => {
+    const store = new ActiveLeaseStore(directory, { defaultTtlMs: 60_000 });
+    let observed: unknown;
+    const settled = await store.update(
+      IDENTITY,
+      async () => {
+        await writeFile(
+          join(`${store.actorPath(IDENTITY)}.lock`, "prevent-release"),
+          "held\n",
+        );
+        return { write: workingUpdate() };
+      },
+      {
+        now: "2026-08-16T20:00:00.000Z",
+        onLockReleaseFailure: (error) => {
+          observed = error;
+          throw new Error("observer failure must not replace a commit");
+        },
+      },
+    );
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.ok(observed instanceof Error);
+    assert.equal(settled.lease?.revision, 1);
+    assert.deepEqual(await store.readSnapshot(IDENTITY), settled.lease);
+  });
+});
+
+test("a committed lease does not wait for its release observer", async () => {
+  await withActiveDirectory(async (directory) => {
+    const store = new ActiveLeaseStore(directory, { defaultTtlMs: 60_000 });
+    let observerStarted = false;
+    const settled = await Promise.race([
+      store.update(
+        IDENTITY,
+        async () => {
+          await writeFile(
+            join(`${store.actorPath(IDENTITY)}.lock`, "prevent-release"),
+            "held\n",
+          );
+          return { write: workingUpdate() };
+        },
+        {
+          onLockReleaseFailure: () => {
+            observerStarted = true;
+            return new Promise<void>(() => undefined);
+          },
+        },
+      ),
+      new Promise<never>((_resolve, reject) => {
+        setTimeout(
+          () => reject(new Error("committed update waited for its observer")),
+          250,
+        );
+      }),
+    ]);
+
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(observerStarted, true);
+    assert.equal(settled.lease?.revision, 1);
+  });
+});
+
+test("a nested release error cannot impersonate the active actor lock", async () => {
+  await withActiveDirectory(async (directory) => {
+    const store = new ActiveLeaseStore(directory, { defaultTtlMs: 60_000 });
+    const nestedPath = join(directory, "nested.json");
+    let observerCalled = false;
+    await assert.rejects(
+      store.update(
+        IDENTITY,
+        async () => {
+          await withDirectoryLock(nestedPath, async () => {
+            await writeFile(nestedPath, "nested commit\n", "utf8");
+            await writeFile(
+              join(`${nestedPath}.lock`, "prevent-release"),
+              "held\n",
+            );
+            return "nested result";
+          });
+          return { write: workingUpdate() };
+        },
+        {
+          onLockReleaseFailure: () => {
+            observerCalled = true;
+          },
+        },
+      ),
+      (error: unknown) =>
+        error instanceof DirectoryLockReleaseError &&
+        error.resourcePath === nestedPath,
+    );
+    assert.equal(observerCalled, false);
+    assert.equal(await store.readSnapshot(IDENTITY), undefined);
   });
 });
 

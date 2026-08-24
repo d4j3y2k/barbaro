@@ -75,6 +75,27 @@ export class DirectoryLockTimeoutError extends Error {
 }
 
 /**
+ * The protected operation completed, but best-effort lock cleanup failed.
+ * `result` is the already-committed outcome and must not be confused with an
+ * operation failure by callers that can safely surface committed work.
+ */
+export class DirectoryLockReleaseError<T = unknown> extends Error {
+  readonly resourcePath: string;
+  readonly result: T;
+  readonly releaseError: unknown;
+
+  constructor(resourcePath: string, result: T, releaseError: unknown) {
+    super(`Failed to release filesystem lock after commit: ${resourcePath}`, {
+      cause: releaseError,
+    });
+    this.name = "DirectoryLockReleaseError";
+    this.resourcePath = resourcePath;
+    this.result = result;
+    this.releaseError = releaseError;
+  }
+}
+
+/**
  * Serialize an asynchronous transaction across processes that share a
  * filesystem. The lock is the atomic directory `${resourcePath}.lock`.
  * Same-host locks whose owning process is gone are recovered immediately;
@@ -103,21 +124,23 @@ export async function withDirectoryLock<T>(
   } catch (error: unknown) {
     throw normalizeLockPathError(error);
   }
-  let operationError: unknown;
+  let result: T;
   try {
-    return await operation();
+    result = await operation();
   } catch (error: unknown) {
-    operationError = error;
+    await releaseDirectoryLock(lock).catch(() => undefined);
     throw error;
-  } finally {
-    try {
-      await releaseDirectoryLock(lock);
-    } catch (releaseError: unknown) {
-      if (operationError === undefined) {
-        throw normalizeLockPathError(releaseError);
-      }
-    }
   }
+  try {
+    await releaseDirectoryLock(lock);
+  } catch (releaseError: unknown) {
+    throw new DirectoryLockReleaseError(
+      resourcePath,
+      result,
+      normalizeLockPathError(releaseError),
+    );
+  }
+  return result;
 }
 
 function resolveOptions(

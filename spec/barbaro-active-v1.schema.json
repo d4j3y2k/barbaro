@@ -21,6 +21,9 @@
     "lease_id": { "type": "string", "pattern": "^lease_[0-9a-f]{32}$" },
     "provider": { "$ref": "barbaro-common-v1.schema.json#/$defs/provider" },
     "session_id": { "type": "string", "pattern": "^ses_[0-9a-f]{32}$" },
+    "workstream_id": {
+      "$ref": "barbaro-common-v1.schema.json#/$defs/workstreamId"
+    },
     "turn_id": { "type": "string", "pattern": "^turn_[0-9a-f]{32}$" },
     "agent_id": { "type": "string", "minLength": 1 },
     "state": { "enum": ["working", "waiting", "blocked", "idle"] },

@@ -18,6 +18,7 @@ import {
   WatchEngine,
   isWatchWakeRequest,
 } from "../../src/watch/index.js";
+import { WorkstreamStore } from "../../src/workstreams/index.js";
 
 const SES_A = `ses_${"a".repeat(32)}`;
 const SES_B = `ses_${"b".repeat(32)}`;
@@ -149,7 +150,7 @@ test("priming swallows existing history and reports honest counts", async () => 
       provider: "claude",
       nativeSessionId: "enrolled-one",
       event: "UserPromptSubmit",
-      prompt: "/barbaro",
+      prompt: "/barbaro new lane",
     });
     await recordIncident({
       projectRoot: project,
@@ -365,7 +366,7 @@ test("newly enrolled sessions arrive as join events, once", async () => {
       provider: "claude",
       nativeSessionId: "late-joiner",
       event: "UserPromptSubmit",
-      prompt: "/barbaro",
+      prompt: "/barbaro new lane",
     });
     const events = await engine.poll();
     assert.equal(events.length, 1);
@@ -375,6 +376,57 @@ test("newly enrolled sessions arrive as join events, once", async () => {
     assert.equal(event.session_id, createSessionId("claude", "late-joiner"));
     assert.equal(event.initiated_by, "user_prompt");
     assert.deepEqual(await engine.poll(), []);
+  });
+});
+
+test("a forward move is join news only in the target workstream", async () => {
+  await withProject(async (project) => {
+    const workstreams = new WorkstreamStore(project);
+    const alpha = await workstreams.create({
+      name: "alpha",
+      createdBy: { kind: "cli" },
+    });
+    const beta = await workstreams.create({
+      name: "beta",
+      createdBy: { kind: "cli" },
+    });
+    await admitHookSession({
+      projectRoot: project,
+      provider: "claude",
+      nativeSessionId: "mover",
+      event: "UserPromptSubmit",
+      prompt: "/barbaro join alpha",
+      now: new Date("2026-08-22T12:00:00.000Z"),
+    });
+    const source = new WatchEngine({
+      projectRoot: project,
+      workstreamId: alpha.workstream_id,
+    });
+    const target = new WatchEngine({
+      projectRoot: project,
+      workstreamId: beta.workstream_id,
+    });
+    await source.prime();
+    await target.prime();
+
+    await admitHookSession({
+      projectRoot: project,
+      provider: "claude",
+      nativeSessionId: "mover",
+      event: "UserPromptSubmit",
+      prompt: "/barbaro join beta",
+      now: new Date("2026-08-22T12:05:00.000Z"),
+    });
+    assert.deepEqual(await source.poll(), []);
+    const events = await target.poll();
+    assert.equal(events.length, 1);
+    const event = events[0]!;
+    assert.equal(event.kind, "join");
+    assert.ok(event.kind === "join");
+    assert.equal(event.session_id, createSessionId("claude", "mover"));
+    assert.equal(event.workstream_id, beta.workstream_id);
+    assert.equal(event.joined_at, "2026-08-22T12:05:00.000Z");
+    assert.deepEqual(await target.poll(), []);
   });
 });
 
@@ -532,5 +584,95 @@ test("a rebuilt feed file re-baselines instead of replaying or crashing", async 
     const event = events[0]!;
     assert.ok(event.kind === "turn");
     assert.equal(event.turn.value.sequence, 3);
+  });
+});
+
+test("a scoped watcher hears its own workstream only; unscoped sessions are outside every scope", async () => {
+  await withProject(async (project) => {
+    await admitHookSession({
+      projectRoot: project,
+      provider: "claude",
+      nativeSessionId: "alpha-one",
+      event: "UserPromptSubmit",
+      prompt: "/barbaro new alpha",
+    });
+    await admitHookSession({
+      projectRoot: project,
+      provider: "claude",
+      nativeSessionId: "beta-one",
+      event: "UserPromptSubmit",
+      prompt: "/barbaro new beta",
+    });
+    const { SessionParticipationStore } = await import(
+      "../../src/hooks/participation.js"
+    );
+    const store = new SessionParticipationStore(project);
+    const alpha = (await store.read("claude", "alpha-one"))?.workstream_id;
+    const beta = (await store.read("claude", "beta-one"))?.workstream_id;
+    assert.ok(alpha && beta && alpha !== beta);
+    const alphaSession = createSessionId("claude", "alpha-one");
+    const betaSession = createSessionId("claude", "beta-one");
+
+    const engine = new WatchEngine({ projectRoot: project, workstreamId: alpha });
+    const armed = await engine.prime();
+    assert.equal(armed.workstream_id, alpha);
+    assert.equal(armed.enrolled_sessions, 1);
+
+    await appendTurn(project, {
+      ...turnRecord({ sessionId: alphaSession, sequence: 1, request: "alpha work" }),
+      workstream_id: alpha,
+    });
+    await appendTurn(project, {
+      ...turnRecord({ sessionId: betaSession, sequence: 1, request: "beta work" }),
+      workstream_id: beta,
+    });
+    await appendTurn(
+      project,
+      turnRecord({ sessionId: SES_C, sequence: 1, request: "legacy work" }),
+    );
+    await admitHookSession({
+      projectRoot: project,
+      provider: "codex",
+      nativeSessionId: "alpha-two",
+      event: "UserPromptSubmit",
+      prompt: "$barbaro join alpha",
+    });
+    await admitHookSession({
+      projectRoot: project,
+      provider: "codex",
+      nativeSessionId: "beta-two",
+      event: "UserPromptSubmit",
+      prompt: "$barbaro join beta",
+    });
+
+    const events = await engine.poll();
+    const labels = events
+      .map(
+        (event) =>
+          `${event.kind}:${"workstream_id" in event ? event.workstream_id ?? "" : ""}`,
+      )
+      .sort();
+    assert.deepEqual(labels, [`join:${alpha}`, `turn:${alpha}`].sort());
+    const turn = events.find((event) => event.kind === "turn");
+    assert.ok(turn !== undefined && turn.kind === "turn");
+    assert.equal(turn.session_id, alphaSession);
+
+    // An unscoped watcher still hears everything, stamped where known.
+    const wide = new WatchEngine({ projectRoot: project });
+    await wide.prime();
+    await appendTurn(project, {
+      ...turnRecord({ sessionId: betaSession, sequence: 2, request: "more beta" }),
+      workstream_id: beta,
+    });
+    await appendTurn(
+      project,
+      turnRecord({ sessionId: SES_C, sequence: 2, request: "more legacy" }),
+    );
+    const wideLabels = (await wide.poll())
+      .map((event) =>
+        event.kind === "turn" ? (event.workstream_id ?? "unscoped") : event.kind,
+      )
+      .sort();
+    assert.deepEqual(wideLabels, [beta, "unscoped"].sort());
   });
 });

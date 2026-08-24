@@ -62,7 +62,9 @@ inputs.
 
 The turn digest is the default peer context. It contains the request, terminal
 response, meaningful actions and outcomes, changed paths, failures/blockers,
-and a compact structured subagent rollup. It excludes model token accounting,
+and a compact structured subagent rollup. A turn that its own background work
+continues after a terminal response keeps every terminal response it produced,
+in order; earlier intermediate responses remain evidence. It excludes model token accounting,
 hidden reasoning, file bodies, images, and successful command stdout.
 
 Evidence is normalized, immutable, and loaded only when the digest is
@@ -93,6 +95,8 @@ If a shell command's write scope cannot be determined exactly, the writer sets
   evidence/<provider>/<session-id>.jsonl
   active/<provider>/<actor-id>.json
   state/<provider>/<physical-trace-key-hash>.json
+  sessions/<provider>/<session-id>.json
+  workstreams/<workstream-id>.json
 ```
 
 Each feed/evidence file is append-only UTF-8 JSONL, one complete JSON object per
@@ -100,6 +104,9 @@ line. Provider hook processes serialize concurrent appends with a cross-process
 filesystem lock; stable record IDs make replay idempotent. A reader tolerates a
 partial final line. Active files are atomic snapshots rather than JSONL.
 `state/` is private parser/checkpoint machinery and is not peer context.
+`sessions/` holds each joined session's consent record, current workstream,
+and append-only membership history; `workstreams/` holds workstream records.
+Neither is peer context and neither is one of the three interchange records.
 
 The physical trace key is local checkpoint identity, normally a hash of the
 absolute provider trace path. It is intentionally distinct from the logical
@@ -238,6 +245,32 @@ may cite the parent-link witnesses. When one provider session owns several
 physical rollout files, their logical trace IDs include a stable artifact or
 thread identity so the same line number cannot ambiguously name several files.
 
+## Workstreams
+
+A project may host several unrelated efforts at once. A workstream names one
+shared objective inside a project. A session belongs to one workstream at a
+time and may move forward to another open workstream. Its consent marker holds
+an append-only `memberships: [{ workstream_id, from }]` log; its current
+`workstream_id` is always the last entry. Older v2 markers without the list
+mean one membership beginning at `joined_at`. Subagents share the parent
+session's history because they share its `session_id`.
+
+Each of the three records carries an optional top-level `workstream_id`
+(`ws_` + 32 lowercase hex), stamped at publication and never rewritten. A
+record without it happened before the session's first membership, or belongs
+to a one-off ingest of a session that never joined; such records are
+*unscoped*. A pre-workstream v1 session may move forward, but its earlier
+records are never adopted. Completed history keeps the workstream in effect
+when it happened because the stamp is part of the immutable record.
+
+`workstream_id` never participates in any record ID. The publishing runner
+resolves turns by `started_at` and evidence by `occurred_at`, selecting the
+latest membership whose `from` is no later than that record timestamp. This
+rule reads neither publication time nor batch composition, so hook-driven,
+manual, and reset ingests produce identical bytes after a move. Workstream IDs
+are random rather than hashed: a workstream is authored by a person and has
+no provider-native identity to derive from.
+
 ## Provider extensions and drift
 
 Provider parsers accept unknown source record types and fields and preserve
@@ -245,3 +278,24 @@ enough source identity to inspect them later. The common record schemas are
 closed except for the `extensions` object. Provider-specific data lives under a
 provider key such as `extensions.claude` or `extensions.codex`; it must not
 change the meaning of a common field.
+
+## Contract evolution
+
+The v1 schemas are closed and the `schema` literal is a constant, so any
+change to them is a contract revision. Within v1:
+
+- optional top-level fields may be added; the schema files in this directory
+  are re-published with them, the `schema` literal stays `…v1`, and the
+  revision log below names each addition;
+- a reader treats an absent optional field as "not known", never as an
+  error;
+- a validator pinned to an older copy of these schema files rejects newer
+  records. That is the documented cost of closed schemas in an alpha
+  contract, and the reason the schema files ship with the package;
+- removing or renaming a field, or changing the meaning of a required field,
+  is a v2 bump.
+
+Revision log:
+
+- v1 rev 2 (2026-08-21): optional `workstream_id` on `barbaro.turn.v1`,
+  `barbaro.evidence.v1`, and `barbaro.active.v1`.

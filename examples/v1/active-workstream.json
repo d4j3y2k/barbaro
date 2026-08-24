@@ -1,0 +1,26 @@
+{
+  "schema": "barbaro.active.v1",
+  "lease_id": "lease_89abcdef0123456789abcdef01234567",
+  "provider": "claude",
+  "session_id": "ses_0123456789abcdef0123456789abcdef",
+  "workstream_id": "ws_5f3a9c1e7b2d4a6f8e0c1b3d5a7f9e2c",
+  "agent_id": "main",
+  "state": "working",
+  "intent": {
+    "text": "Review the session writer refactor.",
+    "fidelity": "verbatim",
+    "truncated": false,
+    "original_utf8_bytes": 35,
+    "redactions": []
+  },
+  "current_action": {
+    "kind": "tool",
+    "tool_name": "Read",
+    "started_at": "2026-08-21T06:12:04.000Z"
+  },
+  "claims": [],
+  "unknown_write_scope": false,
+  "revision": 3,
+  "updated_at": "2026-08-21T06:12:04.000Z",
+  "expires_at": "2026-08-21T06:17:04.000Z"
+}

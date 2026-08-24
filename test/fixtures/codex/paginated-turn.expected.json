@@ -1,0 +1,167 @@
+{
+  "turns": [
+    {
+      "schema": "barbaro.turn.v1",
+      "turn_id": "turn_f8e8179813a8a1ec5ba1f0c41560a043",
+      "provider": "codex",
+      "session_id": "ses_1f7a7b758210a4fdfd01ca431e2c38b8",
+      "sequence": 1,
+      "agent_id": "main",
+      "started_at": "2026-08-22T03:00:01.000Z",
+      "ended_at": "2026-08-22T03:00:07.000Z",
+      "outcome": "success",
+      "request": {
+        "text": "Add the status endpoint and run the tests.",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 42,
+        "redactions": []
+      },
+      "response": {
+        "text": "Added the status endpoint; tests pass, the probe failed.",
+        "fidelity": "verbatim",
+        "truncated": false,
+        "original_utf8_bytes": 56,
+        "redactions": []
+      },
+      "actions": [
+        {
+          "action_id": "act_178c5429a9013a6b1125dbdc97c2ef20",
+          "outcome": "success",
+          "command": {
+            "text": "npm test",
+            "fidelity": "verbatim",
+            "truncated": false,
+            "original_utf8_bytes": 8,
+            "redactions": []
+          },
+          "exit_code": 0,
+          "source_refs": [
+            {
+              "trace_id": "codex:fixture-paginated",
+              "line_start": 7,
+              "line_end": 7,
+              "native_record_ids": [
+                "exec-00000000-0000-4000-8000-000000000001",
+                "01920000-0000-7000-8000-000000000201"
+              ]
+            }
+          ],
+          "kind": "test"
+        },
+        {
+          "action_id": "act_1ff66628aad396d9bf7abfa243175caf",
+          "kind": "file_change",
+          "outcome": "success",
+          "operation": "create",
+          "path": "src/status.ts",
+          "added_lines": 1,
+          "source_refs": [
+            {
+              "trace_id": "codex:fixture-paginated",
+              "line_start": 10,
+              "line_end": 10,
+              "native_record_ids": [
+                "exec-00000000-0000-4000-8000-000000000002",
+                "01920000-0000-7000-8000-000000000201"
+              ]
+            }
+          ]
+        },
+        {
+          "action_id": "act_5f61a3db35049b29f70c65081aa75c8f",
+          "kind": "file_change",
+          "outcome": "success",
+          "operation": "modify",
+          "path": "README.md",
+          "added_lines": 1,
+          "removed_lines": 1,
+          "source_refs": [
+            {
+              "trace_id": "codex:fixture-paginated",
+              "line_start": 10,
+              "line_end": 10,
+              "native_record_ids": [
+                "exec-00000000-0000-4000-8000-000000000002",
+                "01920000-0000-7000-8000-000000000201"
+              ]
+            }
+          ]
+        },
+        {
+          "action_id": "act_cc869fc4e890ec4aa9db7bb6f33dc136",
+          "outcome": "failed",
+          "command": {
+            "text": "node scripts/probe.js",
+            "fidelity": "verbatim",
+            "truncated": false,
+            "original_utf8_bytes": 21,
+            "redactions": []
+          },
+          "exit_code": 1,
+          "failure_excerpt": {
+            "text": "probe: boom\n",
+            "fidelity": "excerpt",
+            "truncated": false,
+            "original_utf8_bytes": 12,
+            "redactions": []
+          },
+          "source_refs": [
+            {
+              "trace_id": "codex:fixture-paginated",
+              "line_start": 13,
+              "line_end": 13,
+              "native_record_ids": [
+                "exec-00000000-0000-4000-8000-000000000003",
+                "01920000-0000-7000-8000-000000000201"
+              ]
+            }
+          ],
+          "kind": "command"
+        }
+      ],
+      "subagents": {
+        "total": 0,
+        "by_role": [],
+        "outcomes": {},
+        "changed_paths": [],
+        "evidence_refs": []
+      },
+      "evidence_refs": [],
+      "source_refs": [
+        {
+          "trace_id": "codex:fixture-paginated",
+          "line_start": 2,
+          "line_end": 17,
+          "native_record_ids": [
+            "01920000-0000-7000-8000-000000000201",
+            "msg_pg_user",
+            "msg_pg_final"
+          ]
+        }
+      ],
+      "extensions": {
+        "codex": {
+          "native_turn_id": "01920000-0000-7000-8000-000000000201",
+          "producer_cli_version": "0.149.0-alpha.4.1",
+          "history_mode": "paginated",
+          "terminal_event": "task_complete",
+          "thread_source": "user"
+        }
+      }
+    }
+  ],
+  "oracle": {
+    "canonical_session_meta_line": 1,
+    "canonical_native_session_id": "01920000-0000-7000-8000-000000000002",
+    "turn_boundaries": [
+      {
+        "native_turn_id": "01920000-0000-7000-8000-000000000201",
+        "start_line": 2,
+        "terminal_line": 17
+      }
+    ],
+    "projection_duplicates": [],
+    "preserved_records": []
+  }
+}

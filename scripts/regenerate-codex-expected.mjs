@@ -24,6 +24,7 @@ const SCENARIOS = [
   "unknown-types",
   "partial-final-line",
   "security-risk-score-head",
+  "paginated-turn",
 ];
 
 for (const scenario of SCENARIOS) {

@@ -211,3 +211,20 @@ test("join, incident, and error lines are compact and self-contained", () => {
     "WATCH-ERROR boom (2/5)",
   );
 });
+
+test("scoped events carry a short ws= tag; unscoped ones do not", () => {
+  const base = {
+    schema: WATCH_EVENT_SCHEMA,
+    kind: "turn" as const,
+    observed_at: OBSERVED_AT,
+    provider: "claude",
+    session_id: SES,
+    turn: projectTurn(turnRecord(), { byteBudget: 4_096 }),
+  };
+  const scoped: WatchTurnEvent = {
+    ...base,
+    workstream_id: "ws_7a3f45e168afe2d2c616bc2956aeef66",
+  };
+  assert.match(formatWatchEvent(scoped), /^TURN \[claude ses_aaaaaaaa ws=7a3f45e1\] /u);
+  assert.doesNotMatch(formatWatchEvent(base), /ws=/u);
+});

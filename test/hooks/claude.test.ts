@@ -12,17 +12,29 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import { ActiveLeaseStore, deriveLeaseId } from "../../src/active/index.js";
+import { AWAIT_LEASE_GRACE_MS } from "../../src/core/barbaro-command.js";
 import { createSessionId } from "../../src/core/id.js";
 import {
   handleClaudeHook,
   handleClaudeHookFailOpen,
   handleClaudeIngestHook,
+  renderClaudeHookOutput,
 } from "../../src/hooks/claude.js";
+import type { BarbaroIngestAttemptJournalV2 } from "../../src/hooks/ingest-attempt.js";
 import { listIncidents } from "../../src/hooks/incidents.js";
 import {
   admitHookSession,
   SESSION_NOT_JOINED,
 } from "../../src/hooks/participation.js";
+import {
+  NUDGE_CURSOR_SCHEMA,
+  NudgeCursorStateStore,
+  inspectUnreadPeerTurns,
+} from "../../src/nudge/index.js";
+import {
+  appendPeerTurn,
+  currentWorkstreamId,
+} from "./nudge-fixture.js";
 
 const SESSION = "aaaaaaaa-1111-4111-8111-111111111111";
 
@@ -33,7 +45,7 @@ async function project(): Promise<{ root: string; store: ActiveLeaseStore }> {
     provider: "claude",
     nativeSessionId: SESSION,
     event: "UserPromptSubmit",
-    prompt: "/barbaro",
+    prompt: "/barbaro new lane",
   });
   return { root, store: new ActiveLeaseStore(join(root, ".barbaro", "active")) };
 }
@@ -45,6 +57,13 @@ function identity(agentId = "main") {
     session_id: createSessionId("claude", SESSION),
     agent_id: agentId,
   };
+}
+
+function leaseTtlMs(lease: {
+  readonly updated_at: string;
+  readonly expires_at: string;
+}): number {
+  return Date.parse(lease.expires_at) - Date.parse(lease.updated_at);
 }
 
 function humanPrompt(
@@ -127,6 +146,24 @@ async function trailingTurnProject(): Promise<{
   });
   assert.equal(stopped.ingested?.output.turns_appended, 0);
   assert.equal(stopped.ingested?.input.trailing_turns_withheld, 1);
+  const journal = await readClaudeIngestJournal(root);
+  const attempt = journal.attempts.at(-1);
+  assert.ok(attempt);
+  assert.equal(attempt.event, "Stop");
+  assert.equal(attempt.outcome, "ok");
+  assert.equal(attempt.observations.count, 2);
+  assert.equal(
+    attempt.observations.first?.observed_size,
+    attempt.observations.last?.observed_size,
+  );
+  assert.equal(attempt.checkpoint_before, null);
+  assert.ok(attempt.checkpoint_after);
+  assert.equal(attempt.turns_appended, 0);
+  assert.equal(attempt.runner_input?.trailing_turn_terminal, true);
+  assert.equal(attempt.runner_input?.trailing_turn_closable, true);
+  assert.deepEqual(attempt.pending_background_ids, []);
+  assert.deepEqual(attempt.pending_agent_ids, []);
+  assert.equal(attempt.publish_blocker, "trailing_turn_not_closed");
   return { root, tracePath };
 }
 
@@ -187,10 +224,73 @@ test("Claude remains dormant until the user explicitly joins", async () => {
       hook_event_name: "UserPromptSubmit",
       session_id: SESSION,
       cwd: root,
-      prompt: "/barbaro Refactor the session writer.",
+      prompt: "/barbaro new lane Refactor the session writer.",
     });
     assert.equal(joined.active_revision, 1);
     assert.equal((await store.readSnapshot(identity()))?.state, "working");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("unjoined Claude hooks never inspect or claim seeded peer turns", async () => {
+  const root = await mkdtemp(join(tmpdir(), "barbaro-hook-consent-"));
+  const nativeSessionId = "dddddddd-4444-4444-8444-444444444444";
+  try {
+    await admitHookSession({
+      projectRoot: root,
+      provider: "codex",
+      nativeSessionId: "consenting-peer",
+      event: "UserPromptSubmit",
+      prompt: "$barbaro new lane",
+    });
+    const workstreamId = await currentWorkstreamId(
+      root,
+      "codex",
+      "consenting-peer",
+    );
+    await appendPeerTurn({
+      projectRoot: root,
+      workstreamId,
+      sequence: 1,
+      provider: "codex",
+      response: "private until the receiver consents",
+    });
+
+    const inputs = [
+      {
+        hook_event_name: "UserPromptSubmit",
+        session_id: nativeSessionId,
+        cwd: root,
+        prompt: "ordinary prompt",
+      },
+      {
+        hook_event_name: "PreToolUse",
+        session_id: nativeSessionId,
+        cwd: root,
+        tool_name: "Bash",
+        tool_input: { command: "pwd" },
+      },
+      {
+        hook_event_name: "Stop",
+        session_id: nativeSessionId,
+        cwd: root,
+        stop_hook_active: false,
+        last_assistant_message: "done",
+      },
+    ];
+    for (const input of inputs) {
+      const result = await handleClaudeHook(input);
+      assert.equal(result.ignored, SESSION_NOT_JOINED);
+      assert.equal(renderClaudeHookOutput(result), "");
+    }
+    assert.equal(
+      await new NudgeCursorStateStore(root).read(
+        "claude",
+        createSessionId("claude", nativeSessionId),
+      ),
+      undefined,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -214,12 +314,12 @@ test("Claude's UserPromptExpansion event recognizes only /barbaro", async () => 
       session_id: SESSION,
       cwd: root,
       command_name: "barbaro",
-      prompt: "/barbaro Refactor the session writer.",
+      prompt: "/barbaro new lane Refactor the session writer.",
     });
     assert.equal(joined.active_revision, 1);
     assert.equal(
       (await store.readSnapshot(identity()))?.intent?.text,
-      "/barbaro Refactor the session writer.",
+      "/barbaro new lane Refactor the session writer.",
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -282,9 +382,71 @@ test("a shell command declares unknown write scope instead of inventing paths", 
 
   const lease = await store.readSnapshot(identity());
   assert.ok(lease);
+  assert.equal(lease.state, "working");
   assert.equal(lease.unknown_write_scope, true);
   assert.deepEqual(lease.claims, []);
   assert.equal(lease.current_action?.command?.text, "rm -rf build && npm run build");
+});
+
+test("an await command waits without claims until its tool batch settles", async () => {
+  const { root, store } = await project();
+  await handleClaudeHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: SESSION,
+    cwd: root,
+    prompt: "Wait for the reviewer.",
+  });
+  await handleClaudeHook({
+    hook_event_name: "PreToolUse",
+    session_id: SESSION,
+    cwd: root,
+    tool_name: "Edit",
+    tool_input: { file_path: join(root, "src", "prior.ts") },
+  });
+  assert.equal((await store.readSnapshot(identity()))?.claims.length, 1);
+
+  const command = "barbaro await --timeout-ms 120000 --interval-ms 1000";
+  await handleClaudeHook({
+    hook_event_name: "PreToolUse",
+    session_id: SESSION,
+    cwd: root,
+    tool_name: "Bash",
+    tool_input: { command },
+  });
+
+  const waiting = await store.readSnapshot(identity());
+  assert.ok(waiting);
+  assert.equal(waiting.state, "waiting");
+  assert.equal(waiting.current_action?.kind, "command");
+  assert.equal(waiting.current_action?.tool_name, "Bash");
+  assert.equal(waiting.current_action?.command?.text, command);
+  assert.deepEqual(waiting.claims, []);
+  assert.equal(waiting.unknown_write_scope, false);
+  assert.equal(waiting.intent?.text, "Wait for the reviewer.");
+  assert.equal(leaseTtlMs(waiting), 120_000 + AWAIT_LEASE_GRACE_MS);
+
+  const postTool = await handleClaudeHook({
+    hook_event_name: "PostToolUse",
+    session_id: SESSION,
+    cwd: root,
+    tool_name: "Bash",
+  });
+  assert.equal(postTool.ignored, "claim retained until PostToolBatch");
+  assert.deepEqual(await store.readSnapshot(identity()), waiting);
+
+  await handleClaudeHook({
+    hook_event_name: "PostToolBatch",
+    session_id: SESSION,
+    cwd: root,
+  });
+  const restored = await store.readSnapshot(identity());
+  assert.ok(restored);
+  assert.equal(restored.state, "working");
+  assert.equal(restored.current_action, undefined);
+  assert.deepEqual(restored.claims, []);
+  assert.equal(restored.unknown_write_scope, false);
+  assert.equal(restored.intent?.text, "Wait for the reviewer.");
+  assert.equal(leaseTtlMs(restored), 300_000);
 });
 
 test("an out-of-workspace edit claims nothing and reports unknown scope", async () => {
@@ -605,6 +767,531 @@ test("a delayed PostToolUse after idle is also ignored", async () => {
   assert.equal((await store.readSnapshot(identity()))?.revision, before?.revision);
 });
 
+test("Claude triple-nudge replay stops after the prompt delivery", async () => {
+  const { root, store } = await project();
+  try {
+    await appendPeerTurn({
+      projectRoot: root,
+      workstreamId: await currentWorkstreamId(root, "claude", SESSION),
+      sequence: 1,
+      provider: "codex",
+      response: "one revision, one prompt delivery",
+    });
+    const prompt = await handleClaudeHook({
+      hook_event_name: "UserPromptSubmit",
+      session_id: SESSION,
+      cwd: root,
+      prompt: "Review the peer turn.",
+    });
+    assert.match(prompt.nudge?.text ?? "", /^Barbaro: 1 new peer turn/u);
+
+    const tool = await handleClaudeHook({
+      hook_event_name: "PreToolUse",
+      session_id: SESSION,
+      cwd: root,
+      tool_name: "Bash",
+      tool_input: { command: "pwd" },
+    });
+    assert.equal(tool.nudge, undefined);
+
+    const stopped = await handleClaudeHook({
+      hook_event_name: "Stop",
+      session_id: SESSION,
+      cwd: root,
+      stop_hook_active: false,
+      last_assistant_message: "one response",
+    });
+    assert.equal(stopped.stop_reason, undefined);
+    assert.equal(renderClaudeHookOutput(stopped), "");
+    assert.equal((await store.readSnapshot(identity()))?.state, "idle");
+    const cursor = await new NudgeCursorStateStore(root).read(
+      "claude",
+      createSessionId("claude", SESSION),
+    );
+    assert.equal(cursor?.markers.stop, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Claude retries Stop after a post-claim lease write failure", async () => {
+  const { root, store } = await project();
+  try {
+    await appendPeerTurn({
+      projectRoot: root,
+      workstreamId: await currentWorkstreamId(root, "claude", SESSION),
+      sequence: 1,
+      provider: "codex",
+      response: "still unread after a failed continuation write",
+    });
+    const first = await handleClaudeHook({
+      hook_event_name: "UserPromptSubmit",
+      session_id: SESSION,
+      cwd: root,
+      prompt: "Announce this once.",
+    });
+    assert.match(first.nudge?.text ?? "", /^Barbaro: 1 new peer turn/u);
+    const quietSecond = await handleClaudeHook({
+      hook_event_name: "UserPromptSubmit",
+      session_id: SESSION,
+      cwd: root,
+      prompt: "Leave the peer turn unread.",
+    });
+    assert.equal(quietSecond.nudge, undefined);
+
+    const originalUpdate = ActiveLeaseStore.prototype.update;
+    const stableSessionId = createSessionId("claude", SESSION);
+    let matchingUpdates = 0;
+    ActiveLeaseStore.prototype.update = async function (
+      ...args: Parameters<typeof originalUpdate>
+    ) {
+      const actor = args[0];
+      if (
+        actor.provider === "claude" &&
+        actor.session_id === stableSessionId &&
+        actor.agent_id === "main"
+      ) {
+        matchingUpdates += 1;
+        if (matchingUpdates === 2) {
+          return originalUpdate.call(this, args[0], args[1], {
+            ...args[2],
+            now: Number.NaN,
+          });
+        }
+      }
+      return originalUpdate.apply(this, args);
+    };
+
+    let failed: Awaited<ReturnType<typeof handleClaudeHookFailOpen>>;
+    try {
+      failed = await handleClaudeHookFailOpen({
+        hook_event_name: "Stop",
+        session_id: SESSION,
+        cwd: root,
+        stop_hook_active: false,
+        last_assistant_message: "This continuation cannot be persisted.",
+      });
+    } finally {
+      ActiveLeaseStore.prototype.update = originalUpdate;
+    }
+
+    assert.equal(matchingUpdates, 2);
+    assert.equal(failed, undefined);
+    assert.equal((await store.readSnapshot(identity()))?.state, "idle");
+    const afterFailure = await new NudgeCursorStateStore(root).read(
+      "claude",
+      stableSessionId,
+    );
+    assert.equal(afterFailure?.markers.stop, undefined);
+    assert.deepEqual(
+      afterFailure?.schema === NUDGE_CURSOR_SCHEMA
+        ? afterFailure.delivery
+        : undefined,
+      {
+        highest_unread_count: 1,
+        last_turn: { kind: "claude", generation: 1 },
+      },
+    );
+
+    const quietThird = await handleClaudeHook({
+      hook_event_name: "UserPromptSubmit",
+      session_id: SESSION,
+      cwd: root,
+      prompt: "Retry on this later turn.",
+    });
+    assert.equal(quietThird.nudge, undefined);
+    const retried = await handleClaudeHook({
+      hook_event_name: "Stop",
+      session_id: SESSION,
+      cwd: root,
+      stop_hook_active: false,
+      last_assistant_message: "This continuation persists.",
+    });
+    assert.match(retried.stop_reason ?? "", /^Barbaro:/u);
+    assert.equal((await store.readSnapshot(identity()))?.state, "working");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Claude hook nudges share one ledger, clear on context, and gate Stop", async () => {
+  const { root, store } = await project();
+  const workstreamId = await currentWorkstreamId(root, "claude", SESSION);
+  await appendPeerTurn({
+    projectRoot: root,
+    workstreamId,
+    sequence: 1,
+    provider: "codex",
+    response: "CHECKPOINT 2 APPROVED\ncontinue",
+  });
+
+  const promptDelivery = await handleClaudeHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: SESSION,
+    cwd: root,
+    prompt: "Implement the hook slice.",
+  });
+  assert.match(promptDelivery.nudge?.text ?? "", /^Barbaro: 1 new peer turn/u);
+  assert.match(promptDelivery.nudge?.text ?? "", /latest codex\/main/u);
+  assert.equal(
+    renderClaudeHookOutput(promptDelivery),
+    `${promptDelivery.nudge?.text}\n`,
+  );
+
+  const child = await handleClaudeHook({
+    hook_event_name: "PreToolUse",
+    session_id: SESSION,
+    agent_id: "agent-child",
+    cwd: root,
+    tool_name: "Bash",
+    tool_input: { command: "pwd" },
+  });
+  assert.equal(child.nudge, undefined);
+
+  const pre = await handleClaudeHook({
+    hook_event_name: "PreToolUse",
+    session_id: SESSION,
+    cwd: root,
+    tool_name: "Bash",
+    tool_input: { command: "pwd" },
+  });
+  assert.equal(pre.nudge, undefined, "same-count tool delivery stays silent");
+
+  const post = await handleClaudeHook({
+    hook_event_name: "PostToolUse",
+    session_id: SESSION,
+    cwd: root,
+    tool_name: "Bash",
+  });
+  assert.equal(post.nudge, undefined);
+  const batch = await handleClaudeHook({
+    hook_event_name: "PostToolBatch",
+    session_id: SESSION,
+    cwd: root,
+  });
+  assert.equal(batch.nudge, undefined);
+
+  await appendPeerTurn({
+    projectRoot: root,
+    workstreamId,
+    sequence: 2,
+    provider: "codex",
+    response: "news during the same turn",
+  });
+  const higherCountTool = await handleClaudeHook({
+    hook_event_name: "PreToolUse",
+    session_id: SESSION,
+    cwd: root,
+    tool_name: "Bash",
+    tool_input: { command: "pwd" },
+  });
+  assert.match(higherCountTool.nudge?.text ?? "", /^Barbaro: 2 new peer turns/u);
+  assert.deepEqual(JSON.parse(renderClaudeHookOutput(higherCountTool)), {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      additionalContext: higherCountTool.nudge?.text,
+    },
+  });
+
+  const declined = await handleClaudeHook({
+    hook_event_name: "Stop",
+    session_id: SESSION,
+    cwd: root,
+    stop_hook_active: false,
+    last_assistant_message: `${"prior reply ".repeat(300)}\nlast line`,
+  });
+  assert.equal(declined.stop_reason, undefined);
+  assert.equal(renderClaudeHookOutput(declined), "");
+  assert.equal((await store.readSnapshot(identity()))?.state, "idle");
+  const cursorAfterDecline = await new NudgeCursorStateStore(root).read(
+    "claude",
+    createSessionId("claude", SESSION),
+  );
+  assert.equal(cursorAfterDecline?.markers.stop, undefined);
+  assert.equal(
+    cursorAfterDecline?.schema === NUDGE_CURSOR_SCHEMA
+      ? cursorAfterDecline.claude_turn_generation
+      : undefined,
+    1,
+  );
+
+  const quietNextPrompt = await handleClaudeHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: SESSION,
+    cwd: root,
+    prompt: "Continue without reading.",
+  });
+  assert.equal(quietNextPrompt.nudge, undefined);
+  const blocked = await handleClaudeHook({
+    hook_event_name: "Stop",
+    session_id: SESSION,
+    cwd: root,
+    stop_hook_active: false,
+    last_assistant_message: `${"prior reply ".repeat(300)}\nlast line`,
+  });
+  assert.match(blocked.stop_reason ?? "", /run barbaro context/u);
+  assert.match(blocked.stop_reason ?? "", /resend your previous response verbatim/u);
+  assert.equal((blocked.stop_reason ?? "").includes("\n"), false);
+  assert.ok(Buffer.byteLength(blocked.stop_reason ?? "", "utf8") < 2_000);
+  assert.deepEqual(JSON.parse(renderClaudeHookOutput(blocked)), {
+    decision: "block",
+    reason: blocked.stop_reason,
+  });
+  assert.equal((await store.readSnapshot(identity()))?.state, "working");
+
+  const cleared = await handleClaudeHook({
+    hook_event_name: "PreToolUse",
+    session_id: SESSION,
+    cwd: root,
+    tool_name: "Bash",
+    tool_input: {
+      command:
+        "barbaro context --provider claude --session-id a | jq .value",
+    },
+  });
+  assert.equal(cleared.nudge, undefined);
+  const afterClear = await inspectUnreadPeerTurns({
+    projectRoot: root,
+    provider: "claude",
+    nativeSessionId: SESSION,
+  });
+  assert.equal(afterClear.status, "ready");
+  assert.equal(afterClear.status === "ready" ? afterClear.unread_count : -1, 0);
+  const cursorAfterClear = await new NudgeCursorStateStore(root).read(
+    "claude",
+    createSessionId("claude", SESSION),
+  );
+  assert.equal(cursorAfterClear?.schema, NUDGE_CURSOR_SCHEMA);
+  assert.equal(
+    cursorAfterClear?.schema === NUDGE_CURSOR_SCHEMA
+      ? cursorAfterClear.claude_turn_generation
+      : undefined,
+    2,
+  );
+  assert.deepEqual(
+    cursorAfterClear?.schema === NUDGE_CURSOR_SCHEMA
+      ? cursorAfterClear.delivery
+      : undefined,
+    { highest_unread_count: 0 },
+  );
+
+  await appendPeerTurn({
+    projectRoot: root,
+    workstreamId,
+    sequence: 3,
+    provider: "codex",
+    response: "news during continuation",
+  });
+  const continuedStop = await handleClaudeHook({
+    hook_event_name: "Stop",
+    session_id: SESSION,
+    cwd: root,
+    stop_hook_active: true,
+    last_assistant_message: "same reply",
+  });
+  assert.equal(continuedStop.stop_reason, undefined);
+  assert.equal(renderClaudeHookOutput(continuedStop), "");
+  assert.equal((await store.readSnapshot(identity()))?.state, "idle");
+  const cursor = await new NudgeCursorStateStore(root).read(
+    "claude",
+    createSessionId("claude", SESSION),
+  );
+  assert.equal(cursor?.markers.stop, undefined);
+
+  const nextTurn = await handleClaudeHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: SESSION,
+    cwd: root,
+    prompt: "Continue.",
+  });
+  assert.match(nextTurn.nudge?.text ?? "", /^Barbaro: 1 new peer turn/u);
+  const cursorAfterNextTurn = await new NudgeCursorStateStore(root).read(
+    "claude",
+    createSessionId("claude", SESSION),
+  );
+  assert.equal(
+    cursorAfterNextTurn?.schema === NUDGE_CURSOR_SCHEMA
+      ? cursorAfterNextTurn.claude_turn_generation
+      : undefined,
+    3,
+  );
+  assert.equal(
+    renderClaudeHookOutput({ ...nextTurn, message: "joined lane" }),
+    `joined lane\n${nextTurn.nudge?.text}\n`,
+  );
+  assert.equal(
+    renderClaudeHookOutput({ ...nextTurn, message: "joined lane" }).startsWith("{"),
+    false,
+    "UserPromptSubmit stdout must remain entirely plain text",
+  );
+});
+
+test("a newer Claude turn can supersede Stop without consuming its latch", async () => {
+  const { root, store } = await project();
+  try {
+    const initial = await handleClaudeHook({
+      hook_event_name: "UserPromptSubmit",
+      session_id: SESSION,
+      cwd: root,
+      prompt: "Initialize the cursor.",
+    });
+    assert.equal(initial.nudge, undefined);
+    await appendPeerTurn({
+      projectRoot: root,
+      workstreamId: await currentWorkstreamId(root, "claude", SESSION),
+      sequence: 1,
+      provider: "codex",
+      response: "unread during the Stop race",
+    });
+    const cursorStore = new NudgeCursorStateStore(root);
+    const cursorPath = cursorStore.cursorPath(
+      "claude",
+      createSessionId("claude", SESSION),
+    );
+    const cursorBeforeStop = await readFile(cursorPath);
+
+    const originalUpdate = ActiveLeaseStore.prototype.update;
+    let injected = false;
+    let newerPrompt: Awaited<ReturnType<typeof handleClaudeHook>> | undefined;
+    ActiveLeaseStore.prototype.update = async function (
+      ...args: Parameters<typeof originalUpdate>
+    ) {
+      const result = await originalUpdate.apply(this, args);
+      const actor = args[0];
+      if (
+        !injected &&
+        actor.provider === "claude" &&
+        actor.session_id === createSessionId("claude", SESSION) &&
+        actor.agent_id === "main"
+      ) {
+        injected = true;
+        ActiveLeaseStore.prototype.update = originalUpdate;
+        newerPrompt = await handleClaudeHook({
+          hook_event_name: "UserPromptExpansion",
+          session_id: SESSION,
+          cwd: root,
+          prompt: "newer expansion wins",
+        });
+      }
+      return result;
+    };
+
+    let stopped: Awaited<ReturnType<typeof handleClaudeHook>>;
+    try {
+      stopped = await handleClaudeHook({
+        hook_event_name: "Stop",
+        session_id: SESSION,
+        cwd: root,
+        stop_hook_active: false,
+        last_assistant_message: "older answer",
+      });
+    } finally {
+      ActiveLeaseStore.prototype.update = originalUpdate;
+    }
+
+    assert.equal(injected, true);
+    assert.equal(newerPrompt?.active_revision, 3);
+    assert.equal(stopped.stop_reason, undefined);
+    assert.equal((await store.readSnapshot(identity()))?.state, "working");
+    assert.equal(
+      (await store.readSnapshot(identity()))?.intent?.text,
+      "newer expansion wins",
+    );
+    assert.deepEqual(
+      await readFile(cursorPath),
+      cursorBeforeStop,
+      "a superseded Stop must not claim or update cursor state",
+    );
+    const unread = await inspectUnreadPeerTurns({
+      projectRoot: root,
+      provider: "claude",
+      nativeSessionId: SESSION,
+    });
+    assert.equal(unread.status, "ready");
+    assert.equal(unread.status === "ready" ? unread.unread_count : -1, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Claude PostToolUse and PostToolBatch use their exact output channels", async () => {
+  for (const event of ["PostToolUse", "PostToolBatch"] as const) {
+    const { root } = await project();
+    try {
+      await handleClaudeHook({
+        hook_event_name: "UserPromptSubmit",
+        session_id: SESSION,
+        cwd: root,
+        prompt: `Exercise ${event}.`,
+      });
+      await appendPeerTurn({
+        projectRoot: root,
+        workstreamId: await currentWorkstreamId(root, "claude", SESSION),
+        sequence: 1,
+        provider: "codex",
+        response: `${event} delivery`,
+      });
+      const result = await handleClaudeHook({
+        hook_event_name: event,
+        session_id: SESSION,
+        cwd: root,
+        ...(event === "PostToolUse" ? { tool_name: "Bash" } : {}),
+      });
+      assert.match(result.nudge?.text ?? "", /^Barbaro: 1 new peer turn/u);
+      assert.deepEqual(JSON.parse(renderClaudeHookOutput(result)), {
+        hookSpecificOutput: {
+          hookEventName: event,
+          additionalContext: result.nudge?.text,
+        },
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a corrupt Claude cursor fails open after Stop has gone idle", async () => {
+  const { root, store } = await project();
+  const corrupt = "{broken cursor\n";
+  try {
+    await handleClaudeHook({
+      hook_event_name: "UserPromptSubmit",
+      session_id: SESSION,
+      cwd: root,
+      prompt: "Finish safely.",
+    });
+    const cursorStore = new NudgeCursorStateStore(root);
+    const cursorPath = cursorStore.cursorPath(
+      "claude",
+      createSessionId("claude", SESSION),
+    );
+    assert.ok(await cursorStore.read("claude", createSessionId("claude", SESSION)));
+    await writeFile(cursorPath, corrupt, "utf8");
+
+    const result = await handleClaudeHookFailOpen({
+      hook_event_name: "Stop",
+      session_id: SESSION,
+      cwd: root,
+      stop_hook_active: false,
+      last_assistant_message: "done",
+    });
+    assert.equal(result, undefined);
+    assert.equal(renderClaudeHookOutput(result), "");
+    assert.equal((await store.readSnapshot(identity()))?.state, "idle");
+    assert.equal(await readFile(cursorPath, "utf8"), corrupt);
+    assert.ok(
+      (await listIncidents(root)).some(
+        ({ incident }) =>
+          incident.provider === "claude" &&
+          incident.kind === "hook_error" &&
+          incident.event === "Stop",
+      ),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("the activation template covers every event the runtime handles", async () => {
   const template = JSON.parse(
     await readFile(join(process.cwd(), "examples", "claude-hooks.json"), "utf8"),
@@ -702,7 +1389,7 @@ test("joining reaps tombstones no writer can touch anymore", async () => {
       session_id: SESSION,
       cwd: root,
       command_name: "barbaro",
-      prompt: "/barbaro",
+      prompt: "/barbaro new lane",
     });
     assert.equal(joined.active_revision, 1);
 
@@ -1021,3 +1708,89 @@ test("UserPromptSubmit returns quietly when its persisted boundary is lost", asy
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a bare /barbaro enrolls nothing; joins and moves stamp the current lease", async () => {
+  const root = await mkdtemp(join(tmpdir(), "barbaro-hook-bare-"));
+  const store = new ActiveLeaseStore(join(root, ".barbaro", "active"));
+  try {
+    const bare = await handleClaudeHook({
+      hook_event_name: "UserPromptSubmit",
+      session_id: SESSION,
+      cwd: root,
+      prompt: "/barbaro Refactor the session writer.",
+    });
+    assert.equal(bare.ignored, "workstream selection pending");
+    assert.match(bare.message ?? "", /No open workstreams/u);
+    assert.equal(await store.readSnapshot(identity()), undefined);
+    assert.ok(!(await readdir(root)).includes(".barbaro"), "bare writes nothing");
+
+    const refused = await handleClaudeHook({
+      hook_event_name: "UserPromptSubmit",
+      session_id: SESSION,
+      cwd: root,
+      prompt: "/barbaro join nowhere",
+    });
+    assert.match(refused.ignored ?? "", /no workstream named "nowhere"/u);
+    assert.ok(!(await readdir(root)).includes(".barbaro"), "a refusal writes nothing");
+
+    const joined = await handleClaudeHook({
+      hook_event_name: "UserPromptSubmit",
+      session_id: SESSION,
+      cwd: root,
+      prompt: "/barbaro new lane Refactor the session writer.",
+    });
+    assert.equal(joined.active_revision, 1);
+    assert.match(joined.message ?? "", /created and joined workstream "lane"/u);
+    const lease = await store.readSnapshot(identity());
+    assert.match(lease?.workstream_id ?? "", /^ws_[0-9a-f]{32}$/u);
+
+    const tool = await handleClaudeHook({
+      hook_event_name: "PreToolUse",
+      session_id: SESSION,
+      cwd: root,
+      tool_name: "Edit",
+      tool_input: { file_path: join(root, "src", "writer.ts") },
+    });
+    assert.equal(tool.active_revision, 2);
+    assert.equal(
+      (await store.readSnapshot(identity()))?.workstream_id,
+      lease?.workstream_id,
+    );
+    const moved = await handleClaudeHook({
+      hook_event_name: "UserPromptSubmit",
+      session_id: SESSION,
+      cwd: root,
+      prompt: "/barbaro new next Continue there.",
+    });
+    assert.equal(moved.active_revision, 3);
+    assert.match(moved.message ?? "", /moved this session to workstream "next"/u);
+    const movedLease = await store.readSnapshot(identity());
+    assert.ok(movedLease?.workstream_id);
+    assert.notEqual(movedLease.workstream_id, lease?.workstream_id);
+    await handleClaudeHook({
+      hook_event_name: "Stop",
+      session_id: SESSION,
+      cwd: root,
+    });
+    const idle = await store.readSnapshot(identity());
+    assert.equal(idle?.state, "idle");
+    assert.equal(idle?.workstream_id, movedLease.workstream_id);
+    assert.equal((await listIncidents(root)).length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+async function readClaudeIngestJournal(
+  root: string,
+): Promise<BarbaroIngestAttemptJournalV2> {
+  const path = join(
+    root,
+    ".barbaro",
+    "logs",
+    "ingest",
+    "claude",
+    `${createSessionId("claude", SESSION)}.json`,
+  );
+  return JSON.parse(await readFile(path, "utf8")) as BarbaroIngestAttemptJournalV2;
+}

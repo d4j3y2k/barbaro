@@ -21,6 +21,9 @@
     "turn_id": { "type": "string", "pattern": "^turn_[0-9a-f]{32}$" },
     "provider": { "$ref": "barbaro-common-v1.schema.json#/$defs/provider" },
     "session_id": { "type": "string", "pattern": "^ses_[0-9a-f]{32}$" },
+    "workstream_id": {
+      "$ref": "barbaro-common-v1.schema.json#/$defs/workstreamId"
+    },
     "agent_id": { "type": "string", "minLength": 1 },
     "parent_turn_id": { "type": "string", "pattern": "^turn_[0-9a-f]{32}$" },
     "parent_link": {

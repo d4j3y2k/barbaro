@@ -42,6 +42,7 @@ export const DEFAULT_HOOK_TARGETS: readonly HookProviderTarget[] = [
     requiredEvents: [
       "SessionEnd",
       "SessionStart",
+      "PostToolBatch",
       "PostToolUse",
       "PreToolUse",
       "Stop",
@@ -54,6 +55,7 @@ export const DEFAULT_HOOK_TARGETS: readonly HookProviderTarget[] = [
     provider: "codex",
     configPaths: [".codex/hooks.json"],
     requiredEvents: [
+      "PermissionRequest",
       "SessionEnd",
       "SessionStart",
       "PostToolUse",

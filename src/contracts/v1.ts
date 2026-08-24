@@ -99,6 +99,8 @@ export interface BarbaroTurnV1 {
   readonly turn_id: string;
   readonly provider: string;
   readonly session_id: string;
+  /** The workstream in effect at `started_at`; absent when unscoped. */
+  readonly workstream_id?: string;
   readonly sequence: number;
   readonly agent_id: string;
   readonly parent_turn_id?: string;
@@ -156,6 +158,8 @@ interface BarbaroEvidenceBaseV1 {
   readonly turn_id: string;
   readonly provider: string;
   readonly session_id: string;
+  /** The workstream in effect at `occurred_at`; absent when unscoped. */
+  readonly workstream_id?: string;
   readonly agent_id: string;
   readonly parent_turn_id?: string;
   readonly parent_link?: BarbaroParentLinkV1;
@@ -188,6 +192,8 @@ export interface BarbaroActiveLeaseV1 {
   readonly lease_id: string;
   readonly provider: string;
   readonly session_id: string;
+  /** The publishing session's current workstream; absent when unscoped. */
+  readonly workstream_id?: string;
   readonly turn_id?: string;
   readonly agent_id: string;
   readonly state: "working" | "waiting" | "blocked" | "idle";

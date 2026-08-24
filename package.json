@@ -1,6 +1,6 @@
 {
   "name": "barbaro",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "description": "Live coordination for Codex and Claude Code sessions",
   "keywords": [
     "ai",
@@ -45,11 +45,13 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "fixtures:regenerate": "npm run build && node scripts/regenerate-claude-expected.mjs && node scripts/regenerate-codex-expected.mjs",
+    "study:horse": "npm run build && node dist/src/tui/horse-preview.js",
     "prepack": "node scripts/prepare-package.mjs",
     "prepare": "npm run build",
     "test": "npm run build && find dist/test -type f -name '*.test.js' -print0 | xargs -0 node --test",
     "test:package": "node scripts/verify-packed-install.mjs",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "postbuild": "node -e \"require('node:fs').chmodSync('dist/src/cli.js', 0o755)\""
   },
   "devDependencies": {
     "@types/node": "^20.17.0",

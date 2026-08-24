@@ -121,6 +121,44 @@ the response entirely. This is a regression fixture: the bug shipped past all fo
 above and was only caught by running against real traces, where it silently emptied the `response`
 field on the majority of turns. Also asserts the two lines contribute usage exactly once.
 
+## `pretool-attachment-fork/`
+
+Session `12121212-…` is a sanitized replay of the 2026-08-23 wake-nudge probe. Its stale
+`last-prompt` names the preceding turn's `turn_duration`; the next Monitor wake calls Bash and Claude
+Code records two children beneath that `tool_use`:
+
+```
+tool_use …0005 ─┬─ attachment hook_success …0006
+                │    └─ attachment hook_additional_context …0007
+                └─ user tool_result …0008 ─ … ─ system turn_duration …0013
+```
+
+The semantic continuation includes an inline token-reminder attachment, the first terminal verdict,
+an `isMeta` Stop-hook feedback row, `hook_blocking_error`, the required context read, the verbatim
+re-send, and the final `turn_duration`.
+
+**Asserts:** the attachment-only PreToolUse side branch is transparent to a stale pointer, the wake
+publishes as one turn at its own Stop with both terminal responses and the context action, and
+`computeActiveAncestry` agrees with the publishing runner. A synthetic second message child beneath
+the same tool call remains a genuine ambiguous continuation and publishes nothing.
+
+## `queued-background-completion/`
+
+Session `fefefefe-…` is a sanitized replay of the relevant records in the first
+331 lines of reviewer transcript `6d347ab3-e500-4933-b88a-eaae5bfdb2ff`.
+A Bash launched with `run_in_background: true` first returns its ordinary
+"still running" tool result. Its in-turn completion then appears as duplicate,
+UUID-less `queue-operation` enqueue/remove rows plus a DAG-bearing
+`attachment.type: "queued_command"` with `commandMode: "task-notification"`.
+
+The fixture also carries an off-branch copy of that completion and an on-branch
+Monitor notification with no `<tool-use-id>`, followed by the real split
+terminal response, Stop summary, and `turn_duration` records. Only the
+on-branch completed queued-command attachment may settle the named launch.
+Removing its completion payload leaves the terminal turn open with the same
+pending background ID; queue bookkeeping, off-branch attachments, and Monitor
+notifications must not make a still-running task look complete.
+
 ---
 
 ## Validating

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { BigIntStats, PathLike } from "node:fs";
+import { constants, type BigIntStats, type PathLike } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import { open } from "node:fs/promises";
 
@@ -63,6 +63,15 @@ export interface CheckpointResolution {
   readonly snapshot?: FileSnapshot;
 }
 
+export interface CheckpointReadOptions {
+  /** Refuse a final-path symbolic link at open time. */
+  readonly noFollow?: boolean;
+  /** Refuse files with another hard link. */
+  readonly requireSingleLink?: boolean;
+  /** Bound the physical file inspected while resolving a checkpoint. */
+  readonly maxFileBytes?: number;
+}
+
 /** Convert a completed reader position into persistable checkpoint data. */
 export function createJsonlCheckpoint(
   position: JsonlCheckpointPosition,
@@ -104,14 +113,16 @@ export function createJsonlCheckpoint(
 export async function resolveJsonlCheckpoint(
   filePath: PathLike,
   checkpoint?: JsonlCheckpoint,
+  options: CheckpointReadOptions = {},
 ): Promise<CheckpointResolution> {
   if (checkpoint !== undefined) {
     validateJsonlCheckpoint(checkpoint);
   }
+  validateReadOptions(options);
 
   let handle: FileHandle;
   try {
-    handle = await open(filePath, "r");
+    handle = await open(filePath, readFlags(options.noFollow));
   } catch (error: unknown) {
     if (isNodeError(error) && error.code === "ENOENT") {
       return {
@@ -124,7 +135,19 @@ export async function resolveJsonlCheckpoint(
   }
 
   try {
-    const snapshot = snapshotFromStats(await handle.stat({ bigint: true }));
+    const stats = await handle.stat({ bigint: true });
+    if (options.requireSingleLink === true && stats.nlink !== 1n) {
+      throw new TypeError("JSONL checkpoint path has multiple hard links");
+    }
+    const snapshot = snapshotFromStats(stats);
+    if (
+      options.maxFileBytes !== undefined &&
+      snapshot.size > options.maxFileBytes
+    ) {
+      throw new RangeError(
+        `JSONL checkpoint path exceeds ${options.maxFileBytes} bytes`,
+      );
+    }
     if (checkpoint === undefined) {
       return {
         status: "start",
@@ -164,6 +187,24 @@ export async function resolveJsonlCheckpoint(
     };
   } finally {
     await handle.close();
+  }
+}
+
+function readFlags(noFollow: boolean | undefined): string | number {
+  if (noFollow !== true) return "r";
+  const flag = constants.O_NOFOLLOW;
+  if (typeof flag !== "number") {
+    throw new TypeError("This platform cannot refuse JSONL symlinks");
+  }
+  return constants.O_RDONLY | flag;
+}
+
+function validateReadOptions(options: CheckpointReadOptions): void {
+  if (
+    options.maxFileBytes !== undefined &&
+    (!Number.isSafeInteger(options.maxFileBytes) || options.maxFileBytes < 0)
+  ) {
+    throw new TypeError("maxFileBytes must be a non-negative safe integer");
   }
 }
 

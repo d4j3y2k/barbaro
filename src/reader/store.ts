@@ -48,6 +48,7 @@ const SESSION_FILENAME_PATTERN = /^(ses_[0-9a-f]{32})\.jsonl$/u;
 const EVIDENCE_ID_PATTERN = /^ev_[0-9a-f]{32}$/u;
 const TURN_ID_PATTERN = /^turn_[0-9a-f]{32}$/u;
 const ACTION_ID_PATTERN = /^act_[0-9a-f]{32}$/u;
+const WORKSTREAM_ID_PATTERN = /^ws_[0-9a-f]{32}$/u;
 
 interface JsonlFile {
   readonly provider: string;
@@ -110,13 +111,23 @@ export async function readProjectContext(
   const boundary = SafeStoreBoundary.forBarbaroProject(absoluteRoot);
   await assertActiveFilesSafe(boundary);
   const activeDirectory = join(absoluteRoot, ".barbaro", "active");
+  const scope = options.workstreamId;
+  if (scope !== undefined && !WORKSTREAM_ID_PATTERN.test(scope)) {
+    throw new TypeError(`Invalid workstreamId: ${JSON.stringify(scope)}`);
+  }
   let invalidActiveRecords = 0;
-  const active = await new ActiveLeaseStore(activeDirectory).listActive({
+  const allActive = await new ActiveLeaseStore(activeDirectory).listActive({
     ...(options.now === undefined ? {} : { now: options.now }),
     onInvalid: () => {
       invalidActiveRecords += 1;
     },
   });
+  // A scoped read keeps only records stamped with the workstream. Records
+  // without a stamp (pre-workstream sessions) are outside every scope.
+  const active =
+    scope === undefined
+      ? allActive
+      : allActive.filter((lease) => lease.workstream_id === scope);
   active.sort(compareActiveNewestFirst);
 
   const feedFiles = await listCanonicalJsonlFiles(boundary, "feed");
@@ -133,7 +144,11 @@ export async function readProjectContext(
       turnsPerSession,
       limits,
     );
-    turns.push(...result.turns);
+    turns.push(
+      ...(scope === undefined
+        ? result.turns
+        : result.turns.filter((turn) => turn.workstream_id === scope)),
+    );
     malformedFeedRecords += result.malformed;
     invalidFeedRecords += result.invalid;
     if (result.partial) partialFeedFiles += 1;
@@ -573,6 +588,8 @@ export function isTurnV1(value: unknown): value is BarbaroTurnV1 {
     isPattern(value.turn_id, TURN_ID_PATTERN) &&
     isPattern(value.provider, PROVIDER_PATTERN) &&
     isPattern(value.session_id, /^ses_[0-9a-f]{32}$/u) &&
+    (value.workstream_id === undefined ||
+      isPattern(value.workstream_id, WORKSTREAM_ID_PATTERN)) &&
     isSafePositiveInteger(value.sequence) &&
     isNonEmptyString(value.agent_id) &&
     (value.parent_turn_id === undefined ||
@@ -611,6 +628,8 @@ function isEvidenceV1(value: unknown): value is BarbaroEvidenceV1 {
     !isPattern(value.turn_id, TURN_ID_PATTERN) ||
     !isPattern(value.provider, PROVIDER_PATTERN) ||
     !isPattern(value.session_id, /^ses_[0-9a-f]{32}$/u) ||
+    (value.workstream_id !== undefined &&
+      !isPattern(value.workstream_id, WORKSTREAM_ID_PATTERN)) ||
     !isNonEmptyString(value.agent_id) ||
     (value.parent_turn_id !== undefined &&
       !isPattern(value.parent_turn_id, TURN_ID_PATTERN)) ||

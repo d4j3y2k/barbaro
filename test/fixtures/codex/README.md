@@ -39,3 +39,4 @@ diagnostics, and byte-exact turn conformance.
 | `unknown-types` | Unknown outer and both nested discriminators are preserved and skipped. |
 | `partial-final-line` | An incomplete final append is ignored and retried later. |
 | `security-risk-score-head` | Current-main outer variant is forward-compatible with the pinned producer parser. |
+| `paginated-turn` | `history_mode: paginated` (Codex Desktop 0.149+): `item_completed` `CommandExecution`/`FileChange` projections become test, command, and file-change actions; an exec call with projected items yields no second generic tool action. |

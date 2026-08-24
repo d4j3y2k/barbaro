@@ -16,18 +16,37 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { ActiveLeaseStore } from "../../src/active/store.js";
+import {
+  AWAIT_LEASE_GRACE_MS,
+  DEFAULT_AWAIT_TIMEOUT_MS,
+} from "../../src/core/barbaro-command.js";
 import { createSessionId, createTurnId } from "../../src/core/id.js";
 import {
   handleCodexHook,
   handleCodexHookFailOpen,
   handleCodexIngestHook,
   handleCodexIngestHookFailOpen,
+  renderCodexHookOutput,
 } from "../../src/hooks/codex.js";
+import type {
+  BarbaroIngestAttemptJournalV2,
+  BarbaroIngestAttemptV2,
+} from "../../src/hooks/ingest-attempt.js";
+import { listIncidents } from "../../src/hooks/incidents.js";
 import {
   admitHookSession,
   SESSION_NOT_JOINED,
   SessionParticipationStore,
 } from "../../src/hooks/participation.js";
+import {
+  NUDGE_CURSOR_SCHEMA,
+  NudgeCursorStateStore,
+  inspectUnreadPeerTurns,
+} from "../../src/nudge/index.js";
+import {
+  appendPeerTurn,
+  currentWorkstreamId,
+} from "./nudge-fixture.js";
 
 test("Codex remains dormant until the user explicitly joins", async (t) => {
   const project = await temporaryProject(t);
@@ -47,10 +66,87 @@ test("Codex remains dormant until the user explicitly joins", async (t) => {
     session_id: nativeSessionId,
     turn_id: "turn-joined",
     cwd: project,
-    prompt: "$barbaro Refactor the session writer.",
+    prompt: "$barbaro new lane Refactor the session writer.",
   });
   assert.equal(joined.active_revision, 1);
-  assert.equal((await activeSnapshot(project, nativeSessionId))?.state, "working");
+  const firstLease = await activeSnapshot(project, nativeSessionId);
+  assert.equal(firstLease?.state, "working");
+  assert.ok(firstLease?.workstream_id);
+
+  const moved = await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: "turn-moved",
+    cwd: project,
+    prompt: "$barbaro new next Continue there.",
+  });
+  assert.equal(moved.active_revision, 2);
+  const movedLease = await activeSnapshot(project, nativeSessionId);
+  assert.ok(movedLease?.workstream_id);
+  assert.notEqual(movedLease.workstream_id, firstLease.workstream_id);
+  assert.match(moved.message ?? "", /moved this session to workstream "next"/u);
+});
+
+test("unjoined Codex hooks never inspect or claim seeded peer turns", async (t) => {
+  const project = await temporaryProject(t);
+  const nativeSessionId = "session-unjoined-with-peer-data";
+  await admitHookSession({
+    projectRoot: project,
+    provider: "claude",
+    nativeSessionId: "consenting-peer",
+    event: "UserPromptSubmit",
+    prompt: "/barbaro new lane",
+  });
+  const workstreamId = await currentWorkstreamId(
+    project,
+    "claude",
+    "consenting-peer",
+  );
+  await appendPeerTurn({
+    projectRoot: project,
+    workstreamId,
+    sequence: 1,
+    provider: "claude",
+    response: "private until the receiver consents",
+  });
+
+  const inputs = [
+    {
+      hook_event_name: "UserPromptSubmit",
+      session_id: nativeSessionId,
+      turn_id: "turn-unjoined",
+      cwd: project,
+      prompt: "ordinary prompt",
+    },
+    {
+      hook_event_name: "PreToolUse",
+      session_id: nativeSessionId,
+      turn_id: "turn-unjoined",
+      cwd: project,
+      tool_name: "Bash",
+      tool_input: { command: "pwd" },
+    },
+    {
+      hook_event_name: "Stop",
+      session_id: nativeSessionId,
+      turn_id: "turn-unjoined",
+      cwd: project,
+      stop_hook_active: false,
+      last_assistant_message: "done",
+    },
+  ];
+  for (const input of inputs) {
+    const result = await handleCodexHook(input);
+    assert.equal(result.ignored, SESSION_NOT_JOINED);
+    assert.equal(renderCodexHookOutput(result), "");
+  }
+  assert.equal(
+    await new NudgeCursorStateStore(project).read(
+      "codex",
+      createSessionId("codex", nativeSessionId),
+    ),
+    undefined,
+  );
 });
 
 test("concurrent Codex hooks do not silently drop lease updates", async (t) => {
@@ -65,7 +161,7 @@ test("concurrent Codex hooks do not silently drop lease updates", async (t) => {
     session_id: nativeSessionId,
     turn_id: "turn-race",
     cwd: project,
-    prompt: "$barbaro Refactor the session writer.",
+    prompt: "$barbaro new lane Refactor the session writer.",
   });
 
   const racers = 8;
@@ -122,7 +218,7 @@ test("Codex admits the exact composer-rendered Barbaro skill attachment", async 
     session_id: nativeSessionId,
     turn_id: "turn-composer-attachment",
     cwd: project,
-    prompt: `[$barbaro](${skillPath}) \n`,
+    prompt: `[$barbaro](${skillPath}) join lane\n`,
   });
 
   assert.equal(joined.active_revision, 1);
@@ -131,7 +227,7 @@ test("Codex admits the exact composer-rendered Barbaro skill attachment", async 
   assert.equal(await participation.hasJoined("codex", otherSessionId), true);
   assert.equal(
     (await activeSnapshot(project, nativeSessionId))?.intent?.text,
-    `[$barbaro](${skillPath}) \n`,
+    `[$barbaro](${skillPath}) join lane\n`,
   );
   assert.equal(await activeSnapshot(project, otherSessionId), undefined);
 });
@@ -171,7 +267,7 @@ test("Codex admits the installed user-wide Barbaro skill attachment", async (t) 
     session_id: "session-user-skill",
     turn_id: "turn-user-skill",
     cwd: project,
-    prompt: `[$barbaro](${await realpath(userSkillPath)})&#x20;\n`,
+    prompt: `[$barbaro](${await realpath(userSkillPath)})&#x20;new lane\n`,
   });
 
   assert.equal(joined.active_revision, 1);
@@ -366,6 +462,1458 @@ test("Codex hooks maintain one revisioned lease through a tool lifecycle", async
   assert.deepEqual(idle?.claims, []);
 });
 
+test("Codex triple-nudge replay stops after the prompt delivery", async (t) => {
+  const project = await temporaryProject(t);
+  const nativeSessionId = "session-triple-nudge";
+  await joinCodexSession(project, nativeSessionId);
+  await appendPeerTurn({
+    projectRoot: project,
+    workstreamId: await currentWorkstreamId(
+      project,
+      "codex",
+      nativeSessionId,
+    ),
+    sequence: 1,
+    response: "one revision, one prompt delivery",
+  });
+  const common = {
+    session_id: nativeSessionId,
+    turn_id: "turn-triple-nudge",
+    cwd: project,
+  };
+  const prompt = await handleCodexHook({
+    ...common,
+    hook_event_name: "UserPromptSubmit",
+    prompt: "Review the peer turn.",
+  });
+  assert.match(prompt.nudge?.text ?? "", /^Barbaro: 1 new peer turn/u);
+
+  const tool = await handleCodexHook({
+    ...common,
+    hook_event_name: "PreToolUse",
+    tool_name: "Bash",
+    tool_input: { command: "pwd" },
+  });
+  assert.equal(tool.nudge, undefined);
+
+  const stopped = await handleCodexHook({
+    ...common,
+    hook_event_name: "Stop",
+    stop_hook_active: false,
+    last_assistant_message: "one response",
+  });
+  assert.equal(stopped.stop_reason, undefined);
+  assert.equal(renderCodexHookOutput(stopped), "");
+  assert.equal((await activeSnapshot(project, nativeSessionId))?.state, "idle");
+  const cursor = await new NudgeCursorStateStore(project).read(
+    "codex",
+    createSessionId("codex", nativeSessionId),
+  );
+  assert.equal(cursor?.markers.stop, undefined);
+});
+
+test("Codex retries Stop after a post-claim lease write failure", async (t) => {
+  const project = await temporaryProject(t);
+  const nativeSessionId = "session-stop-write-failure";
+  await joinCodexSession(project, nativeSessionId);
+  await appendPeerTurn({
+    projectRoot: project,
+    workstreamId: await currentWorkstreamId(
+      project,
+      "codex",
+      nativeSessionId,
+    ),
+    sequence: 1,
+    response: "still unread after a failed continuation write",
+  });
+  const first = await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: "turn-stop-write-first",
+    cwd: project,
+    prompt: "Announce this once.",
+  });
+  assert.match(first.nudge?.text ?? "", /^Barbaro: 1 new peer turn/u);
+  const quietSecond = await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: "turn-stop-write-second",
+    cwd: project,
+    prompt: "Leave the peer turn unread.",
+  });
+  assert.equal(quietSecond.nudge, undefined);
+
+  const originalUpdate = ActiveLeaseStore.prototype.update;
+  const stableSessionId = createSessionId("codex", nativeSessionId);
+  let matchingUpdates = 0;
+  ActiveLeaseStore.prototype.update = async function (
+    ...args: Parameters<typeof originalUpdate>
+  ) {
+    const actor = args[0];
+    if (
+      actor.provider === "codex" &&
+      actor.session_id === stableSessionId &&
+      actor.agent_id === "main"
+    ) {
+      matchingUpdates += 1;
+      if (matchingUpdates === 2) {
+        return originalUpdate.call(this, args[0], args[1], {
+          ...args[2],
+          now: Number.NaN,
+        });
+      }
+    }
+    return originalUpdate.apply(this, args);
+  };
+
+  let failed: Awaited<ReturnType<typeof handleCodexHookFailOpen>>;
+  try {
+    failed = await handleCodexHookFailOpen({
+      hook_event_name: "Stop",
+      session_id: nativeSessionId,
+      turn_id: "turn-stop-write-second",
+      cwd: project,
+      stop_hook_active: false,
+      last_assistant_message: "This continuation cannot be persisted.",
+    });
+  } finally {
+    ActiveLeaseStore.prototype.update = originalUpdate;
+  }
+
+  assert.equal(matchingUpdates, 2);
+  assert.equal(failed, undefined);
+  assert.equal((await activeSnapshot(project, nativeSessionId))?.state, "idle");
+  const afterFailure = await new NudgeCursorStateStore(project).read(
+    "codex",
+    stableSessionId,
+  );
+  assert.equal(afterFailure?.markers.stop, undefined);
+  assert.deepEqual(
+    afterFailure?.schema === NUDGE_CURSOR_SCHEMA
+      ? afterFailure.delivery
+      : undefined,
+    {
+      highest_unread_count: 1,
+      last_turn: {
+        kind: "codex",
+        turn_id: createTurnId(
+          "codex",
+          nativeSessionId,
+          "main",
+          "turn-stop-write-first",
+        ),
+      },
+    },
+  );
+
+  const quietThird = await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: "turn-stop-write-third",
+    cwd: project,
+    prompt: "Retry on this later turn.",
+  });
+  assert.equal(quietThird.nudge, undefined);
+  const retried = await handleCodexHook({
+    hook_event_name: "Stop",
+    session_id: nativeSessionId,
+    turn_id: "turn-stop-write-third",
+    cwd: project,
+    stop_hook_active: false,
+    last_assistant_message: "This continuation persists.",
+  });
+  assert.match(retried.stop_reason ?? "", /^Barbaro:/u);
+  assert.equal((await activeSnapshot(project, nativeSessionId))?.state, "working");
+});
+
+test("a committed rollback cleanup failure preserves the original Stop error", async (t) => {
+  const project = await temporaryProject(t);
+  const nativeSessionId = "session-rollback-release-failure";
+  await joinCodexSession(project, nativeSessionId);
+  await appendPeerTurn({
+    projectRoot: project,
+    workstreamId: await currentWorkstreamId(
+      project,
+      "codex",
+      nativeSessionId,
+    ),
+    sequence: 1,
+    response: "remain unread after rollback",
+  });
+  await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: "turn-rollback-release-first",
+    cwd: project,
+    prompt: "Announce once.",
+  });
+  await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: "turn-rollback-release-second",
+    cwd: project,
+    prompt: "Leave it unread.",
+  });
+
+  const stableSessionId = createSessionId("codex", nativeSessionId);
+  const cursorStore = new NudgeCursorStateStore(project);
+  const cursorPath = cursorStore.cursorPath("codex", stableSessionId);
+  const originalCursorWrite = NudgeCursorStateStore.prototype.withHookWrite;
+  let rollbackReleaseInjected = false;
+  NudgeCursorStateStore.prototype.withHookWrite = (async function (
+    this: NudgeCursorStateStore,
+    ...args: Parameters<typeof originalCursorWrite>
+  ) {
+    const operation = args[2];
+    return originalCursorWrite.call(
+      this,
+      args[0],
+      args[1],
+      async (current) => {
+        const update = await operation(current);
+        if (
+          !rollbackReleaseInjected &&
+          current?.schema === NUDGE_CURSOR_SCHEMA &&
+          current.markers.stop !== undefined &&
+          update.state?.markers.stop === undefined
+        ) {
+          rollbackReleaseInjected = true;
+          await writeFile(
+            join(`${cursorPath}.lock`, "prevent-release"),
+            "held\n",
+          );
+        }
+        return update;
+      },
+      args[3],
+    );
+  }) as typeof originalCursorWrite;
+
+  const originalUpdate = ActiveLeaseStore.prototype.update;
+  let matchingUpdates = 0;
+  ActiveLeaseStore.prototype.update = async function (
+    ...args: Parameters<typeof originalUpdate>
+  ) {
+    const actor = args[0];
+    if (
+      actor.provider === "codex" &&
+      actor.session_id === stableSessionId &&
+      actor.agent_id === "main"
+    ) {
+      matchingUpdates += 1;
+      if (matchingUpdates === 2) {
+        return originalUpdate.call(this, args[0], args[1], {
+          ...args[2],
+          now: Number.NaN,
+        });
+      }
+    }
+    return originalUpdate.apply(this, args);
+  };
+
+  let thrown: unknown;
+  try {
+    await handleCodexHook({
+      hook_event_name: "Stop",
+      session_id: nativeSessionId,
+      turn_id: "turn-rollback-release-second",
+      cwd: project,
+      stop_hook_active: false,
+      last_assistant_message: "The active continuation write fails.",
+    });
+  } catch (error: unknown) {
+    thrown = error;
+  } finally {
+    ActiveLeaseStore.prototype.update = originalUpdate;
+    NudgeCursorStateStore.prototype.withHookWrite = originalCursorWrite;
+    await rm(`${cursorPath}.lock`, { recursive: true, force: true });
+  }
+
+  assert.equal(matchingUpdates, 2);
+  assert.equal(rollbackReleaseInjected, true);
+  assert.ok(thrown instanceof TypeError);
+  assert.match(thrown.message, /now must be a valid date-time/u);
+  assert.equal(thrown instanceof AggregateError, false);
+  assert.equal((await activeSnapshot(project, nativeSessionId))?.state, "idle");
+  const cursor = await cursorStore.read("codex", stableSessionId);
+  assert.equal(cursor?.markers.stop, undefined);
+
+  let incidents = await listIncidents(project);
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (
+      incidents.some(({ incident }) =>
+        incident.detail?.text.includes(
+          "nudge cursor lock release failed after commit",
+        )
+      )
+    ) {
+      break;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    incidents = await listIncidents(project);
+  }
+  assert.ok(
+    incidents.some(({ incident }) =>
+      incident.detail?.text.includes(
+        "nudge cursor lock release failed after commit",
+      )
+    ),
+  );
+});
+
+test("Codex renders a committed Stop after cursor lock cleanup fails", async (t) => {
+  const project = await temporaryProject(t);
+  const nativeSessionId = "session-cursor-release-failure";
+  const nativeTurnId = "turn-cursor-release-failure";
+  await joinCodexSession(project, nativeSessionId);
+  await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: nativeTurnId,
+    cwd: project,
+    prompt: "Initialize before peer news arrives.",
+  });
+  await appendPeerTurn({
+    projectRoot: project,
+    workstreamId: await currentWorkstreamId(
+      project,
+      "codex",
+      nativeSessionId,
+    ),
+    sequence: 1,
+    response: "Stop is the first delivery",
+  });
+
+  const stableSessionId = createSessionId("codex", nativeSessionId);
+  const cursorStore = new NudgeCursorStateStore(project);
+  const cursorPath = cursorStore.cursorPath("codex", stableSessionId);
+  const originalWithHookWrite = NudgeCursorStateStore.prototype.withHookWrite;
+  let injected = false;
+  NudgeCursorStateStore.prototype.withHookWrite = (async function (
+    this: NudgeCursorStateStore,
+    ...args: Parameters<typeof originalWithHookWrite>
+  ) {
+    const operation = args[2];
+    return originalWithHookWrite.call(
+      this,
+      args[0],
+      args[1],
+      async (current) => {
+        const update = await operation(current);
+        if (!injected && update.state?.markers.stop !== undefined) {
+          injected = true;
+          await writeFile(
+            join(`${cursorPath}.lock`, "prevent-release"),
+            "held\n",
+          );
+        }
+        return update;
+      },
+      args[3],
+    );
+  }) as typeof originalWithHookWrite;
+
+  let stopped: Awaited<ReturnType<typeof handleCodexHook>>;
+  try {
+    stopped = await handleCodexHook({
+      hook_event_name: "Stop",
+      session_id: nativeSessionId,
+      turn_id: nativeTurnId,
+      cwd: project,
+      stop_hook_active: false,
+      last_assistant_message: "A committed block still renders.",
+    });
+  } finally {
+    NudgeCursorStateStore.prototype.withHookWrite = originalWithHookWrite;
+    await rm(`${cursorPath}.lock`, { recursive: true, force: true });
+  }
+
+  assert.equal(injected, true);
+  assert.match(stopped.stop_reason ?? "", /^Barbaro:/u);
+  assert.match(renderCodexHookOutput(stopped), /"decision":"block"/u);
+  assert.equal((await activeSnapshot(project, nativeSessionId))?.state, "working");
+
+  let incidents = await listIncidents(project);
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (
+      incidents.some(
+        ({ incident }) =>
+          incident.provider === "codex" &&
+          incident.kind === "hook_error" &&
+          incident.detail?.text.includes(
+            "nudge cursor lock release failed after commit",
+          ),
+      )
+    ) {
+      break;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    incidents = await listIncidents(project);
+  }
+  assert.ok(
+    incidents.some(
+      ({ incident }) =>
+        incident.provider === "codex" &&
+        incident.kind === "hook_error" &&
+        incident.detail?.text.includes(
+          "nudge cursor lock release failed after commit",
+        ),
+    ),
+  );
+});
+
+test("Codex renders a committed Stop after active lock cleanup fails", async (t) => {
+  const project = await temporaryProject(t);
+  const nativeSessionId = "session-active-release-failure";
+  const nativeTurnId = "turn-active-release-failure";
+  await joinCodexSession(project, nativeSessionId);
+  await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: nativeTurnId,
+    cwd: project,
+    prompt: "Initialize before peer news arrives.",
+  });
+  await appendPeerTurn({
+    projectRoot: project,
+    workstreamId: await currentWorkstreamId(
+      project,
+      "codex",
+      nativeSessionId,
+    ),
+    sequence: 1,
+    response: "Stop is the first delivery",
+  });
+
+  const stableSessionId = createSessionId("codex", nativeSessionId);
+  const originalUpdate = ActiveLeaseStore.prototype.update;
+  let matchingUpdates = 0;
+  let injected = false;
+  let activeLockPath: string | undefined;
+  ActiveLeaseStore.prototype.update = (async function (
+    this: ActiveLeaseStore,
+    ...args: Parameters<typeof originalUpdate>
+  ) {
+    const actor = args[0];
+    if (
+      actor.provider === "codex" &&
+      actor.session_id === stableSessionId &&
+      actor.agent_id === "main"
+    ) {
+      matchingUpdates += 1;
+      if (matchingUpdates === 2) {
+        const decide = args[1];
+        activeLockPath = `${this.actorPath(actor)}.lock`;
+        return originalUpdate.call(
+          this,
+          actor,
+          async (current) => {
+            const decision = await decide(current);
+            if ("write" in decision) {
+              injected = true;
+              await writeFile(
+                join(activeLockPath!, "prevent-release"),
+                "held\n",
+              );
+            }
+            return decision;
+          },
+          args[2],
+        );
+      }
+    }
+    return originalUpdate.apply(this, args);
+  }) as typeof originalUpdate;
+
+  let stopped: Awaited<ReturnType<typeof handleCodexHook>>;
+  try {
+    stopped = await handleCodexHook({
+      hook_event_name: "Stop",
+      session_id: nativeSessionId,
+      turn_id: nativeTurnId,
+      cwd: project,
+      stop_hook_active: false,
+      last_assistant_message: "A committed block still renders.",
+    });
+  } finally {
+    ActiveLeaseStore.prototype.update = originalUpdate;
+    if (activeLockPath !== undefined) {
+      await rm(activeLockPath, { recursive: true, force: true });
+    }
+  }
+
+  assert.equal(injected, true);
+  assert.match(stopped.stop_reason ?? "", /^Barbaro:/u);
+  assert.match(renderCodexHookOutput(stopped), /"decision":"block"/u);
+  assert.equal((await activeSnapshot(project, nativeSessionId))?.state, "working");
+
+  let incidents = await listIncidents(project);
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (
+      incidents.some(
+        ({ incident }) =>
+          incident.provider === "codex" &&
+          incident.kind === "hook_error" &&
+          incident.detail?.text.includes(
+            "active lease lock release failed after commit",
+          ),
+      )
+    ) {
+      break;
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    incidents = await listIncidents(project);
+  }
+  assert.ok(
+    incidents.some(
+      ({ incident }) =>
+        incident.provider === "codex" &&
+        incident.kind === "hook_error" &&
+        incident.detail?.text.includes(
+          "active lease lock release failed after commit",
+        ),
+    ),
+  );
+});
+
+test("Codex hook nudges are main-only, cursor-based, and Stop-safe", async (t) => {
+  const project = await temporaryProject(t);
+  const nativeSessionId = "session-nudge";
+  const common = {
+    session_id: nativeSessionId,
+    turn_id: "turn-nudge",
+    cwd: project,
+  };
+  await joinCodexSession(project, nativeSessionId);
+  const workstreamId = await currentWorkstreamId(
+    project,
+    "codex",
+    nativeSessionId,
+  );
+  await appendPeerTurn({
+    projectRoot: project,
+    workstreamId,
+    sequence: 1,
+    response: "CHECKPOINT 2 APPROVED\nship it",
+  });
+
+  const promptDelivery = await handleCodexHook({
+    ...common,
+    hook_event_name: "UserPromptSubmit",
+    prompt: "Implement the slice.",
+  });
+  assert.match(promptDelivery.nudge?.text ?? "", /^Barbaro: 1 new peer turn/u);
+  assert.deepEqual(JSON.parse(renderCodexHookOutput(promptDelivery)), {
+    hookSpecificOutput: {
+      hookEventName: "UserPromptSubmit",
+      additionalContext: promptDelivery.nudge?.text,
+    },
+  });
+
+  const child = await handleCodexHook({
+    ...common,
+    hook_event_name: "PreToolUse",
+    agent_id: "agent-child",
+    tool_name: "Bash",
+    tool_input: { command: "pwd" },
+  });
+  assert.equal(child.nudge, undefined, "a child cannot consume the main cursor");
+
+  const permission = await handleCodexHook({
+    ...common,
+    hook_event_name: "PermissionRequest",
+    tool_name: "Bash",
+    tool_input: { command: "pwd" },
+  });
+  assert.equal(permission.nudge, undefined);
+  assert.equal(renderCodexHookOutput(permission), "");
+
+  const sameCountTool = await handleCodexHook({
+    ...common,
+    hook_event_name: "PreToolUse",
+    tool_name: "Bash",
+    tool_input: { command: "pwd" },
+  });
+  assert.equal(sameCountTool.nudge, undefined);
+
+  await appendPeerTurn({
+    projectRoot: project,
+    workstreamId,
+    sequence: 2,
+    response: "news during the same turn",
+  });
+  const higherCountTool = await handleCodexHook({
+    ...common,
+    hook_event_name: "PostToolUse",
+    tool_name: "Bash",
+    tool_input: { command: "pwd" },
+  });
+  assert.match(higherCountTool.nudge?.text ?? "", /^Barbaro: 2 new peer turns/u);
+  assert.match(higherCountTool.nudge?.text ?? "", /latest claude\/main/u);
+  assert.equal((higherCountTool.nudge?.text ?? "").includes("\n"), false);
+  assert.deepEqual(JSON.parse(renderCodexHookOutput(higherCountTool)), {
+    hookSpecificOutput: {
+      hookEventName: "PostToolUse",
+      additionalContext: higherCountTool.nudge?.text,
+    },
+  });
+
+  const repeatedToolBoundary = await handleCodexHook({
+    ...common,
+    hook_event_name: "PreToolUse",
+    tool_name: "Bash",
+    tool_input: { command: "pwd" },
+  });
+  assert.equal(repeatedToolBoundary.nudge, undefined);
+
+  const declined = await handleCodexHook({
+    ...common,
+    hook_event_name: "Stop",
+    stop_hook_active: false,
+    last_assistant_message: `${"answer ".repeat(500)}\nfinal line`,
+  });
+  assert.equal(declined.stop_reason, undefined);
+  assert.equal(renderCodexHookOutput(declined), "");
+  assert.equal((await activeSnapshot(project, nativeSessionId))?.state, "idle");
+  const cursorAfterDecline = await new NudgeCursorStateStore(project).read(
+    "codex",
+    createSessionId("codex", nativeSessionId),
+  );
+  assert.equal(cursorAfterDecline?.markers.stop, undefined);
+
+  const nextCommon = {
+    session_id: nativeSessionId,
+    turn_id: "turn-nudge-next",
+    cwd: project,
+  };
+  const quietNextPrompt = await handleCodexHook({
+    ...nextCommon,
+    hook_event_name: "UserPromptSubmit",
+    prompt: "Continue without reading.",
+  });
+  assert.equal(quietNextPrompt.nudge, undefined);
+  const blocked = await handleCodexHook({
+    ...nextCommon,
+    hook_event_name: "Stop",
+    stop_hook_active: false,
+    last_assistant_message: `${"answer ".repeat(500)}\nfinal line`,
+  });
+  assert.match(blocked.stop_reason ?? "", /run barbaro context/u);
+  assert.match(blocked.stop_reason ?? "", /resend your previous response verbatim/u);
+  assert.equal((blocked.stop_reason ?? "").includes("\n"), false);
+  assert.ok(Buffer.byteLength(blocked.stop_reason ?? "", "utf8") < 2_000);
+  assert.deepEqual(JSON.parse(renderCodexHookOutput(blocked)), {
+    decision: "block",
+    reason: blocked.stop_reason,
+  });
+  assert.equal((await activeSnapshot(project, nativeSessionId))?.state, "working");
+
+  const cleared = await handleCodexHook({
+    ...nextCommon,
+    hook_event_name: "PreToolUse",
+    tool_name: "Bash",
+    tool_input: {
+      command:
+        "barbaro context --provider codex --session-id session-nudge | jq .value",
+    },
+  });
+  assert.equal(cleared.nudge, undefined);
+  const afterClear = await inspectUnreadPeerTurns({
+    projectRoot: project,
+    provider: "codex",
+    nativeSessionId,
+  });
+  assert.equal(afterClear.status, "ready");
+  assert.equal(afterClear.status === "ready" ? afterClear.unread_count : -1, 0);
+
+  await appendPeerTurn({
+    projectRoot: project,
+    workstreamId,
+    sequence: 3,
+    response: "news during the Stop continuation",
+  });
+  const continuedStop = await handleCodexHook({
+    ...nextCommon,
+    hook_event_name: "Stop",
+    stop_hook_active: true,
+    last_assistant_message: "same answer",
+  });
+  assert.equal(continuedStop.stop_reason, undefined);
+  assert.equal(renderCodexHookOutput(continuedStop), "");
+  assert.equal((await activeSnapshot(project, nativeSessionId))?.state, "idle");
+  const cursor = await new NudgeCursorStateStore(project).read(
+    "codex",
+    createSessionId("codex", nativeSessionId),
+  );
+  assert.equal(cursor?.markers.stop, undefined);
+
+  const nextTurn = await handleCodexHook({
+    session_id: nativeSessionId,
+    turn_id: "turn-nudge-after-context",
+    cwd: project,
+    hook_event_name: "UserPromptSubmit",
+    prompt: "Continue.",
+  });
+  assert.match(nextTurn.nudge?.text ?? "", /^Barbaro: 1 new peer turn/u);
+  assert.deepEqual(JSON.parse(renderCodexHookOutput(nextTurn)), {
+    hookSpecificOutput: {
+      hookEventName: "UserPromptSubmit",
+      additionalContext: nextTurn.nudge?.text,
+    },
+  });
+});
+
+test("a newer Codex turn can supersede Stop without consuming its latch", async (t) => {
+  const project = await temporaryProject(t);
+  const nativeSessionId = "session-stop-race";
+  await joinCodexSession(project, nativeSessionId);
+  const firstTurn = {
+    session_id: nativeSessionId,
+    turn_id: "turn-stop-race-old",
+    cwd: project,
+  };
+  const initial = await handleCodexHook({
+    ...firstTurn,
+    hook_event_name: "UserPromptSubmit",
+    prompt: "Initialize the cursor.",
+  });
+  assert.equal(initial.nudge, undefined);
+  await appendPeerTurn({
+    projectRoot: project,
+    workstreamId: await currentWorkstreamId(
+      project,
+      "codex",
+      nativeSessionId,
+    ),
+    sequence: 1,
+    response: "unread during the Stop race",
+  });
+
+  const originalUpdate = ActiveLeaseStore.prototype.update;
+  const stableSessionId = createSessionId("codex", nativeSessionId);
+  let injected = false;
+  let newerPrompt: Awaited<ReturnType<typeof handleCodexHook>> | undefined;
+  ActiveLeaseStore.prototype.update = async function (
+    ...args: Parameters<typeof originalUpdate>
+  ) {
+    const result = await originalUpdate.apply(this, args);
+    const actor = args[0];
+    if (
+      !injected &&
+      actor.provider === "codex" &&
+      actor.session_id === stableSessionId &&
+      actor.agent_id === "main"
+    ) {
+      injected = true;
+      ActiveLeaseStore.prototype.update = originalUpdate;
+      newerPrompt = await handleCodexHook({
+        session_id: nativeSessionId,
+        turn_id: "turn-stop-race-new",
+        cwd: project,
+        hook_event_name: "UserPromptSubmit",
+        prompt: "newer prompt wins",
+      });
+    }
+    return result;
+  };
+
+  let stopped: Awaited<ReturnType<typeof handleCodexHook>>;
+  try {
+    stopped = await handleCodexHook({
+      ...firstTurn,
+      hook_event_name: "Stop",
+      stop_hook_active: false,
+      last_assistant_message: "older answer",
+    });
+  } finally {
+    ActiveLeaseStore.prototype.update = originalUpdate;
+  }
+
+  assert.equal(injected, true);
+  assert.match(newerPrompt?.nudge?.text ?? "", /^Barbaro: 1 new peer turn/u);
+  assert.equal(stopped.stop_reason, undefined);
+  const active = await activeSnapshot(project, nativeSessionId);
+  assert.equal(active?.state, "working");
+  assert.equal(active?.intent?.text, "newer prompt wins");
+  const cursor = await new NudgeCursorStateStore(project).read(
+    "codex",
+    stableSessionId,
+  );
+  assert.equal(cursor?.markers.stop, undefined);
+  const unread = await inspectUnreadPeerTurns({
+    projectRoot: project,
+    provider: "codex",
+    nativeSessionId,
+  });
+  assert.equal(unread.status, "ready");
+  assert.equal(unread.status === "ready" ? unread.unread_count : -1, 1);
+});
+
+test("a trace-attested fresh Codex context tool acknowledges unread turns", async (t) => {
+  const fixture = await idleStopRolloverFixture(
+    t,
+    "session-fresh-context-boundary",
+  );
+  const trace = await writeGoalRolloverTrace(fixture);
+  const cursorStore = new NudgeCursorStateStore(fixture.project);
+  const stableSessionId = createSessionId("codex", fixture.nativeSessionId);
+  const before = await cursorStore.read("codex", stableSessionId);
+  assert.ok(before);
+
+  const acknowledged = await handleCodexHook({
+    hook_event_name: "PreToolUse",
+    session_id: fixture.nativeSessionId,
+    turn_id: fixture.goalTurnId,
+    cwd: fixture.project,
+    transcript_path: trace,
+    tool_name: "Bash",
+    tool_input: {
+      command: `barbaro context --provider codex --session-id ${fixture.nativeSessionId} --project-root ${fixture.project}`,
+    },
+  });
+  assert.equal(acknowledged.active_revision, 3);
+  assert.equal(acknowledged.nudge, undefined);
+
+  const lease = await activeSnapshot(
+    fixture.project,
+    fixture.nativeSessionId,
+  );
+  assert.equal(lease?.state, "working");
+  assert.equal(
+    lease?.turn_id,
+    createTurnId(
+      "codex",
+      fixture.nativeSessionId,
+      "main",
+      fixture.goalTurnId,
+    ),
+  );
+  assert.equal(lease?.intent, undefined);
+  assert.equal(lease?.extensions, undefined);
+
+  const after = await cursorStore.read("codex", stableSessionId);
+  assert.ok(after);
+  assert.equal(after.cursor_revision, before.cursor_revision + 1);
+  assert.notDeepEqual(after.feed_cursors, before.feed_cursors);
+  assert.deepEqual(after.markers, {});
+  const unread = await inspectUnreadPeerTurns({
+    projectRoot: fixture.project,
+    provider: "codex",
+    nativeSessionId: fixture.nativeSessionId,
+  });
+  assert.equal(unread.status, "ready");
+  assert.equal(unread.status === "ready" ? unread.unread_count : -1, 0);
+
+  const cursorPath = cursorStore.cursorPath("codex", stableSessionId);
+  const cursorAfterAcknowledgement = await readFile(cursorPath);
+  const delayed = await handleCodexHook({
+    hook_event_name: "PostToolUse",
+    session_id: fixture.nativeSessionId,
+    turn_id: fixture.priorTurnId,
+    cwd: fixture.project,
+    transcript_path: trace,
+    tool_name: "Bash",
+  });
+  assert.equal(delayed.ignored, "stale turn event ignored");
+  assert.deepEqual(
+    await activeSnapshot(fixture.project, fixture.nativeSessionId),
+    lease,
+  );
+  assert.deepEqual(await readFile(cursorPath), cursorAfterAcknowledgement);
+});
+
+test("trace-attested fresh Codex tool events publish honest lease state", async (t) => {
+  const cases = [
+    {
+      event: "PreToolUse",
+      expectedState: "waiting",
+      expectedNudge: true,
+    },
+    {
+      event: "PermissionRequest",
+      expectedState: "waiting",
+      expectedNudge: false,
+    },
+    {
+      event: "PostToolUse",
+      expectedState: "working",
+      expectedNudge: true,
+    },
+  ] as const;
+
+  for (const candidate of cases) {
+    await t.test(candidate.event, async (subtest) => {
+      const fixture = await idleStopRolloverFixture(
+        subtest,
+        `session-fresh-${candidate.event.toLowerCase()}`,
+      );
+      const trace = await writeGoalRolloverTrace(fixture);
+      const cursorStore = new NudgeCursorStateStore(fixture.project);
+      const stableSessionId = createSessionId("codex", fixture.nativeSessionId);
+      const before = await cursorStore.read("codex", stableSessionId);
+      assert.ok(before);
+      const command = "barbaro await --timeout-ms 120000 --interval-ms 1000";
+
+      const result = await handleCodexHook({
+        hook_event_name: candidate.event,
+        session_id: fixture.nativeSessionId,
+        turn_id: fixture.goalTurnId,
+        cwd: fixture.project,
+        transcript_path: trace,
+        tool_name: "Bash",
+        tool_input: { command },
+      });
+      assert.equal(result.active_revision, 3);
+      assert.equal(result.nudge !== undefined, candidate.expectedNudge);
+
+      const lease = await activeSnapshot(
+        fixture.project,
+        fixture.nativeSessionId,
+      );
+      assert.ok(lease);
+      assert.equal(lease.state, candidate.expectedState);
+      assert.equal(
+        lease.turn_id,
+        createTurnId(
+          "codex",
+          fixture.nativeSessionId,
+          "main",
+          fixture.goalTurnId,
+        ),
+      );
+      assert.equal(lease.intent, undefined);
+      assert.equal(lease.extensions, undefined);
+      if (candidate.expectedState === "waiting") {
+        assert.equal(lease.current_action?.kind, "command");
+        assert.equal(lease.current_action?.command?.text, command);
+        assert.deepEqual(lease.claims, []);
+        assert.equal(lease.unknown_write_scope, false);
+        assert.equal(
+          leaseTtlMs(lease),
+          120_000 + AWAIT_LEASE_GRACE_MS,
+        );
+      } else {
+        assert.equal(lease.current_action, undefined);
+        assert.deepEqual(lease.claims, []);
+        assert.equal(lease.unknown_write_scope, false);
+      }
+
+      const after = await cursorStore.read("codex", stableSessionId);
+      assert.ok(after);
+      assert.equal(after.cursor_revision, before.cursor_revision);
+      assert.deepEqual(after.feed_cursors, before.feed_cursors);
+      assert.equal(after.schema, NUDGE_CURSOR_SCHEMA);
+      assert.equal(
+        after.schema === NUDGE_CURSOR_SCHEMA
+          ? after.delivery.highest_unread_count
+          : -1,
+        candidate.expectedNudge ? 1 : 0,
+      );
+      const unread = await inspectUnreadPeerTurns({
+        projectRoot: fixture.project,
+        provider: "codex",
+        nativeSessionId: fixture.nativeSessionId,
+      });
+      assert.equal(unread.status, "ready");
+      assert.equal(unread.status === "ready" ? unread.unread_count : -1, 1);
+    });
+  }
+});
+
+test("delayed fresh-turn tool events cannot roll an idle lease", async (t) => {
+  for (const event of [
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+  ] as const) {
+    await t.test(event, async (eventTest) => {
+      for (const delayedCase of [
+        "idle-tombstone-turn",
+        "non-head-turn",
+      ] as const) {
+        await eventTest.test(delayedCase, async (subtest) => {
+          const fixture = await idleStopRolloverFixture(
+            subtest,
+            `session-stale-${event.toLowerCase()}-${delayedCase}`,
+          );
+          const eventTurnId =
+            delayedCase === "idle-tombstone-turn"
+              ? fixture.priorTurnId
+              : fixture.goalTurnId;
+          const traceHeadTurnId =
+            delayedCase === "idle-tombstone-turn"
+              ? fixture.goalTurnId
+              : "turn-newer-than-delayed-event";
+          const trace = await writeGoalRolloverTrace({
+            ...fixture,
+            goalTurnId: traceHeadTurnId,
+          });
+
+          const stale = await handleCodexHook({
+            hook_event_name: event,
+            session_id: fixture.nativeSessionId,
+            turn_id: eventTurnId,
+            cwd: fixture.project,
+            transcript_path: trace,
+            tool_name: "Bash",
+            tool_input: { command: "barbaro context" },
+          });
+          assert.equal(stale.ignored, "stale turn event ignored");
+          assert.equal(stale.active_revision, undefined);
+          assert.equal(stale.nudge, undefined);
+          assert.deepEqual(
+            await activeSnapshot(fixture.project, fixture.nativeSessionId),
+            fixture.leaseBefore,
+          );
+          assert.deepEqual(
+            await readFile(fixture.cursorPath),
+            fixture.cursorBefore,
+          );
+        });
+      }
+    });
+  }
+});
+
+test("a trace-attested text-only Codex turn can nudge from Stop", async (t) => {
+  const project = await temporaryProject(t);
+  const nativeSessionId = "session-text-only-stop-nudge";
+  const priorTurnId = "turn-before-goal-iteration";
+  const goalTurnId = "turn-text-only-goal-iteration";
+  const trace = join(project, "rollout-text-only-stop-nudge.jsonl");
+  await joinCodexSession(project, nativeSessionId);
+  await writeFile(
+    trace,
+    [
+      rollout("session_meta", {
+        session_id: nativeSessionId,
+        id: nativeSessionId,
+        cwd: project,
+        cli_version: "0.148.0-alpha.9",
+        thread_source: "user",
+      }),
+      rollout("event_msg", { type: "task_started", turn_id: priorTurnId }),
+      rollout("event_msg", { type: "user_message", message: "Initial turn" }),
+      rollout("event_msg", {
+        type: "task_complete",
+        turn_id: priorTurnId,
+        last_agent_message: "Initial answer",
+      }),
+    ].map((record) => `${JSON.stringify(record)}\n`).join(""),
+    "utf8",
+  );
+  await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: priorTurnId,
+    cwd: project,
+    transcript_path: trace,
+    prompt: "Initial turn",
+  });
+  const priorStop = await handleCodexHook({
+    hook_event_name: "Stop",
+    session_id: nativeSessionId,
+    turn_id: priorTurnId,
+    cwd: project,
+    transcript_path: trace,
+    stop_hook_active: false,
+    last_assistant_message: "Initial answer",
+  });
+  assert.equal(priorStop.active_revision, 2);
+  assert.equal((await activeSnapshot(project, nativeSessionId))?.state, "idle");
+
+  // Codex goal continuations do not fire UserPromptSubmit. The native rollout
+  // nevertheless attests the new turn before its first Stop hook arrives.
+  await appendFile(
+    trace,
+    [
+      rollout("event_msg", { type: "task_started", turn_id: goalTurnId }),
+      rollout("event_msg", {
+        type: "user_message",
+        message: "<codex_internal_context source=\"goal\">continue</codex_internal_context>",
+      }),
+    ].map((record) => `${JSON.stringify(record)}\n`).join(""),
+    "utf8",
+  );
+  const workstreamId = await currentWorkstreamId(
+    project,
+    "codex",
+    nativeSessionId,
+  );
+  await appendPeerTurn({
+    projectRoot: project,
+    workstreamId,
+    sequence: 1,
+    response: "CHECKPOINT 2 REVISE: inspect this before stopping",
+  });
+  const cursorStore = new NudgeCursorStateStore(project);
+  const stableSessionId = createSessionId("codex", nativeSessionId);
+  const beforeClaim = await cursorStore.read("codex", stableSessionId);
+  assert.ok(beforeClaim);
+
+  const blocked = await handleCodexHook({
+    hook_event_name: "Stop",
+    session_id: nativeSessionId,
+    turn_id: goalTurnId,
+    cwd: project,
+    transcript_path: trace,
+    stop_hook_active: false,
+    last_assistant_message: "WAITING: still gated",
+  });
+  assert.match(blocked.stop_reason ?? "", /^Barbaro:/u);
+  assert.deepEqual(JSON.parse(renderCodexHookOutput(blocked)), {
+    decision: "block",
+    reason: blocked.stop_reason,
+  });
+
+  const expectedTurnId = createTurnId(
+    "codex",
+    nativeSessionId,
+    "main",
+    goalTurnId,
+  );
+  const continued = await activeSnapshot(project, nativeSessionId);
+  assert.equal(continued?.revision, 4);
+  assert.equal(continued?.state, "working");
+  assert.equal(continued?.turn_id, expectedTurnId);
+  assert.equal(continued?.intent, undefined);
+  assert.deepEqual(continued?.claims, []);
+  assert.equal(continued?.unknown_write_scope, false);
+  assert.deepEqual(continued?.extensions?.codex, {
+    barbaro_stop_continuation: {
+      active: true,
+      turn_id: expectedTurnId,
+    },
+  });
+
+  const afterClaim = await cursorStore.read("codex", stableSessionId);
+  assert.ok(afterClaim);
+  assert.equal(afterClaim.cursor_revision, beforeClaim.cursor_revision);
+  assert.deepEqual(afterClaim.feed_cursors, beforeClaim.feed_cursors);
+  assert.equal(afterClaim.markers.stop, afterClaim.cursor_revision);
+  const unread = await inspectUnreadPeerTurns({
+    projectRoot: project,
+    provider: "codex",
+    nativeSessionId,
+  });
+  assert.equal(unread.status, "ready");
+  assert.equal(unread.status === "ready" ? unread.unread_count : -1, 1);
+
+  const cursorPath = cursorStore.cursorPath("codex", stableSessionId);
+  const cursorBeforeActiveStop = await readFile(cursorPath);
+  const activeStop = await handleCodexHook({
+    hook_event_name: "Stop",
+    session_id: nativeSessionId,
+    turn_id: goalTurnId,
+    cwd: project,
+    transcript_path: trace,
+    stop_hook_active: true,
+    last_assistant_message: "WAITING: still gated",
+  });
+  assert.equal(activeStop.stop_reason, undefined);
+  assert.equal(renderCodexHookOutput(activeStop), "");
+  assert.deepEqual(await readFile(cursorPath), cursorBeforeActiveStop);
+  const idle = await activeSnapshot(project, nativeSessionId);
+  assert.equal(idle?.revision, 5);
+  assert.equal(idle?.state, "idle");
+  assert.equal(idle?.turn_id, expectedTurnId);
+  assert.equal(idle?.extensions, undefined);
+  assert.equal(
+    (await listIncidents(project)).some(
+      ({ incident }) => incident.kind === "hook_error",
+    ),
+    false,
+  );
+});
+
+test("an idle lease still rejects a Stop older than the rollout head", async (t) => {
+  const project = await temporaryProject(t);
+  const nativeSessionId = "session-idle-stale-stop";
+  const oldTurnId = "turn-old";
+  const currentTurnId = "turn-current";
+  const trace = join(project, "rollout-idle-stale-stop.jsonl");
+  await joinCodexSession(project, nativeSessionId);
+  await writeFile(
+    trace,
+    [
+      rollout("session_meta", {
+        session_id: nativeSessionId,
+        id: nativeSessionId,
+        cwd: project,
+        cli_version: "0.148.0-alpha.9",
+        thread_source: "user",
+      }),
+      rollout("event_msg", { type: "task_started", turn_id: oldTurnId }),
+      rollout("event_msg", { type: "task_complete", turn_id: oldTurnId }),
+      rollout("event_msg", { type: "task_started", turn_id: currentTurnId }),
+      rollout("event_msg", { type: "task_complete", turn_id: currentTurnId }),
+    ].map((record) => `${JSON.stringify(record)}\n`).join(""),
+    "utf8",
+  );
+  await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: currentTurnId,
+    cwd: project,
+    transcript_path: trace,
+    prompt: "Current turn",
+  });
+  await handleCodexHook({
+    hook_event_name: "Stop",
+    session_id: nativeSessionId,
+    turn_id: currentTurnId,
+    cwd: project,
+    transcript_path: trace,
+    stop_hook_active: false,
+    last_assistant_message: "Current answer",
+  });
+  await appendPeerTurn({
+    projectRoot: project,
+    workstreamId: await currentWorkstreamId(
+      project,
+      "codex",
+      nativeSessionId,
+    ),
+    sequence: 1,
+    response: "unread that an old Stop must not claim",
+  });
+  const leaseBefore = await activeSnapshot(project, nativeSessionId);
+  const cursorStore = new NudgeCursorStateStore(project);
+  const stableSessionId = createSessionId("codex", nativeSessionId);
+  const cursorPath = cursorStore.cursorPath("codex", stableSessionId);
+  const cursorBefore = await readFile(cursorPath);
+
+  const stale = await handleCodexHook({
+    hook_event_name: "Stop",
+    session_id: nativeSessionId,
+    turn_id: oldTurnId,
+    cwd: project,
+    transcript_path: trace,
+    stop_hook_active: false,
+    last_assistant_message: "Delayed old answer",
+  });
+  assert.equal(stale.ignored, "stale turn event ignored");
+  assert.equal(stale.stop_reason, undefined);
+  assert.deepEqual(await activeSnapshot(project, nativeSessionId), leaseBefore);
+  assert.deepEqual(await readFile(cursorPath), cursorBefore);
+});
+
+test("text-only Stop rollover validates transcript identity before writes", async (t) => {
+  for (const mismatch of ["session", "cwd"] as const) {
+    await t.test(mismatch, async (subtest) => {
+      const fixture = await idleStopRolloverFixture(
+        subtest,
+        `session-stop-${mismatch}-mismatch`,
+      );
+      const trace = join(fixture.project, `rollout-${mismatch}-mismatch.jsonl`);
+      await writeFile(
+        trace,
+        [
+          rollout("session_meta", {
+            session_id:
+              mismatch === "session"
+                ? "different-session"
+                : fixture.nativeSessionId,
+            id:
+              mismatch === "session"
+                ? "different-session"
+                : fixture.nativeSessionId,
+            cwd:
+              mismatch === "cwd"
+                ? join(fixture.project, "different-project")
+                : fixture.project,
+            cli_version: "0.148.0-alpha.9",
+            thread_source: "user",
+          }),
+          rollout("event_msg", {
+            type: "task_started",
+            turn_id: fixture.priorTurnId,
+          }),
+          rollout("event_msg", {
+            type: "task_started",
+            turn_id: fixture.goalTurnId,
+          }),
+        ].map((record) => `${JSON.stringify(record)}\n`).join(""),
+        "utf8",
+      );
+
+      await assert.rejects(
+        handleCodexHook({
+          hook_event_name: "Stop",
+          session_id: fixture.nativeSessionId,
+          turn_id: fixture.goalTurnId,
+          cwd: fixture.project,
+          transcript_path: trace,
+          stop_hook_active: false,
+          last_assistant_message: "text-only answer",
+        }),
+        mismatch === "session"
+          ? /session_id does not match transcript session_meta\.session_id/u
+          : /cwd does not match transcript session_meta\.cwd/u,
+      );
+      assert.deepEqual(
+        await activeSnapshot(fixture.project, fixture.nativeSessionId),
+        fixture.leaseBefore,
+      );
+      assert.deepEqual(
+        await readFile(fixture.cursorPath),
+        fixture.cursorBefore,
+      );
+    });
+  }
+});
+
+test("ambiguous rollout tails cannot attest a text-only Stop rollover", async (t) => {
+  for (const tail of ["malformed", "partial"] as const) {
+    await t.test(tail, async (subtest) => {
+      const fixture = await idleStopRolloverFixture(
+        subtest,
+        `session-stop-${tail}-tail`,
+      );
+      const trace = join(fixture.project, `rollout-${tail}-tail.jsonl`);
+      const complete = [
+        rollout("session_meta", {
+          session_id: fixture.nativeSessionId,
+          id: fixture.nativeSessionId,
+          cwd: fixture.project,
+          cli_version: "0.148.0-alpha.9",
+          thread_source: "user",
+        }),
+        rollout("event_msg", {
+          type: "task_started",
+          turn_id: fixture.priorTurnId,
+        }),
+        rollout("event_msg", {
+          type: "task_started",
+          turn_id: fixture.goalTurnId,
+        }),
+      ].map((record) => `${JSON.stringify(record)}\n`).join("");
+      await writeFile(
+        trace,
+        complete + (tail === "malformed" ? "{malformed}\n" : "{"),
+        "utf8",
+      );
+
+      const stale = await handleCodexHook({
+        hook_event_name: "Stop",
+        session_id: fixture.nativeSessionId,
+        turn_id: fixture.goalTurnId,
+        cwd: fixture.project,
+        transcript_path: trace,
+        stop_hook_active: false,
+        last_assistant_message: "text-only answer",
+      });
+      assert.equal(stale.ignored, "stale turn event ignored");
+      assert.equal(stale.stop_reason, undefined);
+      assert.deepEqual(
+        await activeSnapshot(fixture.project, fixture.nativeSessionId),
+        fixture.leaseBefore,
+      );
+      assert.deepEqual(
+        await readFile(fixture.cursorPath),
+        fixture.cursorBefore,
+      );
+      const unread = await inspectUnreadPeerTurns({
+        projectRoot: fixture.project,
+        provider: "codex",
+        nativeSessionId: fixture.nativeSessionId,
+      });
+      assert.equal(unread.status, "ready");
+      assert.equal(unread.status === "ready" ? unread.unread_count : -1, 1);
+    });
+  }
+});
+
+test("a stale Codex Stop cannot consume the current turn's stop marker", async (t) => {
+  const project = await temporaryProject(t);
+  const nativeSessionId = "session-stale-nudge-stop";
+  await joinCodexSession(project, nativeSessionId);
+  await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: "current-turn",
+    cwd: project,
+    prompt: "Current work.",
+  });
+  const workstreamId = await currentWorkstreamId(
+    project,
+    "codex",
+    nativeSessionId,
+  );
+  await appendPeerTurn({
+    projectRoot: project,
+    workstreamId,
+    sequence: 1,
+    response: "unread for the current turn",
+  });
+
+  const stale = await handleCodexHook({
+    hook_event_name: "Stop",
+    session_id: nativeSessionId,
+    turn_id: "old-turn",
+    cwd: project,
+    stop_hook_active: false,
+    last_assistant_message: "old",
+  });
+  assert.equal(stale.ignored, "stale turn event ignored");
+  assert.equal(stale.stop_reason, undefined);
+
+  const current = await handleCodexHook({
+    hook_event_name: "Stop",
+    session_id: nativeSessionId,
+    turn_id: "current-turn",
+    cwd: project,
+    stop_hook_active: false,
+    last_assistant_message: "current",
+  });
+  assert.match(current.stop_reason ?? "", /^Barbaro:/u);
+});
+
+test("a corrupt Codex cursor fails open after Stop has gone idle", async (t) => {
+  const project = await temporaryProject(t);
+  const nativeSessionId = "session-corrupt-nudge-cursor";
+  const common = {
+    session_id: nativeSessionId,
+    turn_id: "turn-corrupt-nudge-cursor",
+    cwd: project,
+  };
+  await joinCodexSession(project, nativeSessionId);
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "UserPromptSubmit",
+    prompt: "Finish safely.",
+  });
+  const cursorStore = new NudgeCursorStateStore(project);
+  const cursorPath = cursorStore.cursorPath(
+    "codex",
+    createSessionId("codex", nativeSessionId),
+  );
+  assert.ok(
+    await cursorStore.read("codex", createSessionId("codex", nativeSessionId)),
+  );
+  const corrupt = "{broken cursor\n";
+  await writeFile(cursorPath, corrupt, "utf8");
+
+  const result = await handleCodexHookFailOpen({
+    ...common,
+    hook_event_name: "Stop",
+    stop_hook_active: false,
+    last_assistant_message: "done",
+  });
+  assert.equal(result, undefined);
+  assert.equal(renderCodexHookOutput(result), "");
+  assert.equal((await activeSnapshot(project, nativeSessionId))?.state, "idle");
+  assert.equal(await readFile(cursorPath, "utf8"), corrupt);
+  assert.ok(
+    (await listIncidents(project)).some(
+      ({ incident }) =>
+        incident.provider === "codex" &&
+        incident.kind === "hook_error" &&
+        incident.event === "Stop",
+    ),
+  );
+});
+
 test("generated-only patches do not create claims or unknown project scope", async (t) => {
   const project = await temporaryProject(t);
   const common = {
@@ -411,6 +1959,7 @@ test("Bash hooks carry bounded command context and declare unknown write scope",
   });
 
   const snapshot = await activeSnapshot(project, nativeSessionId);
+  assert.equal(snapshot?.state, "working");
   assert.equal(snapshot?.current_action?.kind, "command");
   assert.equal(snapshot?.current_action?.tool_name, "Bash");
   assert.equal(snapshot?.current_action?.command?.truncated, true);
@@ -420,6 +1969,97 @@ test("Bash hooks carry bounded command context and declare unknown write scope",
   );
   assert.equal(snapshot?.unknown_write_scope, true);
   assert.deepEqual(snapshot?.claims, []);
+});
+
+test("await shell hooks stay waiting through permission and restore after completion", async (t) => {
+  const project = await temporaryProject(t);
+  const nativeSessionId = "session-await-exec";
+  const common = {
+    session_id: nativeSessionId,
+    turn_id: "turn-await-exec",
+    cwd: project,
+  };
+  await joinCodexSession(project, nativeSessionId);
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "UserPromptSubmit",
+    prompt: "Wait for the reviewer.",
+  });
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "PreToolUse",
+    tool_name: "apply_patch",
+    tool_input: {
+      command: "*** Begin Patch\n*** Update File: src/prior.ts\n*** End Patch",
+    },
+  });
+  assert.equal(
+    (await activeSnapshot(project, nativeSessionId))?.claims.length,
+    1,
+  );
+
+  const command = "barbaro await --timeout-ms 120000 --interval-ms 1000";
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "PreToolUse",
+    tool_name: "Bash",
+    tool_input: { command },
+  });
+  const waiting = await activeSnapshot(project, nativeSessionId);
+  assert.ok(waiting);
+  assert.equal(waiting.state, "waiting");
+  assert.equal(waiting.current_action?.kind, "command");
+  assert.equal(waiting.current_action?.tool_name, "Bash");
+  assert.equal(waiting.current_action?.command?.text, command);
+  assert.deepEqual(waiting.claims, []);
+  assert.equal(waiting.unknown_write_scope, false);
+  assert.equal(waiting.intent?.text, "Wait for the reviewer.");
+  assert.equal(leaseTtlMs(waiting), 120_000 + AWAIT_LEASE_GRACE_MS);
+
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "PermissionRequest",
+    tool_name: "exec",
+    tool_input: { command },
+  });
+  const permission = await activeSnapshot(project, nativeSessionId);
+  assert.ok(permission);
+  assert.equal(permission.state, "waiting");
+  assert.deepEqual(permission.current_action, waiting.current_action);
+  assert.deepEqual(permission.claims, []);
+  assert.equal(permission.unknown_write_scope, false);
+  assert.equal(leaseTtlMs(permission), 120_000 + AWAIT_LEASE_GRACE_MS);
+
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "PostToolUse",
+    tool_name: "exec",
+  });
+  const restored = await activeSnapshot(project, nativeSessionId);
+  assert.ok(restored);
+  assert.equal(restored.state, "working");
+  assert.equal(restored.current_action, undefined);
+  assert.deepEqual(restored.claims, []);
+  assert.equal(restored.unknown_write_scope, false);
+  assert.equal(restored.intent?.text, "Wait for the reviewer.");
+  assert.equal(leaseTtlMs(restored), 300_000);
+
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "PreToolUse",
+    tool_name: "exec",
+    tool_input: { command },
+  });
+  const explicitExec = await activeSnapshot(project, nativeSessionId);
+  assert.ok(explicitExec);
+  assert.equal(explicitExec.state, "waiting");
+  assert.equal(explicitExec.current_action?.tool_name, "exec");
+  assert.deepEqual(explicitExec.claims, []);
+  assert.equal(explicitExec.unknown_write_scope, false);
+  assert.equal(
+    leaseTtlMs(explicitExec),
+    120_000 + AWAIT_LEASE_GRACE_MS,
+  );
 });
 
 test("unknown mutators are conservative while version-pinned reads are known", async (t) => {
@@ -720,6 +2360,30 @@ test("SubagentStop clears activity before ingesting its transcript as evidence",
     agent_id: "agent-stopped",
   });
   assert.equal(snapshot?.state, "idle");
+  const journal = await readIngestAttemptJournal(
+    join(
+      project,
+      ".barbaro",
+      "logs",
+      "ingest",
+      "codex",
+      `${createSessionId("codex", "session-subagent-stop")}.json`,
+    ),
+  );
+  const attempt = journal.attempts.at(-1);
+  assert.ok(attempt);
+  assert.equal(attempt.trigger?.native_turn_id, "parent-turn");
+  assert.equal(
+    attempt.trigger?.turn_id,
+    createTurnId(
+      "codex",
+      "session-subagent-stop",
+      "agent-stopped",
+      "parent-turn",
+    ),
+  );
+  assert.equal(attempt.trigger?.agent_id, "agent-stopped");
+  assert.equal(attempt.publish_blocker, undefined);
 });
 
 test("session, permission, and compaction hooks follow the frozen lifecycle", async (t) => {
@@ -816,7 +2480,7 @@ test("session, permission, and compaction hooks follow the frozen lifecycle", as
   assert.equal(ended?.intent, undefined);
 });
 
-test("PermissionRequest reconstructs an action when PreToolUse was not observed", async (t) => {
+test("PermissionRequest reconstructs ordinary and await actions without PreToolUse", async (t) => {
   const project = await temporaryProject(t);
   const nativeSessionId = "session-permission-reconstruct";
   await joinCodexSession(project, nativeSessionId);
@@ -834,6 +2498,31 @@ test("PermissionRequest reconstructs an action when PreToolUse was not observed"
   assert.equal(snapshot?.current_action?.kind, "command");
   assert.equal(snapshot?.current_action?.command?.text, "npm test");
   assert.equal(snapshot?.unknown_write_scope, true);
+
+  const awaitSessionId = "session-permission-await";
+  await joinCodexSession(project, awaitSessionId);
+  await handleCodexHook({
+    hook_event_name: "PermissionRequest",
+    session_id: awaitSessionId,
+    turn_id: "turn-permission-await",
+    cwd: project,
+    tool_name: "exec",
+    tool_input: { command: "barbaro await --timeout-ms nope" },
+  });
+  const awaitSnapshot = await activeSnapshot(project, awaitSessionId);
+  assert.ok(awaitSnapshot);
+  assert.equal(awaitSnapshot.state, "waiting");
+  assert.equal(awaitSnapshot.current_action?.kind, "command");
+  assert.equal(
+    awaitSnapshot.current_action?.command?.text,
+    "barbaro await --timeout-ms nope",
+  );
+  assert.deepEqual(awaitSnapshot.claims, []);
+  assert.equal(awaitSnapshot.unknown_write_scope, false);
+  assert.equal(
+    leaseTtlMs(awaitSnapshot),
+    DEFAULT_AWAIT_TIMEOUT_MS + AWAIT_LEASE_GRACE_MS,
+  );
 });
 
 test("delayed turn events cannot overwrite the authoritative newer prompt", async (t) => {
@@ -1071,6 +2760,329 @@ test("asynchronous Stop ingestion waits for Codex to persist task_complete", asy
   ]);
 });
 
+test("a nudge-blocked Stop hands off ingest until the active Stop", async (t) => {
+  const project = await temporaryProject(t);
+  const nativeSessionId = "session-stop-nudge-ingest";
+  const nativeTurnId = "turn-stop-nudge-ingest";
+  const trace = join(project, "rollout-stop-nudge-ingest.jsonl");
+  await joinCodexSession(project, nativeSessionId);
+  await writeFile(
+    trace,
+    [
+      rollout("session_meta", {
+        session_id: nativeSessionId,
+        id: nativeSessionId,
+        cwd: project,
+        cli_version: "0.148.0-alpha.9",
+        thread_source: "user",
+      }),
+      rollout("event_msg", { type: "task_started", turn_id: nativeTurnId }),
+      rollout("event_msg", {
+        type: "user_message",
+        message: "Wait for peer context",
+      }),
+    ].map((record) => `${JSON.stringify(record)}\n`).join(""),
+    "utf8",
+  );
+  const common = {
+    session_id: nativeSessionId,
+    turn_id: nativeTurnId,
+    cwd: project,
+  };
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "UserPromptSubmit",
+    prompt: "Wait for peer context",
+  });
+  await appendPeerTurn({
+    projectRoot: project,
+    workstreamId: await currentWorkstreamId(
+      project,
+      "codex",
+      nativeSessionId,
+    ),
+    sequence: 1,
+    response: "peer context that blocks the first Stop",
+  });
+  const firstStop = {
+    ...common,
+    hook_event_name: "Stop",
+    transcript_path: trace,
+    stop_hook_active: false,
+    last_assistant_message: "first answer",
+  };
+  const attemptPath = join(
+    project,
+    ".barbaro",
+    "logs",
+    "ingest",
+    "codex",
+    `${createSessionId("codex", nativeSessionId)}.json`,
+  );
+  const observedAttemptIds = new Set<string>();
+  const firstIngest = handleCodexIngestHook(firstStop, {
+    pollIntervalMs: 5,
+    timeoutMs: 1_000,
+  });
+  let firstAttemptId: string | undefined;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    try {
+      const current = await readIngestAttemptJournal(attemptPath);
+      const started = newestUnseenAttempt(current, observedAttemptIds, false);
+      if (started !== undefined) {
+        firstAttemptId = started.attempt_id;
+        observedAttemptIds.add(started.attempt_id);
+        break;
+      }
+    } catch {
+      // The asynchronous hook has not created its attempt marker yet.
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 5));
+  }
+  assert.notEqual(firstAttemptId, undefined);
+  const blocked = await handleCodexHook(firstStop);
+  assert.match(blocked.stop_reason ?? "", /^Barbaro:/u);
+  const expectedTurnId = createTurnId(
+    "codex",
+    nativeSessionId,
+    "main",
+    nativeTurnId,
+  );
+  assert.deepEqual(
+    (await activeSnapshot(project, nativeSessionId))?.extensions?.codex,
+    {
+      barbaro_stop_continuation: {
+        active: true,
+        turn_id: expectedTurnId,
+      },
+    },
+  );
+
+  // The first Stop ingest began before the sync hook published its handoff.
+  // It must observe that handoff and finish without manufacturing a timeout
+  // incident while the model is in the requested continuation.
+  const deferred = await firstIngest;
+  assert.equal(
+    deferred.ignored,
+    "Stop continuation is intentionally nonterminal",
+  );
+  const deferredAttempt = findIngestAttempt(
+    await readIngestAttemptJournal(attemptPath),
+    firstAttemptId!,
+  );
+  assert.equal(deferredAttempt.outcome, "ok");
+
+  // Same-turn tool, permission, and compact boundaries keep the handoff live,
+  // including the waiting lease that may last longer than the ingest timeout.
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "PreToolUse",
+    tool_name: "Bash",
+    tool_input: { command: "pwd" },
+  });
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "PermissionRequest",
+    tool_name: "Bash",
+    tool_input: { command: "pwd" },
+  });
+  assert.equal((await activeSnapshot(project, nativeSessionId))?.state, "waiting");
+  const waitingDeferred = await handleCodexIngestHook(firstStop, {
+    pollIntervalMs: 1,
+    timeoutMs: 1,
+  });
+  assert.equal(
+    waitingDeferred.ignored,
+    "Stop continuation is intentionally nonterminal",
+  );
+  const waitingJournal = await readIngestAttemptJournal(attemptPath);
+  const waitingAttempt = newestUnseenAttempt(
+    waitingJournal,
+    observedAttemptIds,
+    true,
+  );
+  assert.ok(waitingAttempt);
+  observedAttemptIds.add(waitingAttempt.attempt_id);
+  assert.equal(waitingAttempt.outcome, "ok");
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "PostToolUse",
+    tool_name: "Bash",
+  });
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "PreCompact",
+    trigger: "auto",
+  });
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "PostCompact",
+    trigger: "auto",
+  });
+  assert.deepEqual(
+    (await activeSnapshot(project, nativeSessionId))?.extensions?.codex,
+    {
+      barbaro_stop_continuation: {
+        active: true,
+        turn_id: expectedTurnId,
+      },
+    },
+  );
+
+  // Start the active-Stop ingest worker while the old handoff is still
+  // visible. stop_hook_active must prevent a false deferral; the synchronous
+  // active Stop then clears the handoff and the durable terminal is ingested.
+  const finalStop = { ...firstStop, stop_hook_active: true };
+  await assert.rejects(
+    handleCodexIngestHook(finalStop, {
+      pollIntervalMs: 1,
+      timeoutMs: 1,
+    }),
+    /did not reach a terminal record/u,
+  );
+  const activeTimeoutAttempt = newestUnseenAttempt(
+    await readIngestAttemptJournal(attemptPath),
+    observedAttemptIds,
+    true,
+  );
+  assert.ok(activeTimeoutAttempt);
+  observedAttemptIds.add(activeTimeoutAttempt.attempt_id);
+  assert.equal(activeTimeoutAttempt.outcome, "error");
+  const finalIngest = handleCodexIngestHook(finalStop, {
+    pollIntervalMs: 5,
+    timeoutMs: 1_000,
+  });
+  let finalAttemptId: string | undefined;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const current = await readIngestAttemptJournal(attemptPath);
+    const started = newestUnseenAttempt(current, observedAttemptIds, false);
+    if (started !== undefined) {
+      finalAttemptId = started.attempt_id;
+      observedAttemptIds.add(started.attempt_id);
+      break;
+    }
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 5));
+  }
+  assert.notEqual(finalAttemptId, undefined);
+  const activeStop = await handleCodexHook(finalStop);
+  assert.equal(activeStop.stop_reason, undefined);
+  assert.equal((await activeSnapshot(project, nativeSessionId))?.state, "idle");
+  assert.equal(
+    (await activeSnapshot(project, nativeSessionId))?.extensions,
+    undefined,
+  );
+  await appendFile(
+    trace,
+    `${JSON.stringify(
+      rollout("event_msg", {
+        type: "task_complete",
+        turn_id: nativeTurnId,
+        last_agent_message: "answer after context",
+      }),
+    )}\n`,
+    "utf8",
+  );
+  const published = await finalIngest;
+  assert.deepEqual(published.trace_result?.output.terminal_native_turn_ids, [
+    nativeTurnId,
+  ]);
+  const completedFinalAttempt = findIngestAttempt(
+    await readIngestAttemptJournal(attemptPath),
+    finalAttemptId!,
+  );
+  assert.equal(completedFinalAttempt.event, "Stop");
+  assert.equal(completedFinalAttempt.outcome, "ok");
+  assert.equal(completedFinalAttempt.trigger?.native_turn_id, nativeTurnId);
+  assert.equal(completedFinalAttempt.trigger?.turn_id, expectedTurnId);
+  assert.equal(completedFinalAttempt.trigger?.agent_id, "main");
+  assert.ok(completedFinalAttempt.trigger?.last_assistant_message?.sha256);
+  assert.ok(completedFinalAttempt.observations.count >= 2);
+  assert.ok(
+    completedFinalAttempt.observations.first!.observed_size <
+      completedFinalAttempt.observations.last!.observed_size,
+  );
+  assert.ok(completedFinalAttempt.checkpoint_before);
+  assert.ok(completedFinalAttempt.checkpoint_after);
+  assert.equal(completedFinalAttempt.turns_appended, 1);
+  assert.equal(completedFinalAttempt.runner_input?.partial_final_line, false);
+  assert.equal(completedFinalAttempt.publish_blocker, undefined);
+  assert.equal(
+    (await listIncidents(project)).some(
+      ({ incident }) => incident.kind === "hook_error",
+    ),
+    false,
+  );
+});
+
+test("a new Codex turn clears the Stop continuation handoff", async (t) => {
+  const project = await temporaryProject(t);
+  const nativeSessionId = "session-stop-nudge-cleared";
+  const nativeTurnId = "turn-stop-nudge-cleared";
+  const trace = join(project, "rollout-stop-nudge-cleared.jsonl");
+  await joinCodexSession(project, nativeSessionId);
+  await writeFile(
+    trace,
+    [
+      rollout("session_meta", {
+        session_id: nativeSessionId,
+        id: nativeSessionId,
+        cwd: project,
+        cli_version: "0.148.0-alpha.9",
+        thread_source: "user",
+      }),
+      rollout("event_msg", { type: "task_started", turn_id: nativeTurnId }),
+      rollout("event_msg", { type: "user_message", message: "First turn" }),
+    ].map((record) => `${JSON.stringify(record)}\n`).join(""),
+    "utf8",
+  );
+  await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: nativeTurnId,
+    cwd: project,
+    prompt: "First turn",
+  });
+  await appendPeerTurn({
+    projectRoot: project,
+    workstreamId: await currentWorkstreamId(
+      project,
+      "codex",
+      nativeSessionId,
+    ),
+    sequence: 1,
+    response: "unread before Stop",
+  });
+  const staleStop = {
+    hook_event_name: "Stop",
+    session_id: nativeSessionId,
+    turn_id: nativeTurnId,
+    cwd: project,
+    transcript_path: trace,
+    stop_hook_active: false,
+    last_assistant_message: "first answer",
+  };
+  assert.match((await handleCodexHook(staleStop)).stop_reason ?? "", /^Barbaro:/u);
+
+  await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: "turn-after-continuation",
+    cwd: project,
+    prompt: "A genuinely new turn",
+  });
+  assert.equal(
+    (await activeSnapshot(project, nativeSessionId))?.extensions,
+    undefined,
+  );
+  await assert.rejects(
+    handleCodexIngestHook(staleStop, {
+      pollIntervalMs: 1,
+      timeoutMs: 1,
+    }),
+    /did not reach a terminal record/u,
+  );
+});
+
 test("Stop remains idle when transcript ingestion fails", async (t) => {
   const project = await temporaryProject(t);
   const nativeSessionId = "session-stop-failure";
@@ -1191,21 +3203,117 @@ async function activeSnapshot(project: string, nativeSessionId: string) {
   });
 }
 
+async function idleStopRolloverFixture(
+  t: TestContext,
+  nativeSessionId: string,
+) {
+  const project = await temporaryProject(t);
+  const priorTurnId = "turn-prior";
+  const goalTurnId = "turn-goal";
+  await joinCodexSession(project, nativeSessionId);
+  await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: priorTurnId,
+    cwd: project,
+    prompt: "Prior prompt",
+  });
+  await handleCodexHook({
+    hook_event_name: "Stop",
+    session_id: nativeSessionId,
+    turn_id: priorTurnId,
+    cwd: project,
+    stop_hook_active: false,
+    last_assistant_message: "Prior answer",
+  });
+  await appendPeerTurn({
+    projectRoot: project,
+    workstreamId: await currentWorkstreamId(
+      project,
+      "codex",
+      nativeSessionId,
+    ),
+    sequence: 1,
+    response: "unread for the text-only goal turn",
+  });
+  const stableSessionId = createSessionId("codex", nativeSessionId);
+  const cursorStore = new NudgeCursorStateStore(project);
+  const cursorPath = cursorStore.cursorPath("codex", stableSessionId);
+  return {
+    project,
+    nativeSessionId,
+    priorTurnId,
+    goalTurnId,
+    cursorPath,
+    leaseBefore: await activeSnapshot(project, nativeSessionId),
+    cursorBefore: await readFile(cursorPath),
+  };
+}
+
+function leaseTtlMs(lease: {
+  readonly updated_at: string;
+  readonly expires_at: string;
+}): number {
+  return Date.parse(lease.expires_at) - Date.parse(lease.updated_at);
+}
+
 async function joinCodexSession(
   project: string,
   nativeSessionId: string,
 ): Promise<void> {
-  await admitHookSession({
-    projectRoot: project,
-    provider: "codex",
-    nativeSessionId,
-    event: "UserPromptSubmit",
-    prompt: "$barbaro",
-  });
+  // The first session in a project creates the shared lane; later ones join
+  // it (a `new` of an existing name is refused, a repeat `join` is idempotent).
+  for (const prompt of ["$barbaro new lane", "$barbaro join lane"]) {
+    await admitHookSession({
+      projectRoot: project,
+      provider: "codex",
+      nativeSessionId,
+      event: "UserPromptSubmit",
+      prompt,
+    });
+  }
 }
 
 function rollout(type: string, payload: unknown) {
   return { timestamp: "2026-08-16T10:00:00.000Z", type, payload };
+}
+
+async function writeGoalRolloverTrace(options: {
+  readonly project: string;
+  readonly nativeSessionId: string;
+  readonly priorTurnId: string;
+  readonly goalTurnId: string;
+}): Promise<string> {
+  const trace = join(
+    options.project,
+    `rollout-${options.nativeSessionId}-${options.goalTurnId}.jsonl`,
+  );
+  await writeFile(
+    trace,
+    [
+      rollout("session_meta", {
+        session_id: options.nativeSessionId,
+        id: options.nativeSessionId,
+        cwd: options.project,
+        cli_version: "0.148.0-alpha.9",
+        thread_source: "user",
+      }),
+      rollout("event_msg", {
+        type: "task_started",
+        turn_id: options.priorTurnId,
+      }),
+      rollout("event_msg", {
+        type: "task_complete",
+        turn_id: options.priorTurnId,
+      }),
+      rollout("event_msg", {
+        type: "task_started",
+        turn_id: options.goalTurnId,
+      }),
+    ].map((record) => `${JSON.stringify(record)}\n`).join(""),
+    "utf8",
+  );
+  return trace;
 }
 
 function isErrnoCode(error: unknown, code: string): boolean {
@@ -1215,4 +3323,35 @@ function isErrnoCode(error: unknown, code: string): boolean {
     "code" in error &&
     (error as { code?: unknown }).code === code
   );
+}
+
+async function readIngestAttemptJournal(
+  path: string,
+): Promise<BarbaroIngestAttemptJournalV2> {
+  return JSON.parse(await readFile(path, "utf8")) as BarbaroIngestAttemptJournalV2;
+}
+
+function newestUnseenAttempt(
+  journal: BarbaroIngestAttemptJournalV2,
+  seen: ReadonlySet<string>,
+  finished: boolean,
+): BarbaroIngestAttemptV2 | undefined {
+  return [...journal.attempts]
+    .reverse()
+    .find(
+      (attempt) =>
+        !seen.has(attempt.attempt_id) &&
+        (attempt.finished_at !== undefined) === finished,
+    );
+}
+
+function findIngestAttempt(
+  journal: BarbaroIngestAttemptJournalV2,
+  attemptId: string,
+): BarbaroIngestAttemptV2 {
+  const attempt = journal.attempts.find(
+    (candidate) => candidate.attempt_id === attemptId,
+  );
+  assert.notEqual(attempt, undefined);
+  return attempt!;
 }

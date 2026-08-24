@@ -118,8 +118,8 @@ export async function writeHealthyProject(
   const buildHooks = (provider: string): unknown => {
     const events =
       provider === "claude"
-        ? [...commonEvents, "UserPromptExpansion"]
-        : commonEvents;
+        ? [...commonEvents, "PostToolBatch", "UserPromptExpansion"]
+        : [...commonEvents, "PermissionRequest"];
     return {
       hooks: Object.fromEntries(
         events.map((event) => [

@@ -213,6 +213,9 @@ export function projectTurn(
       provider: turn.provider,
       session_id: turn.session_id,
       sequence: turn.sequence,
+      ...(turn.workstream_id === undefined
+        ? {}
+        : { workstream_id: turn.workstream_id }),
       agent_id: turn.agent_id,
       ...(turn.parent_turn_id === undefined
         ? {}
@@ -330,6 +333,9 @@ export function projectActiveLease(
     lease_id: lease.lease_id,
     provider: lease.provider,
     session_id: lease.session_id,
+    ...(lease.workstream_id === undefined
+      ? {}
+      : { workstream_id: lease.workstream_id }),
     ...(lease.turn_id === undefined ? {} : { turn_id: lease.turn_id }),
     agent_id: lease.agent_id,
     state,
@@ -404,13 +410,16 @@ export function projectContext(
   active: readonly BarbaroActiveLeaseV1[],
   turns: readonly BarbaroTurnV1[],
   diagnostics: ReaderDiagnostics,
-  options: ReaderProjectionOptions,
+  options: ReaderProjectionOptions & { readonly workstreamId?: string },
 ): ReaderProjection<ReaderContextV1> {
   const limits = projectionLimits(options);
   let activeItems: ReaderActiveSummary[] = [];
   let turnItems: ReaderTurnSummary[] = [];
   const build = (): ReaderContextV1 => ({
     schema: READER_CONTEXT_SCHEMA,
+    ...(options.workstreamId === undefined
+      ? {}
+      : { workstream_id: options.workstreamId }),
     active: {
       shown: activeItems.length,
       total: active.length,
@@ -601,6 +610,9 @@ function evidenceEnvelope(evidence: BarbaroEvidenceV1): Omit<ReaderEvidenceV1, "
     turn_id: evidence.turn_id,
     provider: evidence.provider,
     session_id: evidence.session_id,
+    ...(evidence.workstream_id === undefined
+      ? {}
+      : { workstream_id: evidence.workstream_id }),
     agent_id: evidence.agent_id,
     ...(evidence.parent_turn_id === undefined
       ? {}

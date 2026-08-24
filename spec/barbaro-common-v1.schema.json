@@ -12,6 +12,10 @@
       "type": "string",
       "pattern": "^(ses|turn|act|ev|lease)_[0-9a-f]{32}$"
     },
+    "workstreamId": {
+      "type": "string",
+      "pattern": "^ws_[0-9a-f]{32}$"
+    },
     "timestamp": {
       "type": "string",
       "format": "date-time"

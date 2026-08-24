@@ -302,9 +302,14 @@ A compact boundary is **not** a turn boundary. It is emitted as evidence
 ### Active leases
 
 The trace alone cannot describe the present — it is written as things complete.
-Installed hooks stay dormant until the user invokes the project skill with
-`/barbaro`. The raw `UserPromptSubmit` and the `UserPromptExpansion` event for
-`command_name: "barbaro"` both recognize that explicit consent idempotently.
+Installed hooks stay dormant until the user joins a workstream with
+`/barbaro new <name>` or `/barbaro join <name>`; a bare `/barbaro` lists the
+open workstreams and enrolls nothing. The raw `UserPromptSubmit` and the
+`UserPromptExpansion` event for `command_name: "barbaro"` both recognize that
+explicit consent idempotently, and every record the session then publishes
+carries the membership in effect at its own timestamp. A later `new`/`join`
+may move the session forward; leases use the new current `workstream_id`,
+while earlier turns and evidence keep their original stamp.
 Consent is scoped to the Claude session ID; a resumed session remains joined
 and a new one must opt in. Before consent, neither leases nor transcript copies
 are written. After consent, leases come from hooks:
@@ -312,7 +317,7 @@ are written. After consent, leases come from hooks:
 | Hook | Lease write |
 |---|---|
 | `SessionStart` | For a resumed joined session, `state: "idle"`; a dormant session writes nothing |
-| `UserPromptSubmit` / `UserPromptExpansion` | An explicit `/barbaro` invocation establishes consent; joined sessions write `state: "working"`, `intent` from the prompt, claims cleared |
+| `UserPromptSubmit` / `UserPromptExpansion` | An explicit `/barbaro new <name>` or `/barbaro join <name>` establishes consent or moves it forward (a bare `/barbaro` only lists workstreams); joined sessions write `state: "working"`, `intent` from the prompt, claims cleared, current `workstream_id` set |
 | `PreToolUse` | for `Edit`/`Write`: add a `claims` entry, `confidence: "exact"`; for `Bash`: `unknown_write_scope: true` |
 | `Stop` | `state: "idle"` tombstone, claims cleared |
 
@@ -429,9 +434,11 @@ The branch pointer can lag too. A usable `last-prompt` selects everything back t
 parent chain. UUID-bearing rows physically after that pointer may extend the selection only while they
 form one unique child chain from its leaf; this admits a late terminal response and the next human
 prompt without resurrecting descendants the pointer had already rejected. `logicalParentUuid` carries
-the chain across compaction, while UUID-less sidecars are transparent. Competing children, a rewind
-from an older ancestor, a cycle, or a disconnected UUID-bearing tail makes the continuation ambiguous,
-so the entire snapshot is withheld — including at `SessionEnd` — and its checkpoint is not advanced.
+the chain across compaction. UUID-less sidecars and UUID-bearing branches whose entire subtree contains
+only attachment records are transparent; inline attachments that lead to a user, assistant, or system
+row remain part of the chain. Competing semantic children, a rewind from an older ancestor, a cycle, or
+a disconnected semantic tail makes the continuation ambiguous, so the entire snapshot is withheld —
+including at `SessionEnd` — and its checkpoint is not advanced.
 
 Claude supplies no hook ID that can be joined to a particular prompt record. If multiple queued
 `UserPromptSubmit` workers overlap, they can observe the same first human record after their shared
@@ -459,13 +466,14 @@ and a split terminal response. See the fixtures README for what each asserts.
 | Canonical size (M8) | Request, response and command text are copied **in full**. Only excerpts are bounded. Readers apply their own byte budget; an oversized single record requires a noncanonical field/action projection rather than record-count paging alone. |
 | Machine-driven input | `sdk` and unrecognized `promptSource` are barriers. A task notification is a **continuation** only when it names a `tool_use` issued by the currently open turn **and** sits on the active-leaf ancestry. One on a superseded path still records completion and linkage; only its span is suppressed. |
 | Result membership | A `tool_result` is judged by the call it closes, not by its own position. An accepted parallel call's result is almost always off the single leaf chain — all 58 such results in the corpus are — so rejecting result rows by uuid leaves those calls permanently unpaired. An on-ancestry result wins when one exists; two competing off-path results for one call make the snapshot ambiguous and it is withheld. |
-| Finality, two claims | `final` means the trailing turn may close; `sourceFinal` means the file will not change again. A Stop hook knows the first, not the second, so it passes `final: true, sourceFinal: false`. A turn already closed by successor records may publish, but the trace-terminal turn at EOF is withheld because it can still absorb late rows. The next `UserPromptSubmit` waits briefly for its actual human prompt record, then publishes the preceding turn as that record closes it; SessionEnd/offline ingestion can instead assert `sourceFinal`. A pointerless fork likewise waits for `sourceFinal`. |
+| Finality, two claims | `final` means the trailing turn may close; `sourceFinal` means the file will not change again. A Stop hook knows the first, not the second, so it passes `final: true, sourceFinal: false`. A turn closed in the stream may publish: a successor prompt closes the turn before it, and the provider's own `system/turn_duration` record — written once per turn, after the stop hooks, after every row of the final response — closes a terminal turn that has no background launch outstanding. The asynchronous Stop ingest waits briefly for that record (only once the trace has shown the provider writes it), so an ordinary turn publishes moments after it ends. A turn whose background launch can still report back, or the trace-terminal turn of a provider that never writes `turn_duration`, is withheld at EOF because it can still absorb rows; the next `UserPromptSubmit` publishes it as its prompt record closes it, and SessionEnd/offline ingestion can assert `sourceFinal`. A pointerless fork likewise waits for `sourceFinal`. |
+| Continued turns | A task notification naming a `run_in_background` call this turn issued continues the turn. The digest's `response` then carries every response that ended the turn, in order (joined by a blank line), not only the last: the conclusion stated before the wait stays visible, and the intermediate responses remain `response` evidence as before. |
 | Snapshot safety | Branch selection and normalization read **one** bounded snapshot, pinned to a size observed before reading and re-verified (identity and size) immediately before anything is appended — the gap between reading and appending is exactly where a replacement pointer lands. `last-prompt` is rewritten in place, so reading it separately can select a branch the normalized rows never belonged to — and a digest published under the wrong branch can never be corrected. A snapshot that is partial, malformed, changed identity or shrank, or (in live mode) contains a fork with no pointer yet, appends **nothing** and retries later. |
 | Membership granularity | Decided per `message.id` response group, not per row. One response spans many rows and only some lie on the leaf path; row-by-row filtering tore 46 live responses apart and dropped 58 sibling `tool_use` blocks corpus-wide (22 Bash, 11 Read, 11 TaskUpdate, 9 memory reads, 2 ToolSearch, 2 Agent, 1 trace query). |
 | Membership scope | Applied uniformly to assistant rows, tool results, task notifications and system records. A result or boundary on a rewound path would otherwise set the live turn's outcome or become its evidence. |
 | Lineage-only recovery | Registers parent edges and completion; never touches the active turn's timing, actions or provenance. |
 | Usage citation | Names the first row of every response that contributed usage. A line span alone is not checkable — a suppressed foreign response can sit between the first and last contributor. |
-| Active branch | Resolved from that snapshot: `last-prompt.leafUuid` walks back through `parentUuid ?? logicalParentUuid`. Because the pointer may trail the append stream, one unique UUID-bearing child chain written physically after the selected pointer row extends that ancestry; any competing or disconnected post-pointer continuation withholds the snapshot. Descendants already present before the pointer remain excluded because they may be the branch it rejected. A trace with no `last-prompt` treats every record as on-branch rather than guessing. |
+| Active branch | Resolved from that snapshot: `last-prompt.leafUuid` walks back through `parentUuid ?? logicalParentUuid`. Because the pointer may trail the append stream, one unique UUID-bearing semantic child chain written physically after the selected pointer row extends that ancestry. A UUID-bearing side branch is transparent only when its entire subtree is attachment records (including any PreToolUse hook's `additionalContext` sidecars); attachments that lead to semantic rows remain on the chain. Any competing or disconnected semantic continuation withholds the snapshot. Descendants already present before the pointer remain excluded because they may be the branch it rejected. A trace with no `last-prompt` treats every record as on-branch rather than guessing. |
 | Off-branch records | While an active-branch turn is open, a record off the active ancestry is dropped from the digest but still registers the calls it issued — otherwise a child launched on a superseded record is orphaned. Turns that themselves began off-branch are untouched: they are still emitted in append order carrying supersession. |
 | Suppressed spans | A foreign prompt arriving mid-turn cannot close it without orphaning outstanding tool results, so the assistant work answering it is dropped instead — and suppression lifts when that span reaches its own `end_turn`, not at the next human prompt. A sticky flag loses the human turn entirely. |
 | Workflow journals | Discovered by walking `subagents/workflows/`, never inferred from the child files present — otherwise a workflow whose only child has not appeared looks like one expecting nothing. |

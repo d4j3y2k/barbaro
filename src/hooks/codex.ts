@@ -11,14 +11,28 @@ import {
 import type {
   ActiveContent,
   ActiveCurrentAction,
+  ActiveExtensions,
   ActiveLeaseUpdateResult,
   ActiveLeaseV1,
   ActiveLeaseUpdate,
   ActiveWriteClaim,
 } from "../active/types.js";
 import { createSessionId, createTurnId } from "../core/id.js";
+import {
+  classifyAwaitCommand,
+  isDigestExcludedBarbaroCommand,
+  isLeadingBarbaroContextCommand,
+  type AwaitCommandClassification,
+} from "../core/barbaro-command.js";
 import { safeStoreFileLocation } from "../core/safe-store.js";
 import { stableStringify } from "../core/stable-json.js";
+import {
+  advanceHookReadCursor,
+  claimHookNudgeDelivery,
+  rollbackHookStopClaim,
+  stopReasonForNudge,
+  type HookNudgeDelivery,
+} from "../nudge/index.js";
 import { withDirectoryLock } from "../output/directory-lock.js";
 import {
   isGeneratedBarbaroPath,
@@ -26,11 +40,18 @@ import {
 } from "../providers/codex/content.js";
 import {
   readCodexTraceIdentity,
+  readCodexTurnAttestation,
+  readCodexTurnStartedAt,
   runCodexTrace,
   type RunCodexTraceResult,
 } from "../runner/codex.js";
 import { beginIngestAttempt } from "./ingest-attempt.js";
-import { admitHookSession, SESSION_NOT_JOINED } from "./participation.js";
+import {
+  admitHookSession,
+  parseBarbaroInvocation,
+  SESSION_NOT_JOINED,
+  WORKSTREAM_SELECTION_PENDING,
+} from "./participation.js";
 import {
   projectRootFromHookInput,
   recordIncident,
@@ -40,6 +61,7 @@ import {
 const ACTIVE_INTENT_BYTES = 4_096;
 const TERMINAL_INGEST_POLL_MS = 50;
 const TERMINAL_INGEST_TIMEOUT_MS = 10_000;
+const STOP_CONTINUATION_EXTENSION = "barbaro_stop_continuation";
 const READ_ONLY_CODEX_TOOLS_V0148 = new Set([
   "current_time",
   "get_context_remaining",
@@ -56,6 +78,13 @@ export interface CodexHookResult {
   readonly active_revision?: number;
   readonly trace_result?: RunCodexTraceResult;
   readonly ignored?: string;
+  readonly nudge?: HookNudgeDelivery;
+  readonly stop_reason?: string;
+  /**
+   * Outcome of a join-related invocation (roster, confirmation, refusal).
+   * Only UserPromptSubmit with a leading Barbaro invocation carries one.
+   */
+  readonly message?: string;
 }
 
 export interface CodexIngestHookOptions {
@@ -80,31 +109,73 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
   if (!cwd) throw new TypeError("Codex hook cwd is missing");
 
   const projectRoot = resolve(cwd);
+  const prompt = typeof input.prompt === "string" ? input.prompt : undefined;
+  const tracePath = stringValue(input.transcript_path);
+  const nativeTurnId = stringValue(input.turn_id);
   if (event === "UserPromptSubmit") {
     await assertCodexHookTraceIdentity(
-      stringValue(input.transcript_path),
+      tracePath,
       nativeSessionId,
       projectRoot,
     );
   }
+  const admissionNow = await codexMembershipEffectiveAt({
+    event,
+    projectRoot,
+    ...(prompt === undefined ? {} : { prompt }),
+    ...(tracePath === undefined ? {} : { tracePath }),
+    ...(nativeTurnId === undefined ? {} : { nativeTurnId }),
+  });
   const admission = await admitHookSession({
     projectRoot,
     provider: "codex",
     nativeSessionId,
     event,
-    ...(typeof input.prompt === "string" ? { prompt: input.prompt } : {}),
+    ...(prompt === undefined ? {} : { prompt }),
+    ...(admissionNow === undefined ? {} : { now: admissionNow }),
   });
   if (!admission.joined) {
-    // The session itself is never named: it has not consented to publish.
+    // A bare or refused invocation is the user addressing Barbaro, not a
+    // dormant hook firing: surface the outcome, write nothing, and record no
+    // incident. Every other event in an unjoined session is the dormant case,
+    // and the session itself is never named: it has not consented to publish.
+    if (admission.pending === undefined && admission.refused === undefined) {
+      await recordIncident({
+        projectRoot,
+        provider: "codex",
+        kind: "session_dormant",
+        event,
+        dedupKey: nativeSessionId,
+      });
+      return { event, ignored: SESSION_NOT_JOINED };
+    }
+    return {
+      event,
+      ignored:
+        admission.pending !== undefined
+          ? WORKSTREAM_SELECTION_PENDING
+          : (admission.refused ?? SESSION_NOT_JOINED),
+      ...(admission.message === undefined ? {} : { message: admission.message }),
+    };
+  }
+  const workstreamId = admission.participation?.workstream_id;
+  const note =
+    admission.message === undefined ? {} : { message: admission.message };
+  const observeCommittedLockRelease = async (
+    resource: "active lease" | "nudge cursor",
+    error: unknown,
+  ): Promise<void> => {
     await recordIncident({
       projectRoot,
       provider: "codex",
-      kind: "session_dormant",
+      kind: "hook_error",
       event,
-      dedupKey: nativeSessionId,
-    });
-    return { event, ignored: SESSION_NOT_JOINED };
-  }
+      dedupKey: `${nativeSessionId}:${resource}:lock-release`,
+      detail:
+        `${resource} lock release failed after commit: ` +
+        (error instanceof Error ? error.message : String(error)),
+    }).catch(() => undefined);
+  };
   const sessionId = createSessionId("codex", nativeSessionId);
   const nativeAgentId = stringValue(input.agent_id);
   if (
@@ -114,7 +185,6 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
     throw new TypeError(`Codex ${event} agent_id is missing`);
   }
   const agentId = nativeAgentId ?? stringValue(input.agent_path) ?? "main";
-  const nativeTurnId = stringValue(input.turn_id);
   const turnId = nativeTurnId
     ? createTurnId("codex", nativeSessionId, agentId, nativeTurnId)
     : undefined;
@@ -126,6 +196,7 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
     provider: "codex",
     session_id: sessionId,
     agent_id: agentId,
+    ...(workstreamId === undefined ? {} : { workstream_id: workstreamId }),
     ...(turnId ? { turn_id: turnId } : {}),
   } as const;
   const store = new ActiveLeaseStore(join(projectRoot, ".barbaro", "active"));
@@ -189,74 +260,175 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
       claims: [],
       unknown_write_scope: false,
     });
-    return { event, active_revision: lease.revision };
+    const nudge = agentId === "main" && turnId !== undefined
+      ? await claimHookNudgeDelivery({
+          projectRoot,
+          provider: "codex",
+          nativeSessionId,
+          marker: "user_prompt",
+          turn: { kind: "codex", turn_id: turnId },
+          onLockReleaseFailure: (error) =>
+            observeCommittedLockRelease("nudge cursor", error),
+        })
+      : undefined;
+    return {
+      event,
+      active_revision: lease.revision,
+      ...note,
+      ...(nudge === undefined ? {} : { nudge }),
+    };
   }
 
   if (event === "PreToolUse") {
     const activity = classifyToolActivity(input, projectRoot);
-    const settled = await store.update(leaseIdentity, (previous) => {
-      const stale = staleTurnDecision(previous, turnId);
-      if (stale) return stale;
-      const update: ActiveLeaseUpdate = {
-        ...leaseIdentity,
-        state: "working",
-        ...(previous?.intent ? { intent: previous.intent } : {}),
-        ...(activity.currentAction
-          ? { current_action: activity.currentAction }
-          : {}),
-        claims: activity.claims,
-        unknown_write_scope: activity.unknownWriteScope,
-      };
-      return { write: update };
-    });
-    return codexUpdateResult(event, settled);
-  }
-
-  if (event === "PermissionRequest") {
-    const settled = await store.update(leaseIdentity, (previous) => {
-      const stale = staleTurnDecision(previous, turnId);
-      if (stale) return stale;
-      const sameTurn =
-        previous !== undefined && previous.turn_id === leaseIdentity.turn_id;
-      const activity =
-        sameTurn && previous.current_action !== undefined
-          ? {
-              currentAction: previous.current_action,
-              claims: previous.claims,
-              unknownWriteScope: previous.unknown_write_scope,
-            }
-          : classifyToolActivity(input, projectRoot);
-      return {
-        write: {
+    const settled = await store.update(
+      leaseIdentity,
+      async (previous) => {
+        const stale = await staleMainToolTurnDecision({
+          previous,
+          eventTurnId: turnId,
+          nativeTurnId,
+          tracePath,
+          nativeSessionId,
+          projectRoot,
+          agentId,
+        });
+        if (stale) return stale;
+        const update: ActiveLeaseUpdate = {
           ...leaseIdentity,
-          state: "waiting",
-          ...(sameTurn && previous.intent ? { intent: previous.intent } : {}),
+          state: activity.awaitCommand === undefined ? "working" : "waiting",
+          ...sameTurnIntentUpdate(previous, turnId),
+          ...sameTurnExtensionUpdate(previous, turnId),
           ...(activity.currentAction
             ? { current_action: activity.currentAction }
             : {}),
           claims: activity.claims,
           unknown_write_scope: activity.unknownWriteScope,
-        },
-      };
+        };
+        return { write: update };
+      },
+      activity.awaitCommand === undefined
+        ? {}
+        : { ttlMs: activity.awaitCommand.leaseTtlMs },
+    );
+    const result = codexUpdateResult(event, settled);
+    if (agentId !== "main" || result.active_revision === undefined) {
+      return result;
+    }
+    if (activity.contextCommand === true) {
+      await advanceHookReadCursor({
+        projectRoot,
+        provider: "codex",
+        nativeSessionId,
+        onLockReleaseFailure: (error) =>
+          observeCommittedLockRelease("nudge cursor", error),
+      });
+      return result;
+    }
+    if (turnId === undefined) return result;
+    const nudge = await claimHookNudgeDelivery({
+      projectRoot,
+      provider: "codex",
+      nativeSessionId,
+      marker: "tool_boundary",
+      turn: { kind: "codex", turn_id: turnId },
+      onLockReleaseFailure: (error) =>
+        observeCommittedLockRelease("nudge cursor", error),
     });
+    return { ...result, ...(nudge === undefined ? {} : { nudge }) };
+  }
+
+  if (event === "PermissionRequest") {
+    const requestedActivity = classifyToolActivity(input, projectRoot);
+    const settled = await store.update(
+      leaseIdentity,
+      async (previous) => {
+        const stale = await staleMainToolTurnDecision({
+          previous,
+          eventTurnId: turnId,
+          nativeTurnId,
+          tracePath,
+          nativeSessionId,
+          projectRoot,
+          agentId,
+        });
+        if (stale) return stale;
+        const sameTurn =
+          turnId !== undefined && previous?.turn_id === turnId;
+        const activity =
+          sameTurn && previous.current_action !== undefined
+            ? {
+                currentAction: previous.current_action,
+                claims:
+                  requestedActivity.awaitCommand === undefined
+                    ? previous.claims
+                    : requestedActivity.claims,
+                unknownWriteScope:
+                  requestedActivity.awaitCommand === undefined
+                    ? previous.unknown_write_scope
+                    : requestedActivity.unknownWriteScope,
+              }
+            : requestedActivity;
+        return {
+          write: {
+            ...leaseIdentity,
+            state: "waiting",
+            ...(sameTurn && previous.intent ? { intent: previous.intent } : {}),
+            ...sameTurnExtensionUpdate(previous, turnId),
+            ...(activity.currentAction
+              ? { current_action: activity.currentAction }
+              : {}),
+            claims: activity.claims,
+            unknown_write_scope: activity.unknownWriteScope,
+          },
+        };
+      },
+      requestedActivity.awaitCommand === undefined
+        ? {}
+        : { ttlMs: requestedActivity.awaitCommand.leaseTtlMs },
+    );
     return codexUpdateResult(event, settled);
   }
 
   if (event === "PostToolUse") {
-    const settled = await store.update(leaseIdentity, (previous) => {
-      const stale = staleTurnDecision(previous, turnId);
+    const settled = await store.update(leaseIdentity, async (previous) => {
+      const stale = await staleMainToolTurnDecision({
+        previous,
+        eventTurnId: turnId,
+        nativeTurnId,
+        tracePath,
+        nativeSessionId,
+        projectRoot,
+        agentId,
+      });
       if (stale) return stale;
       return {
         write: {
           ...leaseIdentity,
           state: "working",
-          ...(previous?.intent ? { intent: previous.intent } : {}),
+          ...sameTurnIntentUpdate(previous, turnId),
+          ...sameTurnExtensionUpdate(previous, turnId),
           claims: [],
           unknown_write_scope: false,
         },
       };
     });
-    return codexUpdateResult(event, settled);
+    const result = codexUpdateResult(event, settled);
+    const nudge =
+      agentId === "main" &&
+      result.active_revision !== undefined &&
+      turnId !== undefined
+        ? await claimHookNudgeDelivery({
+            projectRoot,
+            provider: "codex",
+            nativeSessionId,
+            marker: "tool_boundary",
+            turn: { kind: "codex", turn_id: turnId },
+            onLockReleaseFailure: (error) =>
+              observeCommittedLockRelease("nudge cursor", error),
+          })
+        : undefined;
+    return { ...result, ...(nudge === undefined ? {} : { nudge }) };
   }
 
   if (event === "PreCompact") {
@@ -268,6 +440,7 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
           ...leaseIdentity,
           state: "working",
           ...(previous?.intent ? { intent: previous.intent } : {}),
+          ...sameTurnExtensionUpdate(previous, turnId),
           current_action: {
             kind: "other",
             tool_name: "compact",
@@ -290,6 +463,7 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
           ...leaseIdentity,
           state: "working",
           ...(previous?.intent ? { intent: previous.intent } : {}),
+          ...sameTurnExtensionUpdate(previous, turnId),
           claims: [],
           unknown_write_scope: false,
         },
@@ -299,15 +473,123 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
   }
 
   if (event === "Stop") {
-    const settled = await store.update(leaseIdentity, (previous) => {
-      const stale = staleTurnDecision(previous, turnId);
+    let priorIntent: ActiveContent | undefined;
+    const stopped = await store.update(leaseIdentity, async (previous) => {
+      const stale = await staleMainTurnDecision({
+        previous,
+        eventTurnId: turnId,
+        nativeTurnId,
+        tracePath,
+        nativeSessionId,
+        projectRoot,
+        agentId,
+      });
       if (stale) return stale;
+      // A trace-attested goal continuation has no UserPromptSubmit from which
+      // to capture its intent. Do not mislabel that turn with the prior user
+      // prompt when a Stop nudge reopens it.
+      priorIntent =
+        previous !== undefined && previous.turn_id === turnId
+          ? previous.intent
+          : undefined;
       return { write: idleLeaseUpdate(leaseIdentity) };
     });
-    return codexUpdateResult(event, settled);
+    const stoppedResult = codexUpdateResult(event, stopped);
+    if (
+      stopped.lease === undefined ||
+      agentId !== "main" ||
+      turnId === undefined ||
+      input.stop_hook_active === true
+    ) {
+      return stoppedResult;
+    }
+    // Hold the actor lock while claiming the cursor. This couples the Stop
+    // latch to the continuation that emits it: newer activity either wins
+    // before this update (and no marker is claimed) or follows the reopened
+    // lease (after this hook has committed to blocking).
+    const stoppedRevision = stopped.lease.revision;
+    let nudge: Awaited<ReturnType<typeof claimHookNudgeDelivery>>;
+    const continued = await store.update(
+      leaseIdentity,
+      async (current) => {
+        if (
+          current?.state !== "idle" ||
+          current.revision !== stoppedRevision
+        ) {
+          return { ignore: "newer activity superseded Stop continuation" };
+        }
+        nudge = await claimHookNudgeDelivery({
+          projectRoot,
+          provider: "codex",
+          nativeSessionId,
+          marker: "stop",
+          turn: { kind: "codex", turn_id: turnId },
+          onLockReleaseFailure: (error) =>
+            observeCommittedLockRelease("nudge cursor", error),
+        });
+        if (nudge === undefined) {
+          return { ignore: "no Stop nudge required" };
+        }
+        return {
+          write: {
+            ...leaseIdentity,
+            state: "working",
+            ...(priorIntent ? { intent: priorIntent } : {}),
+            extensions: stopContinuationExtensions(turnId),
+            claims: [],
+            unknown_write_scope: false,
+          },
+        };
+      },
+      {
+        onWriteFailure: async () => {
+          if (nudge?.stop_rollback !== undefined) {
+            await rollbackHookStopClaim({
+              projectRoot,
+              receipt: nudge.stop_rollback,
+              onLockReleaseFailure: (error) =>
+                observeCommittedLockRelease("nudge cursor", error),
+            });
+          }
+        },
+        onLockReleaseFailure: (error) =>
+          observeCommittedLockRelease("active lease", error),
+      },
+    );
+    if (nudge !== undefined && continued.lease !== undefined) {
+      return {
+        ...codexUpdateResult(event, continued),
+        stop_reason: stopReasonForNudge(
+          nudge,
+          stringValue(input.last_assistant_message),
+        ),
+      };
+    }
+    return stoppedResult;
   }
 
   return { event, ignored: "unsupported hook event" };
+}
+
+/** Serialize only stdout shapes accepted by the pinned Codex hook schema. */
+export function renderCodexHookOutput(
+  result: CodexHookResult | undefined,
+): string {
+  if (result?.stop_reason !== undefined) {
+    return `${stableStringify({
+      decision: "block",
+      reason: result.stop_reason,
+    })}\n`;
+  }
+  if (result?.nudge !== undefined) {
+    return `${stableStringify({
+      hookSpecificOutput: {
+        hookEventName: result.event,
+        additionalContext: result.nudge.text,
+      },
+    })}\n`;
+  }
+  return "";
 }
 
 function codexUpdateResult(
@@ -331,6 +613,85 @@ function staleTurnDecision(
   return turnIdsDiffer(previous?.turn_id, eventTurnId)
     ? { ignore: "stale turn event ignored" }
     : undefined;
+}
+
+/**
+ * Codex goal-mode continuations do not fire UserPromptSubmit. Their first main
+ * tool boundary or Stop can therefore arrive while the idle tombstone still
+ * names the preceding turn. Idle alone is ambiguous with a delayed event, so
+ * rollover is accepted only when one validated rollout snapshot says this
+ * native turn is its latest task_started record.
+ */
+interface MainTurnDecisionOptions {
+  readonly previous: ActiveLeaseV1 | undefined;
+  readonly eventTurnId: string | undefined;
+  readonly nativeTurnId: string | undefined;
+  readonly tracePath: string | undefined;
+  readonly nativeSessionId: string;
+  readonly projectRoot: string;
+  readonly agentId: string;
+}
+
+/**
+ * A tool event after an idle tombstone is either the first boundary of a new
+ * goal turn or a delayed event from the terminal turn. Only a different,
+ * trace-attested main turn may roll that tombstone forward.
+ */
+async function staleMainToolTurnDecision(
+  options: MainTurnDecisionOptions,
+): Promise<{ readonly ignore: string } | undefined> {
+  const stale = staleTurnDecision(options.previous, options.eventTurnId);
+  if (options.previous?.state !== "idle") return stale;
+  const fallback = stale ?? { ignore: "stale turn event ignored" };
+  if (
+    options.eventTurnId === undefined ||
+    options.previous.turn_id === options.eventTurnId
+  ) {
+    return fallback;
+  }
+  return attestMainIdleRollover(options, fallback);
+}
+
+async function staleMainTurnDecision(
+  options: MainTurnDecisionOptions,
+): Promise<{ readonly ignore: string } | undefined> {
+  const stale = staleTurnDecision(options.previous, options.eventTurnId);
+  if (stale === undefined) return undefined;
+  return attestMainIdleRollover(options, stale);
+}
+
+async function attestMainIdleRollover(
+  options: MainTurnDecisionOptions,
+  stale: { readonly ignore: string },
+): Promise<{ readonly ignore: string } | undefined> {
+  if (
+    options.agentId !== "main" ||
+    options.previous?.state !== "idle" ||
+    options.nativeTurnId === undefined ||
+    options.tracePath === undefined
+  ) {
+    return stale;
+  }
+  let attestation: Awaited<ReturnType<typeof readCodexTurnAttestation>>;
+  try {
+    attestation = await readCodexTurnAttestation(options.tracePath);
+  } catch (error: unknown) {
+    if (isErrnoCode(error, "ENOENT")) {
+      throw new Error(`Codex trace does not exist: ${options.tracePath}`);
+    }
+    throw error;
+  }
+  assertCodexTraceIdentity(
+    attestation.identity,
+    options.nativeSessionId,
+    options.projectRoot,
+  );
+  if (attestation.malformedLines > 0 || attestation.partialFinalLine) {
+    return stale;
+  }
+  return attestation.latestStartedTurnId === options.nativeTurnId
+    ? undefined
+    : stale;
 }
 
 /**
@@ -377,6 +738,76 @@ function turnIdsDiffer(
   );
 }
 
+function sameTurnIntentUpdate(
+  previous: ActiveLeaseV1 | undefined,
+  eventTurnId: string | undefined,
+): { readonly intent?: ActiveContent } {
+  if (
+    eventTurnId === undefined ||
+    previous?.turn_id !== eventTurnId ||
+    previous.intent === undefined
+  ) {
+    return {};
+  }
+  return { intent: previous.intent };
+}
+
+function sameTurnExtensionUpdate(
+  previous: ActiveLeaseV1 | undefined,
+  eventTurnId: string | undefined,
+): { readonly extensions?: ActiveExtensions } {
+  if (
+    eventTurnId === undefined ||
+    previous?.turn_id !== eventTurnId ||
+    previous.extensions === undefined
+  ) {
+    return {};
+  }
+  return { extensions: previous.extensions };
+}
+
+/**
+ * Hand the asynchronous ingest hook a durable, turn-bound explanation for a
+ * deliberately nonterminal Stop. This lives on the advisory lease rather
+ * than the read cursor: the sync Stop writer owns it, ordinary lease
+ * boundaries clear it, and the ingest worker remains a read-only observer.
+ */
+function stopContinuationExtensions(turnId: string): ActiveExtensions {
+  return {
+    codex: {
+      [STOP_CONTINUATION_EXTENSION]: {
+        active: true,
+        turn_id: turnId,
+      },
+    },
+  };
+}
+
+async function hasMatchingStopContinuation(
+  store: ActiveLeaseStore,
+  sessionId: string,
+  expectedTurnId: string,
+): Promise<boolean> {
+  const lease = await store.readSnapshot({
+    provider: "codex",
+    session_id: sessionId,
+    agent_id: "main",
+  });
+  if (
+    lease === undefined ||
+    (lease.state !== "working" && lease.state !== "waiting") ||
+    lease.turn_id !== expectedTurnId
+  ) {
+    return false;
+  }
+  const marker = lease.extensions?.codex?.[STOP_CONTINUATION_EXTENSION];
+  return (
+    isObject(marker) &&
+    marker.active === true &&
+    marker.turn_id === expectedTurnId
+  );
+}
+
 /**
  * Run only from the second, asynchronous Stop/SubagentStop hook. Codex writes
  * the terminal rollout event after synchronous Stop hooks return, so this
@@ -386,6 +817,7 @@ export async function handleCodexIngestHook(
   input: unknown,
   options: CodexIngestHookOptions = {},
 ): Promise<CodexHookResult> {
+  const triggeredAt = new Date().toISOString();
   if (!isObject(input)) throw new TypeError("Codex hook input must be a JSON object");
   const event = stringValue(input.hook_event_name) ?? stringValue(input.event_name);
   const cwd = stringValue(input.cwd);
@@ -415,19 +847,45 @@ export async function handleCodexIngestHook(
   const nativeSessionId = stringValue(input.session_id);
   if (!nativeSessionId) throw new TypeError("Codex hook session_id is missing");
   const projectRoot = resolve(cwd);
+  const sessionId = createSessionId("codex", nativeSessionId);
+  const ingestAgentId =
+    stringValue(input.agent_id) ?? stringValue(input.agent_path) ?? "main";
+  const expectedTurnId = requestedTurnId === undefined
+    ? undefined
+    : createTurnId("codex", nativeSessionId, ingestAgentId, requestedTurnId);
   await assertCodexHookTraceIdentity(
     tracePath,
     nativeSessionId,
     projectRoot,
   );
+  const prompt = typeof input.prompt === "string" ? input.prompt : undefined;
+  const admissionNow = await codexMembershipEffectiveAt({
+    event,
+    projectRoot,
+    ...(prompt === undefined ? {} : { prompt }),
+    tracePath,
+    ...(requestedTurnId === undefined ? {} : { nativeTurnId: requestedTurnId }),
+  });
   const admission = await admitHookSession({
     projectRoot,
     provider: "codex",
     nativeSessionId,
     event,
-    ...(typeof input.prompt === "string" ? { prompt: input.prompt } : {}),
+    ...(prompt === undefined ? {} : { prompt }),
+    ...(admissionNow === undefined ? {} : { now: admissionNow }),
   });
   if (!admission.joined) {
+    if (admission.pending !== undefined || admission.refused !== undefined) {
+      // The user addressed Barbaro without completing a join: not a dormant
+      // hook, so no incident; the activity hook surfaces the outcome.
+      return {
+        event,
+        ignored:
+          admission.pending !== undefined
+            ? WORKSTREAM_SELECTION_PENDING
+            : (admission.refused ?? SESSION_NOT_JOINED),
+      };
+    }
     // The session itself is never named: it has not consented to publish.
     await recordIncident({
       projectRoot,
@@ -438,6 +896,7 @@ export async function handleCodexIngestHook(
     });
     return { event, ignored: SESSION_NOT_JOINED };
   }
+  const workstreamId = admission.participation?.workstream_id;
   const pollIntervalMs = positiveSafeInteger(
     options.pollIntervalMs ?? TERMINAL_INGEST_POLL_MS,
     "pollIntervalMs",
@@ -448,12 +907,25 @@ export async function handleCodexIngestHook(
   );
   // After admission on purpose: the marker names the session, so it may only
   // exist for a session that consented to publish.
-  const finishAttempt = await beginIngestAttempt({
+  const attempt = await beginIngestAttempt({
     projectRoot,
     provider: "codex",
-    sessionId: createSessionId("codex", nativeSessionId),
+    sessionId,
     event,
+    tracePath,
+    triggeredAt,
+    ...(requestedTurnId === undefined
+      ? {}
+      : { nativeTurnId: requestedTurnId }),
+    ...(expectedTurnId === undefined ? {} : { turnId: expectedTurnId }),
+    agentId: ingestAgentId,
+    ...(stringValue(input.last_assistant_message) === undefined
+      ? {}
+      : { lastAssistantMessage: stringValue(input.last_assistant_message)! }),
   });
+  const activeStore = new ActiveLeaseStore(
+    join(projectRoot, ".barbaro", "active"),
+  );
 
   const started = Date.now();
   try {
@@ -462,6 +934,29 @@ export async function handleCodexIngestHook(
         tracePath,
         projectRoot,
         expectedNativeSessionId: nativeSessionId,
+      });
+      // Diagnostic I/O is deliberately excluded from the functional poll
+      // decision: a contended fail-open journal must not consume the final
+      // chance to observe provider-written terminal bytes.
+      const observedElapsed = Date.now() - started;
+      const publishBlocker = codexPublishBlocker(
+        event,
+        requestedTurnId,
+        traceResult,
+      );
+      await attempt.observe({
+        observedSize: traceResult.observation.observed_size,
+        fileIdentity: traceResult.observation.file_identity,
+        ...(traceResult.observation.checkpoint_before === undefined
+          ? {}
+          : {
+              checkpointBefore:
+                traceResult.observation.checkpoint_before,
+            }),
+        checkpointAfter: traceResult.observation.checkpoint_after,
+        runnerInput: { ...traceResult.input },
+        turnsAppended: traceResult.output.turns_appended,
+        ...(publishBlocker === undefined ? {} : { publishBlocker }),
       });
       if (
         !shouldPoll ||
@@ -476,25 +971,60 @@ export async function handleCodexIngestHook(
             provider: "codex",
             kind: "hook_error",
             event,
+            ...(workstreamId === undefined ? {} : { workstreamId }),
             detail:
               `${traceResult.output.conflicted} derived record(s) recomputed ` +
               `with different canonical content; stored versions kept: ` +
               traceResult.output.conflicted_ids.join(", "),
           });
         }
-        await finishAttempt("ok");
+        await attempt.finish("ok");
         return { event, trace_result: traceResult };
       }
-      const elapsed = Date.now() - started;
-      if (elapsed >= timeoutMs) {
+      if (
+        event === "Stop" &&
+        input.stop_hook_active !== true &&
+        ingestAgentId === "main" &&
+        expectedTurnId !== undefined &&
+        await hasMatchingStopContinuation(
+          activeStore,
+          sessionId,
+          expectedTurnId,
+        )
+      ) {
+        // The synchronous hook deliberately reopened this exact turn and
+        // returned decision:block. There cannot be a terminal rollout record
+        // yet; the active Stop, SessionEnd, or next prompt remains the normal
+        // catch-up boundary. Treat this attempt as intentionally complete
+        // instead of manufacturing a ten-second hook_error.
+        await attempt.finish("ok");
+        return { event, ignored: "Stop continuation is intentionally nonterminal" };
+      }
+      if (observedElapsed >= timeoutMs) {
         throw new CodexTerminalIngestTimeoutError(event, timeoutMs);
       }
-      await delay(Math.min(pollIntervalMs, timeoutMs - elapsed));
+      await delay(Math.min(pollIntervalMs, timeoutMs - observedElapsed));
     }
   } catch (error) {
-    await finishAttempt("error");
+    await attempt.finish("error");
     throw error;
   }
+}
+
+function codexPublishBlocker(
+  event: string,
+  requestedTurnId: string | undefined,
+  result: RunCodexTraceResult,
+): string | undefined {
+  if (result.input.partial_final_line) return "partial_final_line";
+  if (
+    event === "Stop" &&
+    requestedTurnId !== undefined &&
+    !result.output.terminal_native_turn_ids.includes(requestedTurnId)
+  ) {
+    return "trigger_turn_not_terminal";
+  }
+  return undefined;
 }
 
 async function assertCodexHookTraceIdentity(
@@ -512,6 +1042,14 @@ async function assertCodexHookTraceIdentity(
     }
     throw error;
   }
+  assertCodexTraceIdentity(identity, nativeSessionId, projectRoot);
+}
+
+function assertCodexTraceIdentity(
+  identity: Awaited<ReturnType<typeof readCodexTraceIdentity>>,
+  nativeSessionId: string,
+  projectRoot: string,
+): void {
   if (identity === undefined) {
     throw new Error("Codex hook transcript has no bounded valid session_meta");
   }
@@ -528,6 +1066,30 @@ async function assertCodexHookTraceIdentity(
       "Codex hook cwd does not match transcript session_meta.cwd",
     );
   }
+}
+
+async function codexMembershipEffectiveAt(options: {
+  readonly event: string;
+  readonly projectRoot: string;
+  readonly prompt?: string;
+  readonly tracePath?: string;
+  readonly nativeTurnId?: string;
+}): Promise<Date | undefined> {
+  if (
+    options.event !== "UserPromptSubmit" ||
+    options.prompt === undefined ||
+    options.tracePath === undefined ||
+    options.nativeTurnId === undefined
+  ) {
+    return undefined;
+  }
+  const invocation = parseBarbaroInvocation(options.prompt, options.projectRoot);
+  if (invocation === undefined || invocation.kind === "bare") return undefined;
+  const startedAt = await readCodexTurnStartedAt(
+    options.tracePath,
+    options.nativeTurnId,
+  );
+  return startedAt === undefined ? undefined : new Date(startedAt);
 }
 
 function isErrnoCode(error: unknown, code: string): boolean {
@@ -551,7 +1113,9 @@ export async function handleCodexHook(
   return runCodexHook(input);
 }
 
-export async function handleCodexHookFailOpen(input: unknown): Promise<void> {
+export async function handleCodexHookFailOpen(
+  input: unknown,
+): Promise<CodexHookResult | undefined> {
   const cwd = isObject(input) ? stringValue(input.cwd) : undefined;
   // Name the event. Logging every activity-hook failure as "unknown" makes the
   // log useless for exactly the debugging it exists for.
@@ -559,7 +1123,7 @@ export async function handleCodexHookFailOpen(input: unknown): Promise<void> {
     ? stringValue(input.hook_event_name) ?? stringValue(input.event_name) ?? "unknown"
     : "unknown";
   try {
-    await handleCodexHook(input);
+    return await handleCodexHook(input);
   } catch (error) {
     if (cwd) {
       await appendHookError(resolve(cwd), event, error).catch(() => undefined);
@@ -574,6 +1138,7 @@ export async function handleCodexHookFailOpen(input: unknown): Promise<void> {
         detail: error instanceof Error ? error.message : String(error),
       });
     }
+    return undefined;
   }
 }
 
@@ -625,14 +1190,18 @@ function positiveSafeInteger(value: number, label: string): number {
   return value;
 }
 
-function classifyToolActivity(
-  input: Record<string, unknown>,
-  projectRoot: string,
-): {
+interface ToolActivity {
   readonly currentAction?: ActiveCurrentAction;
   readonly claims: readonly ActiveWriteClaim[];
   readonly unknownWriteScope: boolean;
-} {
+  readonly awaitCommand?: AwaitCommandClassification;
+  readonly contextCommand?: boolean;
+}
+
+function classifyToolActivity(
+  input: Record<string, unknown>,
+  projectRoot: string,
+): ToolActivity {
   const toolName = stringValue(input.tool_name) ?? "unknown";
   const toolInput = isObject(input.tool_input) ? input.tool_input : {};
   const startedAt = new Date().toISOString();
@@ -656,10 +1225,14 @@ function classifyToolActivity(
     };
   }
 
-  // The pinned hook schema canonicalizes shell and unified-exec calls to Bash,
-  // whose only stable command field is `command`.
-  if (toolName === "Bash") {
+  // The pinned hook schema canonicalizes shell and unified-exec calls to Bash;
+  // `exec` is retained for the accepted RFC's explicit hook spelling.
+  if (toolName === "Bash" || toolName === "exec") {
     const command = stringValue(toolInput.command);
+    const awaitCommand = command ? classifyAwaitCommand(command) : undefined;
+    const contextCommand = command
+      ? isLeadingBarbaroContextCommand(command)
+      : false;
     return {
       currentAction: {
         kind: "command",
@@ -668,7 +1241,11 @@ function classifyToolActivity(
         started_at: startedAt,
       },
       claims: [],
-      unknownWriteScope: true,
+      unknownWriteScope:
+        awaitCommand === undefined &&
+        !(contextCommand && isDigestExcludedBarbaroCommand(command ?? "")),
+      ...(awaitCommand === undefined ? {} : { awaitCommand }),
+      ...(contextCommand ? { contextCommand: true } : {}),
     };
   }
 

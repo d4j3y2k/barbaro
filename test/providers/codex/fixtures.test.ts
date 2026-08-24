@@ -30,6 +30,7 @@ const FIXTURE_NAMES = [
   "unknown-types",
   "partial-final-line",
   "security-risk-score-head",
+  "paginated-turn",
 ] as const;
 
 interface FixtureOracle {

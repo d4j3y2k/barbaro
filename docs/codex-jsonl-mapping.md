@@ -276,9 +276,26 @@ Rust variant names such as `UserMessage`, `AgentMessage`, `Reasoning`,
 `EnteredReviewMode`, `ExitedReviewMode`, `FileChange`, `McpToolCall`, and
 `ContextCompaction`.
 
-The current v0.1 runner fails closed when `history_mode` is not `legacy`.
-Paginated `item_completed` normalization and ordinal resume are follow-up work;
-the runner does not emit plausible-but-incomplete turns for that mode.
+The runner accepts `history_mode` `legacy` and `paginated` and fails closed for
+any other value. A paginated rollout (Codex Desktop `0.149.0-alpha.4.1`,
+observed 2026-08-22) still carries the full `response_item` stream — user and
+assistant `message`s with phases, `custom_tool_call` `exec` with outputs,
+`function_call`s — and the same `task_started`/`task_complete` boundaries, so
+turn assembly is unchanged. What differs is actions: the unified `exec` input
+is now a script (`const r = await tools.exec_command({cmd:'…'})`,
+`tools.apply_patch(patch)`) the legacy command parser cannot read, and
+`patch_apply_end` is no longer written. Commands, tests, and file changes are
+therefore taken from the canonical `item_completed` projections:
+`CommandExecution` (argv array, `exit_code`, `status`, stdout/stderr) becomes a
+command or test action judged only by what the record states, and
+`FileChange` (`changes` path → add/update/delete with content or unified diff,
+`status`) flows through the same materialization as `patch_apply_end`. Each
+item is attributed to the exec call open when it lands, and a call with
+projected items does not also become a generic tool action. `UserMessage`,
+`AgentMessage`, `Reasoning`, `SubAgentActivity` and the other item kinds
+project response items already normalized, or carry no action, and are not
+double-counted. Ordinal-based resume is not needed: the byte checkpoint and
+persisted normalizer state resume paginated files as they do legacy ones.
 
 ### Sanitized empirical Desktop order
 
@@ -514,6 +531,13 @@ include `agent_id` and `agent_type`. The runtime documents that the serialized
 tool name and input are the stable hook contract, and that `PostToolUse` runs
 after successful output; see
 [`hook_runtime.rs`](https://github.com/openai/codex/blob/rust-v0.148.0-alpha.9/codex-rs/core/src/hook_runtime.rs#L162-L294).
+
+Codex persists `task_started` before running `UserPromptSubmit`. For a
+workstream join or forward move, Barbaro reads that exact native turn start
+from the rollout and uses it as the appended membership's `from`. The runner
+therefore keeps the provider-independent stamp-by-`started_at` rule while the
+move prompt itself lands in the target workstream; reset re-ingestion reads
+the already-persisted membership boundary and reproduces the same bytes.
 
 The durable rollout persistence policy excludes `hook_started` and
 `hook_completed`. Therefore, replaying JSONL cannot reconstruct an accurate

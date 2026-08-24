@@ -94,13 +94,19 @@ and live peer context remain required:
    leading command/skill invocation may create consent state.
 6. **Installation and participation are separate decisions.** Hook and settings
    changes are manual per project. Each new actor also stays dormant until its
-   user explicitly invokes `/barbaro` in Claude Code or `$barbaro` in Codex;
-   nothing in `src/setup/` enrolls it automatically.
+   user explicitly invokes `/barbaro new|join <name>` in Claude Code or
+   `$barbaro new|join <name>` in Codex — a bare invocation only lists the
+   workstreams; nothing in `src/setup/` enrolls it automatically.
 
 A lane prompt that works looks like:
 
-> /barbaro Your lane: *one sentence of intent*. Own only `src/<area>/**`,
-> `test/<area>/**`, and `docs/<file>.md`. Do not edit *(explicit list)*.
+> /barbaro join <workstream> Your lane: *one sentence of intent*. Own only
+> `src/<area>/**`, `test/<area>/**`, and `docs/<file>.md`. Do not edit
+> *(explicit list)*.
+
+Create the workstream first with `barbaro workstream new <name>` (or let the
+first actor do it with `/barbaro new <name> …`); every later actor joins it by
+name so their peer context and wake-ups stay scoped to that objective.
 
 ### Verifying a lane without clobbering a peer
 

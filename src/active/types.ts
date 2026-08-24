@@ -59,6 +59,8 @@ export interface ActiveLeaseV1 {
   readonly lease_id: string;
   readonly provider: string;
   readonly session_id: string;
+  /** The workstream the publishing session belongs to; absent when unscoped. */
+  readonly workstream_id?: string;
   readonly turn_id?: string;
   readonly agent_id: string;
   readonly state: ActiveLeaseState;
@@ -81,6 +83,7 @@ export interface ActiveActorKey {
 
 export interface ActiveLeaseIdentity extends ActiveActorKey {
   readonly lease_id: string;
+  readonly workstream_id?: string;
   readonly turn_id?: string;
   readonly source_refs?: readonly ActiveSourceRef[];
   readonly extensions?: ActiveExtensions;
@@ -110,6 +113,17 @@ export interface ActiveLeaseUpdateOptions {
   ttlMs?: number;
   /** Injectable wall clock, primarily for deterministic adapters and tests. */
   now?: ActiveTime;
+  /**
+   * Compensate side effects performed by `decide` when the selected lease
+   * cannot be validated or persisted. Runs while the actor lock is still held.
+   * It is not called for an ignored decision or when `decide` itself throws.
+   */
+  onWriteFailure?: (error: unknown) => void | Promise<void>;
+  /**
+   * Observe a lock cleanup failure after the selected lease was committed.
+   * Callback failure is ignored because it cannot undo the durable result.
+   */
+  onLockReleaseFailure?: (error: unknown) => void | Promise<void>;
 }
 
 export interface ActiveLeaseUpdateResult {

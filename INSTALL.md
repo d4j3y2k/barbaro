@@ -15,7 +15,7 @@ barbaro --help
 To install a tagged GitHub release before the npm alpha is available:
 
 ```sh
-npm install --global github:d4j3y2k/barbaro#v0.1.0-alpha.1
+npm install --global github:d4j3y2k/barbaro#v0.1.0-alpha.2
 barbaro --help
 ```
 

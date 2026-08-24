@@ -15,6 +15,7 @@ import {
   resolveJsonlCheckpoint,
   snapshotFromStats,
   type FileIdentity,
+  type JsonlCheckpoint,
 } from "../core/index.js";
 import { withDirectoryLock } from "../output/directory-lock.js";
 import { appendUniqueJsonl } from "../output/jsonl-store.js";
@@ -25,11 +26,21 @@ import {
   type ClaudeWorkflowLink,
 } from "../providers/claude/normalizer.js";
 import {
+  classifyUserRecord,
+  decodeClaudeEnvelope,
+  decodeClaudeMessage,
+} from "../providers/claude/records.js";
+import {
   CLAUDE_RUNNER_STATE_SCHEMA,
   readClaudeRunnerState,
   writeClaudeRunnerState,
   type ClaudeRunnerStateV1,
 } from "./claude-state.js";
+import {
+  resolveSessionMemberships,
+  stampEvidenceByMembership,
+  stampTurnsByMembership,
+} from "./workstream-stamp.js";
 
 const EMPTY_JOURNAL: WorkflowJournal = {
   known: new Set<string>(),
@@ -62,12 +73,28 @@ export interface RunClaudeTraceOptions {
    * while a pointerless fork is still withheld.
    */
   readonly sourceFinal?: boolean;
+  /**
+   * Present only for Claude's Stop event. The pinned replay must contain the
+   * trailing turn the hook announced before this run may publish or advance
+   * its checkpoint. An absent digest requests structural attestation only.
+   */
+  readonly stopTurnAttestation?: {
+    readonly announcedMessageSha256?: string;
+  };
 }
 
 export interface RunClaudeTraceResult {
   readonly trace_id: string;
   readonly session_id: string;
   readonly checkpoint_status: string;
+  readonly observation: {
+    /** The exact byte snapshot pinned for this full replay. */
+    readonly observed_size: number;
+    readonly file_identity: FileIdentity;
+    readonly checkpoint_before?: JsonlCheckpoint;
+    /** The checkpoint actually durable after this run, not merely computed. */
+    readonly checkpoint_after?: JsonlCheckpoint;
+  };
   readonly input: {
     readonly complete_lines: number;
     readonly parsed_lines: number;
@@ -77,9 +104,10 @@ export interface RunClaudeTraceResult {
     /**
      * True when the trailing turn is not yet canonical: either it never
      * reached its terminal record, or it reached one but the source is not
-     * final, so it can still absorb records and is deliberately withheld.
-     * Polling does not clear this — only a successor record in a later
-     * snapshot, or a source-final ingest, publishes the trailing turn.
+     * final, so it can still absorb records and is deliberately withheld. It
+     * publishes when a later snapshot closes it — at the provider's
+     * `turn_duration` record, at a successor prompt — or on a source-final
+     * ingest.
      */
     readonly trailing_turn_open: boolean;
     /**
@@ -88,6 +116,25 @@ export interface RunClaudeTraceResult {
      * successor records, or at SessionEnd.
      */
     readonly trailing_turns_withheld: number;
+    /**
+     * True when the trailing turn is terminal with no background launch that
+     * could still continue it, i.e. the next `turn_duration` record would
+     * close and publish it.
+     */
+    readonly trailing_turn_closable: boolean;
+    /** Terminality is distinct from closability when background work remains. */
+    readonly trailing_turn_terminal: boolean;
+    /** Latest active-branch `end_turn` response, grouped by message.id. */
+    readonly latest_terminal_response_message_id?: string;
+    readonly latest_terminal_response_sha256?: string;
+    readonly latest_terminal_response_utf8_bytes?: number;
+    /** Present only when the caller requested Stop-turn attestation. */
+    readonly stop_turn_identity_required?: boolean;
+    readonly stop_turn_visible?: boolean;
+    readonly pending_background_ids: readonly string[];
+    readonly pending_background_count: number;
+    /** Whether this trace has shown any `turn_duration` record. */
+    readonly turn_duration_seen: boolean;
     /** Set when the snapshot was unusable and nothing was appended. */
     readonly withheld_reason?: string;
   };
@@ -182,6 +229,7 @@ export async function runClaudeTrace(
     );
 
     const membership = computeActiveMembership(rows);
+    const stopObservation = inspectClaudeStopTurn(rows, membership);
     // "The trailing turn may close" and "the source will not change again"
     // are different claims. A Stop hook knows the turn ended; it does not know
     // the branch pointer has been written. Only an offline parse or SessionEnd
@@ -244,6 +292,17 @@ export async function runClaudeTrace(
     // to publish.
     const trailingTurnOpen =
       normalizer.hasOpenTurn || trailingTurnsWithheld > 0;
+    const latestTerminalResponse = stopObservation.response;
+    const stopTurnVisible =
+      options.stopTurnAttestation === undefined
+        ? undefined
+        : stopObservation.terminal &&
+          (options.stopTurnAttestation.announcedMessageSha256 === undefined ||
+            latestTerminalResponse?.sha256 ===
+              options.stopTurnAttestation.announcedMessageSha256);
+    if (stopTurnVisible === false) {
+      unstable ??= "stop_turn_not_visible";
+    }
 
     // Cheap early check so a already-drifted source skips the expensive child
     // pass entirely. It is NOT the authoritative one — see below.
@@ -311,16 +370,27 @@ export async function runClaudeTrace(
       }
     }
 
+    // Membership comes from the append-only consent log and each record is
+    // stamped from its own timestamp, so later moves cannot change reset
+    // re-ingestion of earlier history.
+    const memberships = await resolveSessionMemberships(
+      projectRoot,
+      "claude",
+      nativeSessionId,
+    );
     const evidenceResult = await appendUniqueJsonl(
       join(barbaroDirectory, "evidence", "claude", `${sessionId}.jsonl`),
-      evidence,
+      stampEvidenceByMembership(evidence, memberships),
       (item) => item.evidence_id,
     );
     const turnResult = await appendUniqueJsonl(
       join(barbaroDirectory, "feed", "claude", `${sessionId}.jsonl`),
-      turns,
+      stampTurnsByMembership(turns, memberships),
       (turn) => turn.turn_id,
     );
+
+    const nextCheckpoint = createJsonlCheckpoint(summary);
+    const checkpointAfter = unstable ? saved?.checkpoint : nextCheckpoint;
 
     // A checkpoint records a snapshot that was actually consumed. Writing one
     // for a snapshot we refused to publish would claim progress never made.
@@ -330,7 +400,7 @@ export async function runClaudeTrace(
         trace_id: traceId,
         native_session_id: nativeSessionId,
         actor_id: "main",
-        checkpoint: createJsonlCheckpoint(summary),
+        checkpoint: nextCheckpoint,
         workspace_root: projectRoot,
       };
       await writeClaudeRunnerState(statePath, state);
@@ -340,6 +410,16 @@ export async function runClaudeTrace(
       trace_id: traceId,
       session_id: sessionId,
       checkpoint_status: resolution.status,
+      observation: {
+        observed_size: Number(opening.size),
+        file_identity: opening.identity,
+        ...(saved?.checkpoint === undefined
+          ? {}
+          : { checkpoint_before: saved.checkpoint }),
+        ...(checkpointAfter === undefined
+          ? {}
+          : { checkpoint_after: checkpointAfter }),
+      },
       input: {
         complete_lines: summary.completeLines,
         parsed_lines: summary.parsedLines,
@@ -348,6 +428,34 @@ export async function runClaudeTrace(
         finalized,
         trailing_turn_open: trailingTurnOpen,
         trailing_turns_withheld: trailingTurnsWithheld,
+        // A tail that finalization closed and withheld was terminal with no
+        // background launch outstanding — exactly what the next
+        // `turn_duration` record would close in-stream.
+        trailing_turn_closable:
+          trailingTurnsWithheld > 0 || normalizer.openTurnClosable,
+        trailing_turn_terminal:
+          trailingTurnsWithheld > 0 || normalizer.openTurnTerminal,
+        ...(latestTerminalResponse === undefined
+          ? {}
+          : {
+              latest_terminal_response_message_id:
+                latestTerminalResponse.message_id,
+              latest_terminal_response_sha256: latestTerminalResponse.sha256,
+              latest_terminal_response_utf8_bytes:
+                latestTerminalResponse.utf8_bytes,
+            }),
+        ...(stopTurnVisible === undefined
+          ? {}
+          : {
+              stop_turn_identity_required:
+                options.stopTurnAttestation?.announcedMessageSha256 !==
+                undefined,
+              stop_turn_visible: stopTurnVisible,
+            }),
+        pending_background_ids: normalizer.openTurnPendingBackgroundIds,
+        pending_background_count:
+          normalizer.openTurnPendingBackgroundIds.length,
+        turn_duration_seen: normalizer.turnDurationSeen,
         ...(unstable === undefined ? {} : { withheld_reason: unstable }),
       },
       output: {
@@ -443,6 +551,114 @@ export interface ActiveMembership {
   readonly ambiguousResultIds?: ReadonlySet<string>;
 }
 
+interface ClaudeStopTurnObservation {
+  readonly terminal: boolean;
+  readonly response?: {
+    readonly message_id: string;
+    readonly sha256: string;
+    readonly utf8_bytes: number;
+  };
+}
+
+/**
+ * Inspect the raw trailing response group independently from feed attribution.
+ *
+ * Stop can fire while Claude is answering a hook-feedback or SDK prompt. Those
+ * spans are deliberately suppressed by the turn normalizer, but their bytes
+ * still have to attest the Stop invocation. A prompt boundary clears the prior
+ * candidate, and only the most recently started assistant message may attest;
+ * an earlier terminal group never substitutes for a later nonterminal one.
+ */
+function inspectClaudeStopTurn(
+  rows: readonly { value: unknown; lineNumber: number }[],
+  membership: ActiveMembership,
+): ClaudeStopTurnObservation {
+  let latest:
+    | {
+        key: string;
+        messageId?: string;
+        texts: string[];
+        terminal: boolean;
+      }
+    | undefined;
+
+  const active = (uuid: string | undefined, messageId?: string): boolean =>
+    membership.ancestry === undefined ||
+    (uuid !== undefined && membership.ancestry.has(uuid)) ||
+    (messageId !== undefined &&
+      membership.activeMessageIds?.has(messageId) === true);
+
+  for (const row of rows) {
+    const decoded = decodeClaudeEnvelope(row.value);
+    if (!decoded.ok) continue;
+    const envelope = decoded.envelope;
+    const message = decodeClaudeMessage(envelope.raw);
+
+    if (envelope.type === "user") {
+      if (!active(envelope.uuid) || message === undefined) continue;
+      const provenance = classifyUserRecord(envelope, message, {
+        isSubagentTrace: false,
+      });
+      if (provenance.kind !== "tool-result") latest = undefined;
+      continue;
+    }
+    if (envelope.type !== "assistant" || message === undefined) continue;
+    if (!active(envelope.uuid, message.id)) continue;
+
+    const key = message.id ?? `line:${row.lineNumber}`;
+    if (latest?.key !== key) {
+      latest = {
+        key,
+        ...(message.id === undefined ? {} : { messageId: message.id }),
+        texts: [],
+        terminal: false,
+      };
+    }
+    for (const block of message.content) {
+      if (block.type === "text") latest.texts.push(block.text);
+    }
+    if (message.stopReason === "end_turn") latest.terminal = true;
+  }
+
+  if (latest?.terminal !== true) return { terminal: false };
+  if (latest.messageId === undefined) return { terminal: true };
+  const text = latest.texts.join("").trim();
+  if (text.length === 0) return { terminal: true };
+  return {
+    terminal: true,
+    response: {
+      message_id: latest.messageId,
+      sha256: createHash("sha256").update(text, "utf8").digest("hex"),
+      utf8_bytes: Buffer.byteLength(text, "utf8"),
+    },
+  };
+}
+
+/**
+ * Whether a UUID-bearing branch carries only Claude attachment sidecars.
+ *
+ * Attachments can also sit inline between semantic timeline records, so the
+ * root type alone is not enough: a branch is transparent only when every
+ * descendant is another attachment. Repeated visitation is treated as an
+ * ambiguous graph rather than guessing through a cycle or duplicate edge.
+ */
+function isAttachmentOnlySubtree(
+  rootUuid: string,
+  childrenByParent: ReadonlyMap<string, ReadonlySet<string>>,
+  typeByUuid: ReadonlyMap<string, string | undefined>,
+): boolean {
+  const pending = [rootUuid];
+  const visited = new Set<string>();
+  while (pending.length > 0) {
+    const uuid = pending.pop()!;
+    if (visited.has(uuid)) return false;
+    visited.add(uuid);
+    if (typeByUuid.get(uuid) !== "attachment") return false;
+    pending.push(...(childrenByParent.get(uuid) ?? []));
+  }
+  return true;
+}
+
 /**
  * Decide active-branch membership from one already-read snapshot.
  *
@@ -458,6 +674,7 @@ export function computeActiveMembership(
   const childCounts = new Map<string, number>();
   const childrenByParent = new Map<string, Set<string>>();
   const lineByUuid = new Map<string, number>();
+  const typeByUuid = new Map<string, string | undefined>();
   let leafUuid: string | undefined;
   let pointerLineNumber: number | undefined;
 
@@ -478,6 +695,10 @@ export function computeActiveMembership(
     }
     if (typeof record.uuid !== "string") continue;
     lineByUuid.set(record.uuid, lineNumber);
+    typeByUuid.set(
+      record.uuid,
+      typeof record.type === "string" ? record.type : undefined,
+    );
     const parent =
       typeof record.parentUuid === "string"
         ? record.parentUuid
@@ -520,9 +741,13 @@ export function computeActiveMembership(
   // reverse walk so a compact boundary (`parentUuid: null`,
   // `logicalParentUuid: leaf`) remains connected.
   //
-  // More than one child, or a cycle, is different. The stale pointer has not
-  // selected a live branch, so the caller must withhold rather than letting
-  // append order decide which descendant survives.
+  // More than one semantic child, or a cycle, is different. The stale pointer
+  // has not selected a live branch, so the caller must withhold rather than
+  // letting append order decide which descendant survives. Claude hook output
+  // can fork an attachment-only side branch from a tool_use while the real
+  // tool_result continues beside it. That subtree is metadata, not a branch
+  // choice. An inline attachment that leads to a message/system descendant is
+  // still followed as part of the one semantic continuation.
   let ambiguousPointerContinuation = false;
   let continuationCursor: string = leafUuid;
   while (true) {
@@ -531,7 +756,8 @@ export function computeActiveMembership(
     ].filter(
       (child) =>
         pointerLineNumber !== undefined &&
-        (lineByUuid.get(child) ?? Number.NEGATIVE_INFINITY) > pointerLineNumber,
+        (lineByUuid.get(child) ?? Number.NEGATIVE_INFINITY) > pointerLineNumber &&
+        !isAttachmentOnlySubtree(child, childrenByParent, typeByUuid),
     );
     if (children.length === 0) break;
     if (children.length !== 1) {
@@ -546,17 +772,20 @@ export function computeActiveMembership(
     ancestry.add(child);
     continuationCursor = child;
   }
-  // Every post-pointer timeline row must belong to that one chain. A child
-  // from an earlier ancestor is a rewind; a disconnected uuid is an unknown
-  // semantic tail. Neither can be reconciled from this stale pointer. UUID-
-  // less sidecars are deliberately transparent because they are not DAG
-  // events and cannot choose a branch.
+  // Every post-pointer semantic timeline row must belong to that one chain. A
+  // child from an earlier ancestor is a rewind; a disconnected uuid is an
+  // unknown semantic tail. Neither can be reconciled from this stale pointer.
+  // UUID-less sidecars and off-chain attachment rows are transparent because
+  // they cannot choose a branch; an attachment that leads to semantic rows was
+  // retained by the walk above, and any disconnected semantic descendant is
+  // still caught here.
   if (!ambiguousPointerContinuation) {
     ambiguousPointerContinuation = [...lineByUuid].some(
       ([uuid, lineNumber]) =>
         pointerLineNumber !== undefined &&
         lineNumber > pointerLineNumber &&
-        !ancestry.has(uuid),
+        !ancestry.has(uuid) &&
+        typeByUuid.get(uuid) !== "attachment",
     );
   }
 
