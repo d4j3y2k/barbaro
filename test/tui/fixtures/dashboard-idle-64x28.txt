@@ -1,0 +1,28 @@
+Barbaro                                               tui-reboot
+No work is shown. 10 recent exposures are complete.             
+                                                                
+┌─ The study so far ───────────────────────────────────────────┐
+│  #65  00:52  PLAN APPROVED — reshape the view                │
+│  #66  01:03  Mapped the response preview seam                │
+│  #67  01:12  The vertical ledger is ready                    │
+│  #68  01:21  Kept session navigation unchanged               │
+│  #69  01:29  ! Failed · First fixture pass exposed a gap     │
+│  #70  01:40  Capacity now follows card height                │
+│  #71  01:48  Success stays silent in the ledger              │
+│  #72  01:55  ! Unknown · Projection ended before the...      │
+│  #73  02:01  CHECKPOINT 12 is nearly ready                   │
+│> #74  02:06  Done — the workstream story reads clearly       │
+│  Oldest to newest · 3 sessions · 15 turns shown              │
+│  codex/58d65273                    Last shown #23            │
+│  claude/969a63de                   Last shown #74            │
+│> claude/460d4a94                   Last shown #10            │
+└──────────────────────────────────────────────────────────────┘
+                                                                
+#10 · succeeded · claude/460d4a94                               
+Request · earlier session detail...                             
+Ended · 00:48 · 2 actions · response present                    
+Selected session exposure                                       
+Publication clear                                               
+                                                                
+                                                                
+x complete · Esc home · r refresh · ? help · q quit             

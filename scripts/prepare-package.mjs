@@ -20,7 +20,9 @@ const packagedInputs = [
   "README.md",
   "package-lock.json",
   "package.json",
+  "scripts/generate-readme-assets.mjs",
   "scripts/prepare-package.mjs",
+  "test/tui/fixtures/dashboard-once-strip-64x28.txt",
   "tsconfig.package.json",
   "tsconfig.json",
 ];

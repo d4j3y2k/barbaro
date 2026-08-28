@@ -11,13 +11,8 @@ import { ActiveLeaseStore } from "../../src/active/store.js";
 import { main } from "../../src/cli.js";
 import type { BarbaroTurnV1 } from "../../src/contracts/v1.js";
 import { stableJsonLine } from "../../src/core/stable-json.js";
-import type { TuiOptions } from "../../src/tui/app.js";
-import { dashboardBrandingRows } from "../../src/tui/branding.js";
-import {
-  DASHBOARD_MIN_HEIGHT,
-  DASHBOARD_MIN_WIDTH,
-} from "../../src/tui/render.js";
-import { terminalCellWidth } from "../../src/tui/terminal-text.js";
+import type { ComfortAppOptions } from "../../src/tui/comfort-app.js";
+import { measureCells } from "../../src/tui/cells.js";
 import { WorkstreamStore } from "../../src/workstreams/store.js";
 
 const execFileAsync = promisify(execFile);
@@ -81,9 +76,9 @@ function assertFrame(output: string, width: number, height: number): void {
   const lines = output.slice(0, -1).split("\n");
   assert.equal(lines.length, height);
   assert.ok(
-    lines.every((line) => terminalCellWidth(line) === width),
+    lines.every((line) => measureCells(line) === width),
     `expected ${width} cells per row; got ${JSON.stringify(
-      lines.map((line) => terminalCellWidth(line)),
+      lines.map((line) => measureCells(line)),
     )}`,
   );
 }
@@ -103,6 +98,7 @@ function completedTurn(options: {
   readonly sessionId: string;
   readonly workstreamId: string;
   readonly request: string;
+  readonly response?: string;
 }): BarbaroTurnV1 {
   return {
     schema: "barbaro.turn.v1",
@@ -116,7 +112,7 @@ function completedTurn(options: {
     ended_at: "2026-08-22T12:00:05.000Z",
     outcome: "success",
     request: intent(options.request),
-    response: intent(`${options.request}-response`),
+    response: intent(options.response ?? `${options.request}-response`),
     actions: [],
     subagents: {
       total: 0,
@@ -255,20 +251,69 @@ test("tui --once resolves workstream names and IDs and scopes the reader", async
 
     for (const reference of ["tui-design", lane.workstream_id]) {
       const rendered = await snapshot(project, ["--workstream", reference]);
-      assert.ok(
-        rendered.includes(
-          `Scope tui-design (${shortWorkstreamId(lane.workstream_id)})`,
-        ),
-      );
-      assert.match(rendered, /selected-lane-intent/u);
-      assert.match(rendered, /selected-lane-turn/u);
-      assert.doesNotMatch(rendered, /foreign-track-intent/u);
-      assert.doesNotMatch(rendered, /foreign-track-turn/u);
+      assert.match(rendered, /tui-design \u00b7 snapshot/u);
+      // A working art tier always carries the ordered static strip.
+      assert.match(rendered, /F01.*F04.*F07.*F10/su);
+      assert.match(rendered, /Working at snapshot/u);
+      assert.match(rendered, /codex\/11111111/u);
+      assert.doesNotMatch(rendered, /claude\/22222222/u);
+      assert.doesNotMatch(rendered, /\u001b/u);
+      assertFrame(rendered, 64, 28);
     }
+    // --no-motion keeps the same strip and changes only the caption.
+    const still = await snapshot(project, [
+      "--workstream",
+      "tui-design",
+      "--no-motion",
+    ]);
+    assert.match(still, /F01.*F04.*F07.*F10/su);
+    assert.match(still, /Working at snapshot \u00b7 motion off/u);
+    assert.equal(
+      await snapshot(project, ["--workstream", "tui-design"]),
+      await snapshot(project, ["--workstream", "tui-design"]),
+    );
   });
 });
 
-test("tui defaults to the whole project and --all-workstreams is explicit", async () => {
+test("idle tui --once uses the same response-first exposure ledger", async () => {
+  await withProject(async (project) => {
+    const workstream = await new WorkstreamStore(project).create({
+      name: "response-ledger",
+      createdBy: { kind: "cli" },
+    });
+    const sessionId = "ses_66666666666666666666666666666666";
+    const feedDirectory = join(project, ".barbaro", "feed", "codex");
+    await mkdir(feedDirectory, { recursive: true });
+    await writeFile(
+      join(feedDirectory, `${sessionId}.jsonl`),
+      stableJsonLine(
+        completedTurn({
+          id: "6",
+          sessionId,
+          workstreamId: workstream.workstream_id,
+          request: "the request should not become the preview",
+          response: "CHECKPOINT 12: response preview is shared",
+        }),
+      ),
+      "utf8",
+    );
+
+    const rendered = await snapshot(project, [
+      "--workstream",
+      workstream.workstream_id,
+    ]);
+    assert.match(
+      rendered,
+      /> #1\s+12:00\s+CHECKPOINT 12: response preview is shared/u,
+    );
+    assert.doesNotMatch(rendered, /the request should not become the preview/u);
+    assert.doesNotMatch(rendered, /\[#1 succeeded\]|#1\s+Succeeded/u);
+    assert.doesNotMatch(rendered, /\u001b/u);
+    assertFrame(rendered, 64, 28);
+  });
+});
+
+test("tui snapshots default to the Open view and directly support completed scope", async () => {
   await withProject(async (project) => {
     const workstreams = new WorkstreamStore(project);
     const first = await workstreams.create({
@@ -308,13 +353,24 @@ test("tui defaults to the whole project and --all-workstreams is explicit", asyn
       },
       { ttlMs: 3_600_000 },
     );
+    await workstreams.complete(second.workstream_id);
 
     for (const flags of [[], ["--all-workstreams"]] as const) {
       const rendered = await snapshot(project, flags);
-      assert.match(rendered, /Scope whole project/u);
-      assert.match(rendered, /first-project-intent/u);
-      assert.match(rendered, /second-project-intent/u);
+      assert.match(rendered, /Home \u00b7 Open \u00b7 snapshot/u);
+      assert.match(rendered, /first-lane/u);
+      assert.doesNotMatch(rendered, /second-lane/u);
+      assert.match(rendered, /Snapshot \u00b7 open workstreams/u);
+      assertFrame(rendered, 64, 28);
     }
+
+    const completed = await snapshot(project, [
+      "--workstream",
+      second.workstream_id,
+    ]);
+    assert.match(completed, /second-lane \u00b7 completed \u00b7 snapshot/u);
+    assert.match(completed, /claude\/44444444/u);
+    assertFrame(completed, 64, 28);
   });
 });
 
@@ -350,32 +406,6 @@ test("tui rejects invalid scope and snapshot dimension combinations before outpu
         message: /--width must be a positive integer/u,
       },
       {
-        flags: ["--once", "--width", "1"],
-        message: /--width must be at least 12/u,
-      },
-      {
-        flags: [
-          "--once",
-          "--width",
-          String(DASHBOARD_MIN_WIDTH - 1),
-          "--workstream",
-          "missing-lane",
-        ],
-        message: /--width must be at least 12/u,
-      },
-      {
-        flags: ["--once", "--height", "1"],
-        message: /--height must be at least 6/u,
-      },
-      {
-        flags: [
-          "--once",
-          "--height",
-          String(DASHBOARD_MIN_HEIGHT - 1),
-        ],
-        message: /--height must be at least 6/u,
-      },
-      {
         flags: ["--once", "--height", "not-a-number"],
         message: /--height must be a positive integer/u,
       },
@@ -397,30 +427,28 @@ test("tui rejects invalid scope and snapshot dimension combinations before outpu
   });
 });
 
-test("tui --once dimensions have independent 100x30 fallbacks", async () => {
+test("tui --once composes the §8 ladder at exactly the requested size", async () => {
   await withProject(async (project) => {
     const cases: readonly {
       readonly flags: readonly string[];
       readonly width: number;
       readonly height: number;
+      readonly expect?: RegExp;
     }[] = [
-      { flags: [], width: 100, height: 30 },
-      { flags: ["--width", "73"], width: 73, height: 30 },
-      { flags: ["--height", "18"], width: 100, height: 18 },
+      { flags: [], width: 64, height: 28 },
+      { flags: ["--width", "100", "--height", "40"], width: 100, height: 40 },
       {
-        flags: ["--width", "84", "--height", "21"],
-        width: 84,
-        height: 21,
+        flags: ["--width", "120", "--height", "24"],
+        width: 120,
+        height: 24,
       },
+      { flags: ["--width", "40", "--height", "12"], width: 40, height: 12 },
+      { flags: ["--width", "12", "--height", "6"], width: 12, height: 6 },
       {
-        flags: [
-          "--width",
-          String(DASHBOARD_MIN_WIDTH),
-          "--height",
-          String(DASHBOARD_MIN_HEIGHT),
-        ],
-        width: DASHBOARD_MIN_WIDTH,
-        height: DASHBOARD_MIN_HEIGHT,
+        flags: ["--width", "10", "--height", "4"],
+        width: 10,
+        height: 4,
+        expect: /10x4/u,
       },
     ];
 
@@ -428,37 +456,37 @@ test("tui --once dimensions have independent 100x30 fallbacks", async () => {
       process.stdout,
       { columns: 177, rows: 61 },
       async () => {
-        for (const { flags, width, height } of cases) {
-          assertFrame(await snapshot(project, flags), width, height);
+        for (const { flags, width, height, expect } of cases) {
+          const rendered = await snapshot(project, flags);
+          assertFrame(rendered, width, height);
+          if (expect !== undefined) assert.match(rendered, expect);
         }
       },
     );
   });
 });
 
-test("wide tui snapshots are deterministic plain frame-zero renders", async () => {
+test("wide tui snapshots center the same card in deterministic matte", async () => {
   await withProject(async (project) => {
-    const flags = ["--width", "150", "--height", "28"] as const;
+    const flags = ["--width", "150", "--height", "40"] as const;
     const first = await snapshot(project, flags);
     const second = await snapshot(project, flags);
 
     assert.equal(second, first);
-    assert.match(first, /BARBARO · STATIC/u);
-    assert.doesNotMatch(first, /\u001b\[/u);
-    assert.ok(
-      dashboardBrandingRows(0)
-        .filter((row) => row.trim().length > 0)
-        .every((row) => first.includes(row)),
-      "snapshot must render the exact static riderless frame zero",
-    );
-    assertFrame(first, 150, 28);
+    assert.doesNotMatch(first, /\u001b/u);
+    assertFrame(first, 150, 40);
+    const lines = first.slice(0, -1).split("\n");
+    // Matte above and below; the 64-cell card centered at column 44.
+    assert.equal(lines[0], " ".repeat(150));
+    assert.equal(lines[39], " ".repeat(150));
+    assert.match(lines[6]!.slice(43, 107), /^Barbaro/u);
   });
 });
 
 test("tui --once is always plain, noninteractive, and accepts styling controls", async () => {
   await withProject(async (project) => {
     const rendered = await snapshot(project, ["--no-color", "--no-motion"]);
-    assert.match(rendered, /snapshot/u);
+    assert.match(rendered, /Snapshot/u);
     assert.doesNotMatch(rendered, /q quit/u);
     assert.doesNotMatch(rendered, /\u001b\[/u);
   });
@@ -478,7 +506,12 @@ test("live tui refuses a non-TTY without emitting terminal control sequences", a
           "--no-color",
           "--no-motion",
         ],
-        { timeout: 10_000 },
+        {
+          timeout: 10_000,
+          // Isolate the non-TTY refusal from the independently tested
+          // TERM=dumb refusal. CI and agent shells may inherit TERM=dumb.
+          env: { ...process.env, TERM: "xterm-256color" },
+        },
       ),
       (error: unknown) => {
         const failure = error as Error & {
@@ -499,7 +532,7 @@ test("live tui refuses a non-TTY without emitting terminal control sequences", a
   });
 });
 
-test("live tui translates --no-color, --no-motion, and NO_COLOR coherently", async () => {
+test("interactive tui keeps motion independent of color and refuses TERM=dumb", async () => {
   await withProject(async (project) => {
     const scenarios = [
       {
@@ -514,7 +547,7 @@ test("live tui translates --no-color, --no-motion, and NO_COLOR coherently", asy
         flags: ["--no-color"],
         noColor: undefined,
         color: false,
-        motion: false,
+        motion: true,
       },
       {
         label: "--no-motion",
@@ -528,38 +561,94 @@ test("live tui translates --no-color, --no-motion, and NO_COLOR coherently", asy
         flags: [] as readonly string[],
         noColor: "1",
         color: false,
-        motion: false,
+        motion: true,
       },
     ] as const;
 
     await withOwnProperties(process.stdin, { isTTY: true }, async () => {
       await withOwnProperties(process.stdout, { isTTY: true }, async () => {
-        for (const scenario of scenarios) {
-          await withNoColor(scenario.noColor, async () => {
-            const captured = capture();
-            const calls: TuiOptions[] = [];
-            assert.equal(
-              await main(
-                ["tui", "--project-root", project, ...scenario.flags],
-                captured.io,
-                async (options) => {
-                  calls.push(options);
-                },
-              ),
-              0,
-              scenario.label,
-            );
-            assert.deepEqual(captured.output, [], scenario.label);
-            assert.deepEqual(captured.errors, [], scenario.label);
-            assert.equal(calls.length, 1, scenario.label);
-            assert.equal(calls[0]!.color, scenario.color, scenario.label);
-            assert.equal(calls[0]!.motion, scenario.motion, scenario.label);
-          });
-        }
+        await withTerm("xterm-256color", async () => {
+          for (const scenario of scenarios) {
+            await withNoColor(scenario.noColor, async () => {
+              const captured = capture();
+              const calls: ComfortAppOptions[] = [];
+              assert.equal(
+                await main(
+                  ["tui", "--project-root", project, ...scenario.flags],
+                  captured.io,
+                  async (options) => {
+                    calls.push(options);
+                    return 0;
+                  },
+                ),
+                0,
+                scenario.label,
+              );
+              assert.deepEqual(captured.output, [], scenario.label);
+              assert.deepEqual(captured.errors, [], scenario.label);
+              assert.equal(calls.length, 1, scenario.label);
+              // NO_COLOR and --no-color disable styling only (gate 19); the
+              // motion switch is --no-motion alone.
+              assert.equal(calls[0]!.color, scenario.color, scenario.label);
+              assert.equal(calls[0]!.motion, scenario.motion, scenario.label);
+              assert.equal(calls[0]!.projectRoot, project, scenario.label);
+              assert.equal(calls[0]!.term, "xterm-256color", scenario.label);
+            });
+          }
+        });
+
+        // TERM is refused before terminal ownership: the launcher is never
+        // reached and stderr carries the exact truthful lines.
+        await withTerm("dumb", async () => {
+          const captured = capture();
+          const calls: ComfortAppOptions[] = [];
+          assert.equal(
+            await main(
+              ["tui", "--project-root", project],
+              captured.io,
+              async (options) => {
+                calls.push(options);
+                return 0;
+              },
+            ),
+            2,
+          );
+          assert.deepEqual(calls, []);
+          assert.deepEqual(captured.errors, [
+            "barbaro tui: TERM=dumb cannot support interactive mode.\n",
+            "Use: barbaro tui --once [--width N --height N]\n",
+            "No alternate-screen, cursor, raw-mode, color, or animation bytes were emitted.\n",
+          ]);
+          for (const line of captured.errors) {
+            assert.doesNotMatch(line, /\u001b/u);
+          }
+        });
       });
     });
   });
 });
+
+async function withTerm<T>(
+  value: string | undefined,
+  run: () => Promise<T>,
+): Promise<T> {
+  const existed = Object.prototype.hasOwnProperty.call(process.env, "TERM");
+  const previous = process.env["TERM"];
+  if (value === undefined) {
+    delete process.env["TERM"];
+  } else {
+    process.env["TERM"] = value;
+  }
+  try {
+    return await run();
+  } finally {
+    if (existed && previous !== undefined) {
+      process.env["TERM"] = previous;
+    } else {
+      delete process.env["TERM"];
+    }
+  }
+}
 
 test("help documents TUI scope, display, motion, and snapshot flags", async () => {
   const captured = capture();
@@ -570,15 +659,18 @@ test("help documents TUI scope, display, motion, and snapshot flags", async () =
   assert.match(help, /--no-color/u);
   assert.match(help, /--no-motion/u);
   assert.match(help, /--once \[--width <n>\] \[--height <n>\]/u);
-  assert.match(help, /read-only, bounded control panel/u);
-  assert.match(help, /q\/Ctrl-C quit, r refresh; Left\/Right or/u);
-  assert.match(help, /Tab\/Shift-Tab switch panes; Up\/Down or j\/k/u);
-  assert.match(help, /move; Enter detail, Esc back/u);
-  assert.match(help, /defaults to whole project/u);
-  assert.match(help, /least 12x6 and otherwise default to 100x30/u);
+  assert.match(help, /bounded control panel; --once is read-only/u);
+  assert.match(help, /q\/Ctrl-C quit, r refresh, j\/k or/u);
+  assert.match(help, /Up\/Down move, Enter detail, Esc back/u);
+  assert.match(help, /\/ Open\/Completed, n new, x complete\/reopen/u);
+  assert.match(help, /interactive writes use only the public/u);
+  assert.match(help, /workstream new\/complete\/reopen commands/u);
+  assert.match(help, /defaults to project scope and Home \u00b7 Open/u);
+  assert.match(help, /exact 64x28 card/u);
+  assert.match(help, /true-size notice/u);
 });
 
-test("README documents the complete TUI scope, input, and snapshot contract", async () => {
+test("README documents the comfort TUI, create flow, and snapshot contract", async () => {
   const readme = await readFile(
     fileURLToPath(new URL("../../../README.md", import.meta.url)),
     "utf8",
@@ -599,12 +691,26 @@ test("README documents the complete TUI scope, input, and snapshot contract", as
   ]) {
     assert.ok(readme.includes(option), `README must document ${option}`);
   }
-  assert.match(readme, /With no scope flag it shows and labels\s+the whole project/u);
-  assert.match(readme, /name and short ID/u);
-  assert.match(readme, /Left\/Right or `Tab`\/Shift-Tab to switch/u);
-  assert.match(readme, /Up\/Down or `j`\/`k` to move the selection/u);
+  assert.match(readme, /centers one fixed comfort card/u);
+  assert.match(readme, /With no scope flag the TUI reads the project catalogue/u);
+  assert.match(readme, /opens on\s+`Home \u00b7 Open`/u);
+  assert.match(readme, /`j`\/`k` or the arrow keys to select a workstream/u);
+  assert.match(readme, /`\/` to switch between Open and Completed/u);
+  assert.match(readme, /`n` to open the create form/u);
+  assert.match(readme, /`x` to complete an open workstream or reopen/u);
+  assert.match(readme, /Ctrl-S creates/u);
+  assert.match(readme, /`c` performs Punch Out/u);
+  assert.match(readme, /Punch Out does\s+not run the join command/u);
   assert.match(readme, /`q` or Ctrl-C to exit/u);
-  assert.match(readme, /widths must be at least 12 columns/u);
-  assert.match(readme, /heights at\s+least 6 rows/u);
-  assert.match(readme, /default independently to 100 and 30/u);
+  assert.match(readme, /bare snapshot is exactly 64×28/u);
+  assert.match(readme, /below the 12×6 floor receives a true-size notice/u);
+  assert.match(readme, /refuses `TERM=dumb` or an unset `TERM`/u);
+  assert.match(readme, /interactive TUI changes\s+project state only after an explicit create submission or complete\/reopen\s+confirmation/u);
+  assert.match(readme, /complete\s+11-plate branded stride/u);
+  assert.match(readme, /Working, Waiting, and Blocked counts/u);
+  assert.match(readme, /ordered F01\/F04\/F07\/F10 contact strip/u);
+  assert.match(readme, /response-first ledger/u);
+  assert.match(readme, /`j`\/`k` accents the selected session's\s+exposure and roll rows in cyan/u);
+  assert.match(readme, /Enter confirms\s+and Escape refuses/u);
+  assert.match(readme, /Home \u00b7 Open \u00b7 snapshot/u);
 });

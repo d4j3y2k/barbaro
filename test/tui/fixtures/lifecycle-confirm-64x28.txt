@@ -1,0 +1,28 @@
+Barbaro                                                  Confirm
+No change has been made.                                        
+                                                                
+┌─ Complete tui-reboot? ───────────────────────────────────────┐
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                         Enter · Yes                          │
+│                           Esc · No                           │
+│                                                              │
+│                       ● Waiting on you                       │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+                                                                
+tui-reboot · open · Codex 2 · Claude 1                          
+TUI ground-up redesign: the motion study                        
+13 unread · latest activity 2m                                  
+ID · ws_44c26310af3c86a04eadf62453776f80                        
+Revision · 3                                                    
+Project · barbaro · root /Users/davidkim/Developer/barbaro      
+                                                                
+Enter yes · Esc no · q quit                                     

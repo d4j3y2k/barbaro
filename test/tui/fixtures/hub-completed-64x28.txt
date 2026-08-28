@@ -1,0 +1,28 @@
+Barbaro                                         Home · Completed
+10 completed · 2 open                                           
+                                                                
+┌─ Completed workstreams · / open ─────────────────────────────┐
+│                                                              │
+│> tui-design                        Completed · 12m           │
+│  tui-build                         Completed · 15h12m        │
+│  tui-reboot                        Completed · 1d11h         │
+│  alpha3-release                    Completed · 1d16h         │
+│  nudge-gate                        Completed · 1d16h         │
+│  alpha-audit                       Completed · 2d13h         │
+│  public-alpha                      Completed · 2d14h         │
+│  ingest-reliability                Completed · 2d16h         │
+│  wake-nudge                        Completed · 2d20h         │
+│  codex-wake                        Completed · 3d11h         │
+│                                                              │
+│                                                              │
+│                                                              │
+└───────────────────────────────── 1 of 10 completed · 2 open ─┘
+                                                                
+tui-design · completed · 0 sessions                             
+TUI interface design                                            
+No shown work · latest shown exposure 12 minutes ago            
+ID · ws_74cb1f1a74bb4cbfb57c3c9d8c0ab2f0                        
+Completed · x reopens after confirmation                        
+Project · barbaro · root /Users/davidkim/Developer/barbaro      
+                                                                
+j/k · Enter · / open · x reopen · n new · ? help · q quit       

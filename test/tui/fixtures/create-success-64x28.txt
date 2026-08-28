@@ -1,0 +1,28 @@
+Barbaro                                           New workstream
+motion-study was created. Creation itself enrolled no sessions. 
+                                                                
+┌─ Created ────────────────────────────────────────────────────┐
+│                                                              │
+│                         motion-study                         │
+│ Explore the motion-study interface for every adventurous...  │
+│                      ws_d3c1a9e4 · open                      │
+│                                                              │
+│  Join from Claude Code                                       │
+│> /barbaro join motion-study                                  │
+│                                                              │
+│  Join from Codex                                             │
+│  $barbaro join motion-study                                  │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+                                                                
+motion-study · open                                             
+Selected · /barbaro join motion-study                           
+ID · ws_d3c1a9e4b72f54a0c86120e2f7d9aa15                        
+Creation itself enrolled no sessions                            
+Project · barbaro                                               
+Root · /Users/davidkim/Developer/barbaro                        
+                                                                
+j/k · c copy · r refresh · Esc home · ? help · q quit           

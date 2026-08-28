@@ -1,0 +1,28 @@
+Barbaro                                    tui-reboot · snapshot
+News 13 for codex/58d65273 · 1 working · 1 waiting              
+                                                                
+┌─ Motion study · snapshot ────────────────────────────────────┐
+│                                                              │
+│       F01            F04            F07            F10       │
+│      ░▓██▒          ░▓██▒          ░▓██▒          ░▓██▒      │
+│   ░▒▓██████▓     ░▒▓██████▓     ░▒▓██████▓     ░▒▓██████▓    │
+│   ▒░ ██████▒     ▒░ ██████▒     ▒░ ██████▒     ▒░ ██████▒    │
+│     ░▓▒░ ░█▒      ░▓▒  ░█▒░       ░▓░▒ ░█       ░▓▒░   ░█▒   │
+│                                                              │
+│                     Working at snapshot                      │
+│                                                              │
+│> codex/58d65273                    Working                   │
+│  claude/460d4a94                   Waiting · target unknown  │
+│  claude/969a63de                   No shown lease            │
+│                                                              │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+                                                                
+codex/58d65273 · working at snapshot                            
+Latest shown exposure · #23 · succeeded · 02:07                 
+News 13 for codex/58d65273                                      
+Publication clear                                               
+Snapshot · 2026-08-25 02:07:00Z                                 
+Project · barbaro · root /Users/davidkim/Developer/barbaro      
+                                                                
+Snapshot · tui-reboot · captured 2026-08-25 02:07:00Z           

@@ -1,0 +1,12 @@
+                                        
+                                        
+             B A R B A R O              
+                                        
+                Starting                
+                                        
+           Reading the store            
+              Elapsed 0.4s              
+            Projected 42 KiB            
+                                        
+                 q quit                 
+                                        

@@ -339,3 +339,124 @@ test("context and watch scope to the session's workstream", async (t) => {
   assert.equal(armed.workstream_id, created.workstream_id);
   assert.deepEqual(errors, []);
 });
+
+test("workstream lifecycle verbs warn about presence and flag the listing", async (t) => {
+  const project = await mkdtemp(join(tmpdir(), "barbaro-cli-lifecycle-"));
+  t.after(async () => {
+    await rm(project, { recursive: true, force: true });
+  });
+  const output: string[] = [];
+  const errors: string[] = [];
+  const io = {
+    stdout: (text: string) => output.push(text),
+    stderr: (text: string) => errors.push(text),
+  };
+
+  // Create the workstream and enroll one session in it.
+  const nativeSessionId = "lifecycle-session";
+  const sessionId = createSessionId("codex", nativeSessionId);
+  await admitHookSession({
+    projectRoot: project,
+    provider: "codex",
+    nativeSessionId,
+    event: "UserPromptSubmit",
+    prompt: "$barbaro new lane",
+  });
+  assert.equal(
+    await main(["workstream", "show", "lane", "--project-root", project], io),
+    0,
+  );
+  const record = JSON.parse(output.pop()!) as {
+    workstream_id: string;
+    status: string;
+  };
+  assert.equal(record.status, "open");
+
+  // The member holds an unexpired working main lease: completing must warn
+  // on stderr, never block, and still perform the reversible transition.
+  const { ActiveLeaseStore } = await import("../src/active/store.js");
+  await new ActiveLeaseStore(join(project, ".barbaro", "active")).write(
+    {
+      lease_id: `lease_${"c".repeat(32)}`,
+      provider: "codex",
+      session_id: sessionId,
+      agent_id: "main",
+      workstream_id: record.workstream_id,
+      state: "working",
+      claims: [],
+      unknown_write_scope: false,
+    },
+    { now: Date.now(), ttlMs: 600_000 },
+  );
+
+  assert.equal(
+    await main(["workstream", "complete", "lane", "--project-root", project], io),
+    0,
+  );
+  const completed = JSON.parse(output.pop()!) as {
+    status: string;
+    revision: number;
+  };
+  assert.equal(completed.status, "completed");
+  assert.equal(completed.revision, 2);
+  const warning = errors.join("");
+  assert.match(warning, new RegExp(`codex/${sessionId} is live in "lane"`, "u"));
+  assert.match(warning, /completion does not stop it/u);
+  errors.length = 0;
+
+  // Default listing retains the completed-but-live record, flagged; --all
+  // stays complete and carries the same flag.
+  assert.equal(
+    await main(["workstream", "list", "--project-root", project], io),
+    0,
+  );
+  const listed = JSON.parse(output.pop()!) as {
+    workstreams: Array<{ workstream_id: string; completed_presence?: string }>;
+    shown: number;
+    total: number;
+  };
+  assert.equal(listed.total, 1);
+  assert.equal(listed.shown, 1);
+  assert.equal(listed.workstreams[0]!.completed_presence, "live");
+  assert.equal(
+    await main(["workstream", "list", "--all", "--project-root", project], io),
+    0,
+  );
+  const listedAll = JSON.parse(output.pop()!) as {
+    workstreams: Array<{ completed_presence?: string }>;
+  };
+  assert.equal(listedAll.workstreams[0]!.completed_presence, "live");
+
+  // Reopen restores the open listing without warnings or flags.
+  assert.equal(
+    await main(["workstream", "reopen", "lane", "--project-root", project], io),
+    0,
+  );
+  const reopened = JSON.parse(output.pop()!) as { status: string; revision: number };
+  assert.equal(reopened.status, "open");
+  assert.equal(reopened.revision, 3);
+  assert.deepEqual(errors, []);
+  assert.equal(
+    await main(["workstream", "list", "--project-root", project], io),
+    0,
+  );
+  const relisted = JSON.parse(output.pop()!) as {
+    workstreams: Array<{ status: string; completed_presence?: string }>;
+  };
+  assert.equal(relisted.workstreams[0]!.status, "open");
+  assert.equal(relisted.workstreams[0]!.completed_presence, undefined);
+
+  // An unknown reference is exit 1 on both verbs.
+  assert.equal(
+    await main(
+      ["workstream", "complete", "missing", "--project-root", project],
+      io,
+    ),
+    1,
+  );
+  assert.equal(
+    await main(["workstream", "reopen", "missing", "--project-root", project], io),
+    1,
+  );
+  assert.match(errors.join(""), /no workstream named "missing"/u);
+});

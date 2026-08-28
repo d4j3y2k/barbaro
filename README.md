@@ -1,5 +1,9 @@
 # Barbaro
 
+<p align="center">
+  <img src="docs/assets/barbaro-horse.svg" width="720" alt="Barbaro's full-size branded riderless terminal horse galloping through eleven boxed plates">
+</p>
+
 Barbaro is a deterministic, project-local coordination layer for coding agents.
 It reads Codex and Claude Code session JSONL without modifying the provider
 trace, then materializes three small views:
@@ -23,7 +27,7 @@ redaction, and source-reference metadata.
 | Claude Code parser, bundle runner, active-branch and fork handling, subagent/workflow lineage, Stop/`turn_duration` closure, background continuations, and hooks | Implemented and sanitized-fixture-tested |
 | Live coordination: scoped `barbaro context`, echo-suppressed `barbaro watch`, cursor-aware `barbaro await`, hook nudges, and `/barbaro-watch` | Implemented |
 | Workstreams: two-phase enrollment, forward membership moves, timestamp-stamped records (`docs/workstreams.md`) | Enrollment, moves, scoped context, waits, and wake-ups implemented |
-| Terminal control panel and Muybridge horse motion study | Implemented and fixture-tested |
+| Comfort TUI: Open/Completed Home, Working/Waiting/Blocked activity, explicit create/complete/reopen controls, response ledger, provenance styling, bounded snapshots, and Muybridge motion study | Implemented and fixture-tested |
 | Codex missing-start synthesis, lease-expiry abandonment, and `.jsonl.zst` input | Not implemented: missing starts are diagnosed, open turns remain private after lease expiry, and `.jsonl.zst` is rejected explicitly |
 
 The raw Codex envelope is version-pinned but forward-tolerant: unknown record
@@ -164,24 +168,81 @@ The first run reads all complete lines. Later runs resume from a byte-accurate
 checkpoint and do not duplicate stable records. A partial final JSONL line is
 left unconsumed until the provider completes it.
 
-## Use the control terminal
+## Use the comfort terminal
 
-Run the live, read-only project dashboard from any Barbaro project:
+Run the live comfort TUI from any Barbaro project:
 
 ```sh
 barbaro tui
 ```
 
-The session-centered dashboard refreshes once per second and reads only through
-the supported bounded context projection. With no scope flag it shows and labels
-the whole project. Use `--workstream <name|id>` for one resolved workstream,
-whose label includes its name and short ID, or the mutually exclusive
-`--all-workstreams` flag to request the whole project explicitly.
+With motion enabled at 64×28, startup holds the title for at least one complete
+11-plate branded stride while the first bounded read settles. The 56×22 title
+uses compact riderless plates. The 40×12 tier stays art-free while preserving
+separate Working, Waiting, and Blocked counts; 12×6 is the art-free minimum
+status tier.
 
-Use Left/Right or `Tab`/Shift-Tab to switch between active sessions and recent
-turns. Use Up/Down or `j`/`k` to move the selection, Enter to open its bounded
-detail view, Escape to close the detail view, `r` to refresh immediately, and
-`q` or Ctrl-C to exit.
+The TUI centers one fixed comfort card in the terminal. Home starts in the Open
+view: every open workstream has a selectable row, ordered by its newest known
+activity, while completed workstreams stay out of the default activity surface.
+Press `/` to switch to the Completed view, where completed workstreams remain
+discoverable and can be reopened. The frame reports both populations honestly,
+for example `1 of 2 open · 10 completed`, rather than silently shrinking the
+catalogue. Incomplete evidence stays named instead of looking idle.
+
+When sessions in open workstreams have unread peer turns, the Home truth strip
+cycles through each recipient on successful refreshes using
+workstream/provider labels. Completed workstreams do not contribute to this News
+carousel or its activity counts. A recipient without a live lease shows its
+last proven exposure age or `activity unknown`; the TUI never guesses that it
+is dead. `--no-motion` and `--once` hold the first entry still. Exact ticker
+counts appear only when recipient evidence is complete.
+
+Only shown Working activity gallops in steady state. Space pauses and resumes
+it; interactive `--no-motion` replaces the horse with `Working · motion off`
+while data refreshes continue. A working `--once` snapshot uses the exact,
+ordered F01/F04/F07/F10 contact strip instead of choosing a clock frame:
+
+<p align="center">
+  <img src="docs/assets/tui-contact-strip.svg" width="720" alt="The static F01, F04, F07, and F10 riderless horse contact strip">
+</p>
+
+When nothing shown is working, the scoped card becomes a response-first ledger
+of recent completed exposures, ordered oldest to newest. It prefers response
+excerpts, marks non-success outcomes, and keeps the newest-exposure `>` cursor
+independent from session selection. `j`/`k` accents the selected session's
+exposure and roll rows in cyan while other-session rows recede; `--no-color`,
+`NO_COLOR`, and `--once` remain plain. Excerpts never scroll or become a
+ticker—the selected session's fixed bench carries its detail. Larger terminals
+add empty matte rather than more records; smaller terminals step through
+64×28, 56×22, 40×12, and 12×6 card tiers.
+
+With no scope flag the TUI reads the project catalogue and opens on
+`Home · Open`. `--all-workstreams` requests that same project scope explicitly,
+while `--workstream <name|id>` opens directly on one resolved workstream,
+including a completed one. Reads remain bounded by the byte and turn-window
+options, and every projection reports what was shown or hidden.
+
+On Home, use `j`/`k` or the arrow keys to select a workstream, Enter to open it,
+`/` to switch between Open and Completed, and `n` to open the create form.
+Press `x` to complete an open workstream or reopen a completed one; the TUI asks
+for explicit, evidence-pinned confirmation before either change. Enter confirms
+and Escape refuses. Completing is a reversible status statement and does not
+stop enrolled or currently active sessions. Inside a scoped workstream, `j`/`k`
+selects the session whose provenance is accented. Use `r` to refresh, `?` for
+help, Escape to return, and `q` or Ctrl-C to exit. Space pauses and resumes a
+visible gallop; under `--no-motion` it deliberately does nothing.
+
+The create form accepts a lowercase slug and an optional title. Tab and
+Shift-Tab move between fields, Backspace edits, Ctrl-S creates, and Escape
+cancels. Creation calls the public `barbaro workstream new` command, then
+reconciles the result before reporting success. It enrolls no session. After a
+successful create, `j`/`k` selects the Claude Code or Codex join command and
+`c` performs Punch Out: it copies that exact command when a supported clipboard
+path is available, or leaves it highlighted for manual copying. Punch Out does
+not run the join command. Confirmed lifecycle changes likewise call the public
+`barbaro workstream complete` or `barbaro workstream reopen` command and reread
+the catalogue before reporting their result.
 
 Supported options:
 
@@ -194,23 +255,28 @@ barbaro tui --no-color --no-motion
 barbaro tui --once --width 120 --height 32
 ```
 
-`--once` writes a deterministic, non-ANSI snapshot and never takes terminal
-ownership. Its width and height default independently to 100 and 30 when
-omitted; explicit widths must be at least 12 columns and explicit heights at
-least 6 rows. `--width` and `--height` are accepted only with `--once`.
-`--no-color` and the `NO_COLOR` environment variable disable styling;
-`--no-motion` stops animation without stopping data refreshes.
+`--once` writes one plain, non-ANSI snapshot and never takes terminal,
+clipboard, animation, or lifecycle-action ownership. An unscoped snapshot
+captures the default Open view and labels itself `Home · Open · snapshot`;
+`--workstream <name|id>` can still capture a completed workstream directly. A
+bare snapshot is exactly 64×28. Explicit `--width` and `--height` are accepted
+only with `--once`; larger requests center the same card in matte, and a request
+below the 12×6 floor receives a true-size notice at the dimensions actually
+requested. `--no-color` and the `NO_COLOR` environment variable disable
+styling; `--no-motion` stops animation without stopping data refreshes.
 
-The compact riderless horse appears only on a healthy wide dashboard of at
-least 150 columns by 28 rows. It yields to claim conflicts and diagnostics,
-and remains static with `--no-motion`, `--no-color`, `NO_COLOR`, or `--once`.
-Unknown write scope stays visible as an operational warning without hiding the
-horse. Animation redraws never perform extra context reads.
+<p align="center">
+  <img src="docs/assets/tui-once.svg" width="820" alt="A plain 64 by 28 Barbaro workstream snapshot with the deterministic horse strip">
+</p>
 
-The TUI uses the same supported scoping and reader projection as the `barbaro
-context` command. Projection budgets can hide records, so shown and hidden
-counts are reported explicitly. The terminal is strictly observational: it
-does not edit provider traces or write coordination state.
+Interactive mode refuses `TERM=dumb` or an unset `TERM` before emitting terminal
+control bytes and points to `--once` instead. A capable `TERM` is not enough on
+its own: stdin and stdout must also be attached to a TTY. Navigation, help,
+refresh, filtering, and `--once` are read-only. The interactive TUI changes
+project state only after an explicit create submission or complete/reopen
+confirmation, and does so through the matching public `barbaro workstream` CLI
+command before reconciling the reader result. Punch Out changes the clipboard
+only after an explicit `c`. The TUI never edits provider traces directly.
 
 ### Preview the horse motion study
 
@@ -246,6 +312,15 @@ across the horse, including the top of the head; only the forward/lower face
 contour uses source-space half-block detail to preserve the muzzle at compact scale.
 Regeneration is an optional development task requiring Python and Pillow; it is
 not a runtime dependency of Barbaro.
+
+The checked-in README visuals are regenerated from those same TUI frames,
+contact-strip rows, and snapshot fixture without generator-time font or
+image-tool dependencies:
+
+```sh
+npm run docs:assets
+npm run docs:assets:check
+```
 
 ## Watch peer activity
 

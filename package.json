@@ -1,6 +1,6 @@
 {
   "name": "barbaro",
-  "version": "0.1.0-alpha.3",
+  "version": "0.1.0-alpha.4",
   "description": "Live coordination for Codex and Claude Code sessions",
   "keywords": [
     "ai",
@@ -45,12 +45,15 @@
     "barbaro": "dist/src/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "build:package": "tsc -p tsconfig.package.json",
+    "clean:dist": "node -e \"const path=require('node:path');const target=path.resolve('dist');if(path.dirname(target)!==process.cwd()||path.basename(target)!=='dist')throw new Error('refusing to clean unexpected output path');require('node:fs').rmSync(target,{recursive:true,force:true})\"",
+    "build": "npm run clean:dist && tsc -p tsconfig.json",
+    "build:package": "npm run clean:dist && tsc -p tsconfig.package.json",
+    "docs:assets": "npm run build && node scripts/generate-readme-assets.mjs",
+    "docs:assets:check": "npm run build && node scripts/generate-readme-assets.mjs --check",
     "postbuild:package": "node -e \"require('node:fs').chmodSync('dist/src/cli.js', 0o755)\"",
     "fixtures:regenerate": "npm run build && node scripts/regenerate-claude-expected.mjs && node scripts/regenerate-codex-expected.mjs",
     "study:horse": "node dist/src/tui/horse-preview.js",
-    "prepack": "node scripts/prepare-package.mjs && npm run build:package",
+    "prepack": "node scripts/prepare-package.mjs && npm run build:package && node scripts/generate-readme-assets.mjs --check",
     "test": "npm run build && find dist/test -type f -name '*.test.js' -print0 | xargs -0 node --test",
     "test:package": "node scripts/verify-packed-install.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",

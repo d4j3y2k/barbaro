@@ -1,7 +1,8 @@
 # Workstreams — design RFC
 
 Status: **phase 1 implemented; phase 2 partly implemented (scoped reader and
-watcher); the rest of phase 2 and phase 3 pending.** This document is the
+watcher); phase 3 partly implemented (complete/reopen and TUI lifecycle;
+rename pending).** This document is the
 coordination-layer model; `barbaro tui` is a consumer of the model and does
 not shape it.
 
@@ -329,6 +330,27 @@ projection reports `workstream_id`; `/barbaro-watch` reads context scoped.
 Still pending from this section: `foreign_claims`, the roster, the
 `conflict` event, and the armed summary's project totals.
 
+### TUI status views and explicit lifecycle writes
+
+The project-scoped TUI opens on `Home · Open`. Its Home rows, activity totals,
+and News carousel draw only from open workstreams; `/` switches to the
+Completed view so completed records remain discoverable and can be reopened.
+Both views retain their own selection and report the open and completed
+populations explicitly instead of presenting a filtered list as the whole
+catalogue. A direct `--workstream <name|id>` scope may still inspect either
+status.
+
+Ordinary navigation, refresh, filtering, help, and `--once` are read-only. The
+interactive TUI has exactly three explicit write paths: create, complete, and
+reopen. Each invokes the corresponding public `barbaro workstream
+new|complete|reopen` CLI command; complete and reopen require confirmation, and
+the TUI rereads the catalogue before it reports success. It never writes a
+workstream record or provider trace directly. Completion remains a reversible
+statement, not enforcement, and therefore does not stop active sessions.
+Unscoped `--once` captures and labels the default Open view; it exposes no
+lifecycle keys. A completed workstream remains directly snapshot-able with
+`--workstream`.
+
 ### Peer context (`readProjectContext`)
 
 Scope is chosen by the caller: `--provider/--session-id` (self → own
@@ -485,8 +507,9 @@ The cursor is **hook-owned**. Only synchronous provider hooks may create or
 replace it, under the cursor file's directory lock and atomic-replace boundary.
 The unread inspector used by cursor-based `barbaro await` is an observer: it
 never initializes, advances, repairs, claims, or clears cursor state.
-`barbaro context` and the TUI likewise remain read-only; the TUI need not show
-unread and is unchanged. In particular, two concurrent awaits read the same
+`barbaro context` and the TUI's catalogue/refresh paths likewise leave the
+cursor read-only; the TUI's only writes are the explicit public-CLI lifecycle
+actions described above. In particular, two concurrent awaits read the same
 state and cannot consume news from one another. A leading `barbaro context`
 tool call is separately acknowledged by that session's main-agent
 `PreToolUse` hook after the event passes its provider turn fence. For Codex,
@@ -740,7 +763,7 @@ barbaro claude|codex status --session-id <id>   # + current workstream, membersh
 barbaro context  … [--provider <p> --session-id <id> | --workstream <name|id> | --all-workstreams]   # phase 2
 barbaro watch    … (self → own workstream) [--all-workstreams]      # phase 2
 barbaro await    … (joined self cursor only) [--timeout-ms <n>]     # cursor wait
-barbaro tui      … [--workstream <name|id>]                         # consumer only
+barbaro tui      … [--workstream <name|id>]                         # reader + explicit new/complete/reopen
 ```
 
 Skills (phase 1, shipped): `/barbaro` and the Codex `$barbaro` skill document
@@ -765,7 +788,7 @@ and receives `conflict` (phase 2).
 | skills ×2 + `openai.yaml`, README, `docs/claude-to-barbaro-v1.md`, `docs/dogfood.md` | grammar, two-phase flow, held task | 1 ✔ |
 | `src/reader/store.ts`, `src/watch/{engine,format,types}.ts`, `src/cli.ts`, `/barbaro-watch` | scope by `workstreamId`; `--workstream`/`--all-workstreams`/self-scoping flags; `ws=` on watch lines | 2 ✔ (first slice) |
 | `src/reader/*`, `src/watch/*` | `foreign_claims`, roster, `conflict`, armed project totals | 2 |
-| `src/workstreams/store.ts`, `src/cli.ts` | `rename`, `complete`, `reopen`; liveness; completed-but-live listing | 3 |
+| `src/workstreams/store.ts`, `src/cli.ts` | `rename`, `complete`, `reopen`; liveness; completed-but-live listing | 3 (complete/reopen ✔; rename pending) |
 | `src/nudge/{types,store,unread,delivery}.ts`, `src/hooks/{claude,codex}.ts`, `src/cli.ts`, provider skills ×2 | hook-owned membership-fenced v1/v2 cursor; revision-wide unread high-water; provider-turn delivery identity; prompt/tool news-only nudges; idle-first, same-turn-gated, block-once Stop continuation; Codex text-only attestation and ingest deferral | Nudges ✔ |
 | `src/watch/await.ts`, `src/core/barbaro-command.ts`, `src/providers/{claude,codex}/normalizer.ts`, `src/cli.ts`, skills ×3, README | read-only cursor wait; immediate pre-existing unread; no echo filter; joined-self scoping; `waiting` leases; whole-simple-command digest exclusion; await → context → react guidance | Codex wake, revised ✔ |
 

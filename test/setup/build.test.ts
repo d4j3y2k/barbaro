@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
-import { rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { access, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
+import { promisify } from "node:util";
 
 import {
   checkBuildFreshness,
@@ -18,6 +20,7 @@ import {
 } from "./fixture.js";
 
 const NOW_MS = FIXTURE_NOW.getTime();
+const execFileAsync = promisify(execFile);
 
 function factValue(
   diagnostic: { facts: readonly { key: string; value: unknown }[] },
@@ -40,6 +43,32 @@ test("a current build passes and reports the compared source count", async () =>
     assert.equal(factValue(diagnostic, "stale_output_count"), 0);
     assert.deepEqual(factValue(diagnostic, "missing_outputs"), []);
     assert.deepEqual(diagnostic.remediation, []);
+  });
+});
+
+test("repository builds clean stale dist artifacts before compiling", async () => {
+  const manifest = JSON.parse(await readFile("package.json", "utf8")) as {
+    readonly scripts?: Readonly<Record<string, string>>;
+  };
+  const clean = manifest.scripts?.["clean:dist"];
+  assert.ok(clean);
+  assert.match(manifest.scripts?.["build"] ?? "", /^npm run clean:dist && tsc /u);
+  assert.match(
+    manifest.scripts?.["build:package"] ?? "",
+    /^npm run clean:dist && tsc /u,
+  );
+
+  await withFixtureRoot(async (root) => {
+    await writeFiles(root, {
+      "package.json": `${JSON.stringify({ scripts: { "clean:dist": clean } })}\n`,
+      "dist/stale.js": "stale\n",
+      "keep.txt": "keep\n",
+    });
+    await execFileAsync("npm", ["run", "--silent", "clean:dist"], {
+      cwd: root,
+    });
+    await assert.rejects(access(join(root, "dist")));
+    assert.equal(await readFile(join(root, "keep.txt"), "utf8"), "keep\n");
   });
 });
 

@@ -8,6 +8,32 @@ import type {
 export const READER_CONTEXT_SCHEMA = "barbaro.reader.context.v1" as const;
 export const READER_EVIDENCE_SCHEMA = "barbaro.reader.evidence.v1" as const;
 
+/** Read quality for one reader-owned source or derived collection. */
+export type ReaderReadState = "ok" | "degraded" | "refused";
+
+/**
+ * Whether the reader reached every record needed to describe a source.
+ * Invalid records can be completely counted, so they degrade read_state
+ * without necessarily making coverage limited.
+ */
+export interface ReaderCoverage {
+  readonly state: "complete" | "limited" | "refused";
+  readonly reason?: string;
+}
+
+/**
+ * Additive bounded envelope for the catalogue contracts.  The legacy
+ * ReaderBoundedItems shape stays byte-for-byte stable for context/watch.
+ */
+export interface ReaderCollection<T> {
+  readonly shown: number;
+  readonly total: number;
+  readonly hidden: number;
+  readonly items: readonly T[];
+  readonly read_state: ReaderReadState;
+  readonly coverage: ReaderCoverage;
+}
+
 export interface ReaderProjection<T> {
   readonly byte_budget: number;
   /** Exact UTF-8 byte length of the stable JSON representation of this value. */
@@ -123,6 +149,49 @@ export interface ReaderDiagnostics {
   readonly invalid_active_records: number;
 }
 
+export type ReaderProviderDriftKind =
+  | "identity_path_mismatch"
+  | "invalid_envelope"
+  | "unknown_root_type"
+  | "unknown_event_type"
+  | "unknown_response_type"
+  | "repeated_session_meta"
+  | "orphan_turn_record";
+
+export interface ReaderProviderDriftDiagnostic {
+  readonly source:
+    | "active"
+    | "feed"
+    | "participation"
+    | "cursor"
+    | "journal"
+    | "claude_state"
+    | "codex_state";
+  readonly kind: ReaderProviderDriftKind;
+  readonly count: number;
+  readonly provider?: string;
+  readonly session_id?: string;
+  /** Bounded source vocabulary value, never untrusted content. */
+  readonly value?: string;
+}
+
+export interface ReaderStoreDiagnostics extends ReaderDiagnostics {
+  readonly invalid_workstream_records: number;
+  readonly invalid_participation_records: number;
+  readonly invalid_cursor_records: number;
+  readonly invalid_journal_records: number;
+  readonly invalid_provider_state_records: number;
+  readonly provider_drift: ReaderCollection<ReaderProviderDriftDiagnostic>;
+}
+
+export interface ReaderStoreHealth {
+  readonly presence: "absent" | "present";
+  readonly read_state: ReaderReadState;
+  readonly healthy: boolean;
+  readonly coverage: ReaderCoverage;
+  readonly diagnostics: ReaderStoreDiagnostics;
+}
+
 export interface ReaderContextV1 {
   readonly schema: typeof READER_CONTEXT_SCHEMA;
   /** Present when the projection was scoped to one workstream. */
@@ -199,4 +268,14 @@ export interface ReaderEvidenceOptions extends ReaderProjectionOptions {
   readonly actionCursor?: string;
   readonly maxFileBytes?: number;
   readonly maxRecordBytes?: number;
+}
+
+export interface ReaderStoreHealthOptions extends ReaderProjectionOptions {
+  readonly now?: Date | number | string;
+  readonly turnsPerSession?: number;
+  readonly maxFileBytes?: number;
+  readonly maxRecordBytes?: number;
+  readonly maxScanBytesPerFile?: number;
+  /** Maximum canonical entries inspected in each health source. */
+  readonly maxSourceEntries?: number;
 }

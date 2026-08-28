@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { readdir } from "node:fs/promises";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
+import { ActiveLeaseStore } from "../active/store.js";
 import { writeJsonFileAtomically } from "../core/atomic-json.js";
 import { SafeStoreBoundary } from "../core/safe-store.js";
 import { compareUtf16CodeUnits } from "../core/stable-json.js";
@@ -236,6 +237,20 @@ export class WorkstreamStore {
     });
   }
 
+  /**
+   * Mark a workstream completed. Completion is a statement, not enforcement:
+   * members keep publishing, and the caller is responsible for surfacing the
+   * liveness warnings from `collectWorkstreamPresence` before invoking this.
+   */
+  async complete(reference: string, now: Date = new Date()): Promise<WorkstreamV1> {
+    return this.setStatus(reference, "completed", now);
+  }
+
+  /** Reopen a completed workstream. Idempotent for an already-open one. */
+  async reopen(reference: string, now: Date = new Date()): Promise<WorkstreamV1> {
+    return this.setStatus(reference, "open", now);
+  }
+
   async #resolveName(name: string): Promise<WorkstreamV1 | undefined> {
     const claimText = await this.#boundary.readUtf8File(
       claimComponents(name),
@@ -266,6 +281,161 @@ export class WorkstreamStore {
   #locked<T>(operation: () => Promise<T>): Promise<T> {
     return withDirectoryLock(this.#boundary.pathFor(["workstreams"]), operation);
   }
+}
+
+/** How a current member of a workstream is present in the active store. */
+export type WorkstreamMemberPresence = "live" | "present";
+
+export interface WorkstreamPresenceMember {
+  readonly provider: string;
+  readonly session_id: string;
+  readonly presence: WorkstreamMemberPresence;
+}
+
+export interface WorkstreamPresenceReport {
+  readonly members: readonly WorkstreamPresenceMember[];
+  /** Invalid participation or active input; treat liveness as unknown. */
+  readonly liveness_unknown: boolean;
+}
+
+export interface WorkstreamPresence {
+  readonly byWorkstream: ReadonlyMap<string, WorkstreamPresenceReport>;
+  /** True when any participation or active record could not be trusted. */
+  readonly liveness_unknown: boolean;
+}
+
+const MAX_PRESENCE_PARTICIPATION_BYTES = 16 * 1024;
+
+/**
+ * One read-only pass over participation and unexpired `main` snapshots,
+ * grouped by each session's CURRENT workstream. Expired snapshots, child
+ * agents, and moved/former members contribute nothing; an unreadable record
+ * flips `liveness_unknown` conservatively instead of feigning absence.
+ */
+export async function collectWorkstreamPresence(
+  projectRoot: string,
+  now: Date = new Date(),
+): Promise<WorkstreamPresence> {
+  const absoluteRoot = resolve(projectRoot);
+  const boundary = SafeStoreBoundary.forBarbaroProject(absoluteRoot);
+  const nowMs = now.getTime();
+  if (!Number.isFinite(nowMs)) throw new TypeError("now must be a valid date");
+
+  let unknown = false;
+  const currentByMember = new Map<string, string>();
+  const sessionsRoot = await boundary.verifyDirectory(["sessions"]);
+  if (sessionsRoot !== undefined) {
+    const providers = await readdir(sessionsRoot, { withFileTypes: true });
+    providers.sort((left, right) =>
+      compareUtf16CodeUnits(left.name, right.name),
+    );
+    for (const providerEntry of providers) {
+      if (!PROVIDER_PATTERN.test(providerEntry.name)) continue;
+      if (providerEntry.isSymbolicLink() || !providerEntry.isDirectory()) {
+        unknown = true;
+        continue;
+      }
+      const directory = await boundary.verifyDirectory([
+        "sessions",
+        providerEntry.name,
+      ]);
+      if (directory === undefined) continue;
+      const entries = await readdir(directory, { withFileTypes: true });
+      entries.sort((left, right) =>
+        compareUtf16CodeUnits(left.name, right.name),
+      );
+      for (const entry of entries) {
+        const match = /^(ses_[0-9a-f]{32})\.json$/u.exec(entry.name);
+        if (match === null) continue;
+        try {
+          const text = await boundary.readUtf8File(
+            ["sessions", providerEntry.name, entry.name],
+            MAX_PRESENCE_PARTICIPATION_BYTES,
+          );
+          if (text === undefined) continue;
+          const current = currentWorkstreamOf(JSON.parse(text));
+          if (current !== undefined) {
+            currentByMember.set(`${providerEntry.name} ${match[1]!}`, current);
+          }
+        } catch {
+          unknown = true;
+        }
+      }
+    }
+  }
+
+  const reports = new Map<
+    string,
+    { members: WorkstreamPresenceMember[]; liveness_unknown: boolean }
+  >();
+  const reportFor = (workstreamId: string) => {
+    let report = reports.get(workstreamId);
+    if (report === undefined) {
+      report = { members: [], liveness_unknown: unknown };
+      reports.set(workstreamId, report);
+    }
+    return report;
+  };
+
+  let snapshots: Awaited<
+    ReturnType<ActiveLeaseStore["listSnapshots"]>
+  >;
+  try {
+    snapshots = await new ActiveLeaseStore(
+      join(absoluteRoot, ".barbaro", "active"),
+    ).listSnapshots({
+      onInvalid: () => {
+        unknown = true;
+      },
+    });
+  } catch {
+    snapshots = [];
+    unknown = true;
+  }
+  for (const snapshot of snapshots) {
+    if (snapshot.agent_id !== "main") continue;
+    if (Date.parse(snapshot.expires_at) <= nowMs) continue;
+    const workstreamId = currentByMember.get(
+      `${snapshot.provider} ${snapshot.session_id}`,
+    );
+    if (workstreamId === undefined) continue;
+    reportFor(workstreamId).members.push({
+      provider: snapshot.provider,
+      session_id: snapshot.session_id,
+      presence: snapshot.state === "idle" ? "present" : "live",
+    });
+  }
+
+  // Every enrolled workstream gets a report so callers can distinguish a
+  // proven-absent membership from one that was never inspected.
+  for (const workstreamId of currentByMember.values()) {
+    reportFor(workstreamId);
+  }
+  for (const report of reports.values()) {
+    report.liveness_unknown = unknown;
+    report.members.sort((left, right) =>
+      compareUtf16CodeUnits(
+        `${left.provider} ${left.session_id}`,
+        `${right.provider} ${right.session_id}`,
+      ),
+    );
+  }
+  return { byWorkstream: reports, liveness_unknown: unknown };
+}
+
+function currentWorkstreamOf(value: unknown): string | undefined {
+  if (!isObject(value)) throw new TypeError("participation must be an object");
+  if (value.schema === "barbaro.session-participation.v1") return undefined;
+  if (value.schema !== "barbaro.session-participation.v2") {
+    throw new TypeError("unsupported participation schema");
+  }
+  if (
+    typeof value.workstream_id !== "string" ||
+    !WORKSTREAM_ID_PATTERN.test(value.workstream_id)
+  ) {
+    throw new TypeError("participation is structurally invalid");
+  }
+  return value.workstream_id;
 }
 
 function recordComponents(workstreamId: string): readonly string[] {

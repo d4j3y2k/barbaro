@@ -1,0 +1,22 @@
+Barbaro                                        Lifecycle
+tui-reboot is completed.                                
+                                                        
+┌─ Completed ──────────────────────────────────────────┐
+│                                                      │
+│                                                      │
+│                                                      │
+│                                                      │
+│               tui-reboot is completed.               │
+│   The status was confirmed by a fresh store read.    │
+│                                                      │
+│                                                      │
+│                                                      │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+                                                        
+Revision · 4                                            
+1 open · 11 completed                                   
+ID · ws_44c26310af3c86a04eadf62453776f80                
+Project · barbaro · root...                             
+                                                        
+Esc Open · / completed · ? help · q quit                

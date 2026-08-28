@@ -1,0 +1,28 @@
+Barbaro                                                     Help
+Help is read-only. Esc returns to the current selection.        
+                                                                
+┌─ Words and keys ─────────────────────────────────────────────┐
+│  j/k · Enter/Esc    Move / open / back                       │
+│  n / on Home        Create / switch Open or Completed        │
+│  x on selection     Complete / reopen after confirmation     │
+│  r · ? · Space      Refresh / help / pause-resume            │
+│                                                              │
+│  Working now        A shown lease is working                 │
+│  Waiting/Blocked    A shown lease is waiting or blocked      │
+│  Needs input        Input is needed from the user            │
+│  Quiet              Complete proof: no work or attention     │
+│  Last shown         Recent proof; older history is bounded   │
+│  Activity unknown   Activity evidence is incomplete          │
+│  News               Unread peer turns waiting for a session  │
+│  Publish blocked    A complete publish check found a jam     │
+│  Data incomplete    Required evidence was unavailable        │
+└──────────────────────────────────────────────────────────────┘
+                                                                
+Home opens on Open; / switches to Completed.                    
+Completion does not stop joined sessions.                       
+Claims are advisory path evidence, not locks.                   
+Opening help never reads, acknowledges, or writes data.         
+                                                                
+                                                                
+                                                                
+Esc close · q quit                                              

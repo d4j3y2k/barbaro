@@ -1,0 +1,28 @@
+Barbaro                                           New workstream
+Name and title are ready.                                       
+                                                                
+┌─ Create ─────────────────────────────────────────────────────┐
+│                                                              │
+│> Name                                                        │
+│  [ motion-study_                                      ]      │
+│                                                              │
+│  Title                                                       │
+│  [ Explore the motion-study interface for every advent]      │
+│                                                              │
+│  Use 1-64 lowercase letters, numbers, or hyphens.            │
+│  Start and end with a letter or number.                      │
+│                                                              │
+│  Ready to create                                             │
+│                                                              │
+│                                                              │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+                                                                
+Project · barbaro                                               
+Root · /Users/davidkim/Developer/barbaro                        
+Name · motion-study                                             
+Title · Explore the motion-study interface for every...         
+Sessions joined by creation · none                              
+                                                                
+                                                                
+Tab/Shift-Tab · Ctrl-S create · Esc cancel                      

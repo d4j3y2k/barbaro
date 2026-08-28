@@ -11,6 +11,9 @@ const CLEAR_SCREEN = "\u001b[H\u001b[2J";
 
 export const HORSE_FRAME_INTERVAL_MS = 100;
 export const HORSE_FRAME_COUNT = HORSE_HERO_FRAMES.length;
+export const HORSE_BRAND_WORDMARK = "b a r b a r o";
+export const RIDERLESS_SOURCE_CAPTION =
+  "SALLIE GARDNER · 1878 · RIDER REMOVED FROM SOURCE";
 
 export type HorseScale = "hero" | "compact";
 export type HorseScalePreference = HorseScale | "auto";
@@ -59,6 +62,18 @@ export function horseFrame(
       ? HORSE_HERO_FRAMES
       : HORSE_COMPACT_FRAMES;
   return frames[modulo(frameIndex, frames.length)]!;
+}
+
+/** The product mark carved into the shared solid flank of every hero plate. */
+export function brandedHeroHorseFrame(
+  frameIndex: number,
+): readonly string[] {
+  return applyWordmark(
+    horseFrame(frameIndex, "hero", "riderless"),
+    "hero",
+    "spaced-lower",
+    frameIndex,
+  );
 }
 
 /** Resolve an animation frame using elapsed time rather than render count. */
@@ -111,14 +126,14 @@ export function renderHorseStudyFrame(
       variant === "original"
         ? "EADWEARD MUYBRIDGE · SALLIE GARDNER · 19 JUNE 1878"
         : variant === "riderless"
-          ? "SALLIE GARDNER · 1878 · RIDER REMOVED FROM SOURCE"
+          ? RIDERLESS_SOURCE_CAPTION
           : "SALLIE GARDNER · 1878 · RIGHT: RIDER REMOVED FROM SOURCE",
       "dim",
       options.style !== false,
     ),
     options.interactive === false
       ? `motion study · static frame${wordmark === "none" ? "" : ` · ${wordmarkLabel(wordmark)}`}`
-      : `${options.paused === true ? "PAUSED" : "GALLOPING"} · q quit · space pause · ←/→ step · s scale · v view · w mark`,
+      : `${options.paused === true ? "PAUSED" : "GALLOPING"} · q quit · Space ${options.paused === true ? "resume" : "pause"} · ←/→ step · s scale · v view · w mark`,
   ];
   const topPadding = Math.max(0, Math.floor((height - lines.length) / 2));
   const rendered = [
@@ -354,7 +369,7 @@ function applyWordmark(
 
 function wordmarkText(wordmark: HorseWordmark, frameIndex: number): string {
   void frameIndex;
-  if (wordmark === "spaced-lower") return "b a r b a r o";
+  if (wordmark === "spaced-lower") return HORSE_BRAND_WORDMARK;
   return "";
 }
 

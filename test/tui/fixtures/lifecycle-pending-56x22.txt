@@ -1,0 +1,22 @@
+Barbaro                                        Lifecycle
+Completing tui-reboot…                                  
+                                                        
+┌─ Complete workstream ────────────────────────────────┐
+│                                                      │
+│                                                      │
+│                                                      │
+│                Completing tui-reboot…                │
+│        Running the public workstream command.        │
+│         Checking the store before reporting.         │
+│                                                      │
+│                                                      │
+│                                                      │
+│                                                      │
+└──────────────────────────────────────────────────────┘
+                                                        
+2 open · 10 completed                                   
+ID · ws_44c26310af3c86a04eadf62453776f80                
+Project · barbaro · root...                             
+                                                        
+                                                        
+Esc request cancel · q quit                             

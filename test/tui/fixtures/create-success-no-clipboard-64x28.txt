@@ -1,0 +1,28 @@
+Barbaro                                           New workstream
+motion-study was created. Creation itself enrolled no sessions. 
+                                                                
+┌─ Created ────────────────────────────────────────────────────┐
+│                                                              │
+│                         motion-study                         │
+│ Explore the motion-study interface for every adventurous...  │
+│                      ws_d3c1a9e4 · open                      │
+│                                                              │
+│  Join from Claude Code                                       │
+│> [ /barbaro join motion-study ]                              │
+│                                                              │
+│  Join from Codex                                             │
+│  $barbaro join motion-study                                  │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+                                                                
+Claude Code join command · selected                             
+/barbaro join motion-study                                      
+Clipboard unavailable. Copy the selected line manually.         
+The command was not run.                                        
+Project · barbaro                                               
+Root · /Users/davidkim/Developer/barbaro                        
+                                                                
+j/k · c retry · r refresh · Esc home · ? help · q quit          

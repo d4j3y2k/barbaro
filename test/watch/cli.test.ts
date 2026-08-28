@@ -103,7 +103,7 @@ async function appendTurn(
   );
 }
 
-const unusedTui = async (): Promise<void> => {
+const unusedTui = async (): Promise<number> => {
   assert.fail("await must not start the TUI");
 };
 

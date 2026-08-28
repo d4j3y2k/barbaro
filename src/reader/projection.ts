@@ -27,12 +27,16 @@ import {
   type ReaderActiveSummary,
   type ReaderBoundedItems,
   type ReaderContentSummary,
+  type ReaderCollection,
   type ReaderContextV1,
+  type ReaderCoverage,
   type ReaderDiagnostics,
   type ReaderEvidenceV1,
   type ReaderJsonExcerpt,
   type ReaderProjection,
   type ReaderProjectionOptions,
+  type ReaderReadState,
+  type ReaderStoreHealth,
   type ReaderSubagentEvidenceSummary,
   type ReaderSubagentSummary,
   type ReaderTurnSummary,
@@ -41,6 +45,57 @@ import {
 const DEFAULT_REQUEST_EXCERPT_BYTES = 1024;
 const DEFAULT_RESPONSE_EXCERPT_BYTES = 2048;
 const DEFAULT_ACTION_EXCERPT_BYTES = 256;
+
+/** Build a complete logical collection before byte-budget projection. */
+export function readerCollection<T>(
+  items: readonly T[],
+  readState: ReaderReadState = "ok",
+  coverage: ReaderCoverage = { state: "complete" },
+): ReaderCollection<T> {
+  return {
+    shown: items.length,
+    total: items.length,
+    hidden: 0,
+    items: [...items],
+    read_state: readState,
+    coverage,
+  };
+}
+
+/** Byte-bound the only variable-sized E-01 collection without changing v1. */
+export function projectStoreHealth(
+  health: ReaderStoreHealth,
+  options: ReaderProjectionOptions,
+): ReaderProjection<ReaderStoreHealth> {
+  const limits = projectionLimits(options);
+  const source = health.diagnostics.provider_drift;
+  const all = source.items;
+  const total = source.total;
+  if (total < all.length) {
+    throw new RangeError("provider drift total cannot be less than its items");
+  }
+  let shown = 0;
+  const build = (): ReaderStoreHealth => ({
+    ...health,
+    diagnostics: {
+      ...health.diagnostics,
+      provider_drift: {
+        ...health.diagnostics.provider_drift,
+        shown,
+        total,
+        hidden: total - shown,
+        items: all.slice(0, shown),
+      },
+    },
+  });
+
+  wrapReaderProjection(build(), limits.byteBudget);
+  shown = appendWhileFits(all.length, shown, (candidate) => {
+    shown = candidate;
+    return readerProjectionFits(build(), limits.byteBudget);
+  });
+  return wrapReaderProjection(build(), limits.byteBudget);
+}
 
 interface ProjectionLimits {
   readonly byteBudget: number;

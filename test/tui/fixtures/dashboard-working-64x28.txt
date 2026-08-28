@@ -1,0 +1,28 @@
+Barbaro                                               tui-reboot
+1 working · 1 waiting · News 13 for codex/58d65273              
+                                                                
+┌─ Motion study ───────────────────────────────────────────────┐
+│                                       ▒▒▓▓░                  │
+│                                   ░▓▓██████▓░                │
+│                  ░░▒▒▒▓▓██▓▓▒▓▓▓▓██████▀   ▀▀                │
+│              ░▒▓▓▒▒░ ▓████████████████                       │
+│                     ░███▓▒▒▓██████████▒▒░░                   │
+│                  ░▒▒▓█▓░            ░▓▒  ░░░░                │
+│              ░░▒▒░ ░▓                 ░▒    ░                │
+│              ░░░   ▒▓  ░░              ░▒░     ░             │
+│    Refresh age 0.4s · 23 shown turns · 284 KiB projected     │
+│                                                              │
+│> codex/58d65273                    Working...                │
+│  claude/460d4a94                   Waiting · target unknown  │
+│  claude/969a63de                   No shown lease            │
+│                                                              │
+└──────────────────────────────────────────────────────────────┘
+                                                                
+codex/58d65273 · working                                        
+Intent · Approved: contact-print idle...                        
+Action · apply_patch                                            
+Latest shown exposure · #23 · succeeded · 02:07                 
+News 13 for codex/58d65273                                      
+Publication clear                                               
+                                                                
+j/k · x complete · Esc home · Space pause · ? help · q quit     

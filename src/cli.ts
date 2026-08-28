@@ -45,17 +45,19 @@ import {
   WorkstreamNameTakenError,
   WorkstreamStore,
 } from "./workstreams/index.js";
+import { collectWorkstreamPresence } from "./workstreams/store.js";
 import { runClaudeTrace } from "./runner/claude.js";
 import { runCodexTrace } from "./runner/codex.js";
 import {
-  DASHBOARD_MIN_HEIGHT,
-  DASHBOARD_MIN_WIDTH,
-  DEFAULT_TUI_BYTE_BUDGET,
-  DEFAULT_TUI_INTERVAL_MS,
-  DEFAULT_TUI_TURNS_PER_SESSION,
-  renderDashboard,
-  runTui,
-} from "./tui/index.js";
+  COMFORT_REFRESH_INTERVAL_MS,
+  comfortTermRefusal,
+  runComfortTui,
+} from "./tui/comfort-app.js";
+import {
+  COMFORT_BYTE_BUDGET,
+  COMFORT_TURNS_PER_SESSION,
+} from "./tui/defaults.js";
+import { renderOnceSnapshot } from "./tui/once.js";
 
 class UsageError extends TypeError {}
 
@@ -78,7 +80,7 @@ export async function main(
     stdout: (text) => process.stdout.write(text),
     stderr: (text) => process.stderr.write(text),
   },
-  runLiveTui: typeof runTui = runTui,
+  runInteractiveTui: typeof runComfortTui = runComfortTui,
   runAwait: typeof awaitUnreadPeerTurns = awaitUnreadPeerTurns,
 ): Promise<number> {
   if (argv.length === 1 && argv[0] === "--version") {
@@ -212,32 +214,24 @@ export async function main(
     const intervalMs = positiveIntegerFlag(
       flags,
       "interval-ms",
-      DEFAULT_TUI_INTERVAL_MS,
+      COMFORT_REFRESH_INTERVAL_MS,
     );
     const byteBudget = positiveIntegerFlag(
       flags,
       "byte-budget",
-      DEFAULT_TUI_BYTE_BUDGET,
+      COMFORT_BYTE_BUDGET,
     );
     const turnsPerSession = positiveIntegerFlag(
       flags,
       "turns-per-session",
-      DEFAULT_TUI_TURNS_PER_SESSION,
+      COMFORT_TURNS_PER_SESSION,
     );
+    // §8: a bare --once is exactly 64×28; a requested size below the 12×6
+    // floor gets the true-size notice at its actual geometry.
     const snapshotDimensions = flags.has("once")
       ? {
-          width: integerFlagAtLeast(
-            flags,
-            "width",
-            100,
-            DASHBOARD_MIN_WIDTH,
-          ),
-          height: integerFlagAtLeast(
-            flags,
-            "height",
-            30,
-            DASHBOARD_MIN_HEIGHT,
-          ),
+          width: positiveIntegerFlag(flags, "width", 64),
+          height: positiveIntegerFlag(flags, "height", 28),
         }
       : undefined;
     const workstreamId = await resolveWorkstreamScope(flags, projectRoot);
@@ -261,44 +255,48 @@ export async function main(
           };
 
     if (snapshotDimensions !== undefined) {
-      const projection = await readProjectContext(projectRoot, {
-        byteBudget,
-        turnsPerSession,
-        ...(workstreamId === undefined ? {} : { workstreamId }),
-      });
       io.stdout(
-        `${renderDashboard(projection, {
+        await renderOnceSnapshot({
+          projectRoot,
           width: snapshotDimensions.width,
           height: snapshotDimensions.height,
-          projectRoot,
-          color: false,
-          interactive: false,
-          refreshIntervalMs: intervalMs,
-          ...(scope === undefined ? {} : { scope }),
-          horseFrameIndex: 0,
-        })}\n`,
+          motionOff: flags.has("no-motion"),
+          byteBudget,
+          turnsPerSession,
+          ...(workstreamId === undefined ? {} : { workstreamId }),
+        }),
       );
       return 0;
     }
 
+    // §9 entry precedence: TERM is refused before terminal ownership.
+    const refusal = comfortTermRefusal(process.env["TERM"]);
+    if (refusal !== undefined) {
+      for (const line of refusal.lines) io.stderr(`${line}\n`);
+      return 2;
+    }
     if (!process.stdin.isTTY || !process.stdout.isTTY) {
       io.stderr(
         "barbaro tui requires an interactive terminal; use --once for a plain snapshot\n",
       );
       return 1;
     }
-    const color =
-      !flags.has("no-color") && process.env["NO_COLOR"] === undefined;
-    await runLiveTui({
+    return runInteractiveTui({
       projectRoot,
+      term: process.env["TERM"],
+      stderr: (line) => io.stderr(`${line}\n`),
+      input: process.stdin,
+      output: process.stdout,
+      signals: process,
       intervalMs,
       byteBudget,
       turnsPerSession,
-      color,
-      motion: color && !flags.has("no-motion"),
-      ...(scope === undefined ? {} : { scope }),
+      // NO_COLOR and --no-color disable styling only; motion has its own flag.
+      color:
+        !flags.has("no-color") && process.env["NO_COLOR"] === undefined,
+      motion: !flags.has("no-motion"),
+      ...(workstreamId === undefined ? {} : { workstreamId }),
     });
-    return 0;
   }
 
   // A cursor-bound observer for an enrolled session. Unlike watch, await has
@@ -905,9 +903,40 @@ async function runWorkstreamCommand(
     const all = await new WorkstreamStore(projectRoot).list(() => {
       invalidRecords += 1;
     });
+    // Completion is a statement, not enforcement: a completed workstream
+    // whose current members are still live or present stays in the default
+    // listing, flagged, so nobody quietly works inside a closed record.
+    const presence = all.some((record) => record.status === "completed")
+      ? await collectWorkstreamPresence(projectRoot)
+      : undefined;
+    const flagged = all.map((record) => {
+      if (record.status !== "completed" || presence === undefined) {
+        return record;
+      }
+      const report = presence.byWorkstream.get(record.workstream_id);
+      const members = report?.members ?? [];
+      if (members.length > 0) {
+        return {
+          ...record,
+          completed_presence: members.some(
+            (member) => member.presence === "live",
+          )
+            ? "live"
+            : "present",
+        };
+      }
+      if (presence.liveness_unknown) {
+        return { ...record, completed_presence: "unknown" };
+      }
+      return record;
+    });
     const workstreams = flags.has("all")
-      ? all
-      : all.filter((workstream) => workstream.status === "open");
+      ? flagged
+      : flagged.filter(
+          (record) =>
+            record.status === "open" ||
+            "completed_presence" in record,
+        );
     io.stdout(
       `${stableStringify({
         workstreams,
@@ -916,6 +945,39 @@ async function runWorkstreamCommand(
         invalid_records: invalidRecords,
       })}\n`,
     );
+    return 0;
+  }
+  if (verb === "complete" || verb === "reopen") {
+    const { positional, rest } = takePositional(
+      argv.slice(1),
+      `workstream ${verb} <name|ws_id>`,
+    );
+    const flags = parseFlags(rest, new Set(["project-root"]));
+    const projectRoot = flags.get("project-root") ?? process.cwd();
+    const store = new WorkstreamStore(projectRoot);
+    const existing = await store.resolve(positional);
+    if (existing === undefined) {
+      io.stderr(`no workstream named ${JSON.stringify(positional)}\n`);
+      return 1;
+    }
+    if (verb === "complete") {
+      // Warn, never block: the transition is reversible and enforcement-free.
+      const presence = await collectWorkstreamPresence(projectRoot);
+      const report = presence.byWorkstream.get(existing.workstream_id);
+      for (const member of report?.members ?? []) {
+        io.stderr(
+          `warning: ${member.provider}/${member.session_id} is ${member.presence} in ${JSON.stringify(existing.name)}; completion does not stop it\n`,
+        );
+      }
+      if (presence.liveness_unknown) {
+        io.stderr(
+          "warning: member liveness is unknown; some session or active records could not be read\n",
+        );
+      }
+      io.stdout(`${stableStringify(await store.complete(positional))}\n`);
+      return 0;
+    }
+    io.stdout(`${stableStringify(await store.reopen(positional))}\n`);
     return 0;
   }
   if (verb === "show") {
@@ -995,17 +1057,30 @@ function helpText(): string {
   barbaro workstream new  <name> [--title <text>] [--project-root <path>]
                               # a workstream groups the sessions sharing one
                               # objective; sessions join it with the opt-in
+  barbaro workstream complete <name|ws_id> [--project-root <path>]
+                              # reversible statement, not enforcement; warns
+                              # on stderr when current members are still
+                              # live or present, and never blocks
+  barbaro workstream reopen   <name|ws_id> [--project-root <path>]
+                              # \`list\` hides completed workstreams unless
+                              # members remain live/present (flagged);
+                              # \`list --all\` always shows everything
   barbaro tui     [--project-root <path>] [--interval-ms <n>]
                   [--byte-budget <n>] [--turns-per-session <n>]
                   [--workstream <name|ws_id> | --all-workstreams]
                   [--no-color] [--no-motion]
                   [--once [--width <n>] [--height <n>]]
-                              # read-only, bounded control panel; live keys:
-                              # q/Ctrl-C quit, r refresh; Left/Right or
-                              # Tab/Shift-Tab switch panes; Up/Down or j/k
-                              # move; Enter detail, Esc back
-                              # defaults to whole project; snapshots are at
-                              # least 12x6 and otherwise default to 100x30
+                              # bounded control panel; --once is read-only;
+                              # live keys: q/Ctrl-C quit, r refresh, j/k or
+                              # Up/Down move, Enter detail, Esc back,
+                              # / Open/Completed, n new, x complete/reopen
+                              # interactive writes use only the public
+                              # workstream new/complete/reopen commands
+                              # defaults to project scope and Home · Open;
+                              # snapshots default
+                              # to the exact 64x28 card, pad larger requests
+                              # with matte, and answer below 12x6 with the
+                              # true-size notice
   barbaro context [--project-root <path>] [--byte-budget <n>]
                   [--turns-per-session <n>]
                   [--provider <claude|codex> --session-id <id>]

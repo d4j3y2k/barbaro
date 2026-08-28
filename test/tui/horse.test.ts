@@ -2,11 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  HORSE_BRAND_WORDMARK,
   HORSE_FRAME_COUNT,
+  brandedHeroHorseFrame,
   horseFrame,
   horseFrameIndex,
   renderHorseStudyFrame,
 } from "../../src/tui/horse.js";
+
+const HERO_BRAND_ROW = 5;
+const HERO_BRAND_START = 19;
 
 test("generated horse frames retain fixed geometry and density shading", () => {
   assert.equal(HORSE_FRAME_COUNT, 11);
@@ -28,6 +33,37 @@ test("generated horse frames retain fixed geometry and density shading", () => {
       distinct.add(frame.join("\n"));
     }
     assert.equal(distinct.size, HORSE_FRAME_COUNT);
+  }
+});
+
+test("the hero brand is carved into one guarded solid flank in every plate", () => {
+  const markCells = Array.from(HORSE_BRAND_WORDMARK);
+  for (let index = 0; index < HORSE_FRAME_COUNT; index += 1) {
+    const raw = horseFrame(index, "hero", "riderless");
+    const branded = brandedHeroHorseFrame(index);
+    const rawRow = Array.from(raw[HERO_BRAND_ROW]!);
+    assert.equal(
+      rawRow.slice(HERO_BRAND_START, HERO_BRAND_START + markCells.length).join(""),
+      "█".repeat(markCells.length),
+    );
+    assert.ok(
+      rawRow
+        .slice(HERO_BRAND_START - 3, HERO_BRAND_START)
+        .every((cell) => cell !== " "),
+    );
+    assert.ok(
+      rawRow
+        .slice(
+          HERO_BRAND_START + markCells.length,
+          HERO_BRAND_START + markCells.length + 3,
+        )
+        .every((cell) => cell !== " "),
+    );
+
+    const expected = [...raw];
+    rawRow.splice(HERO_BRAND_START, markCells.length, ...markCells);
+    expected[HERO_BRAND_ROW] = rawRow.join("");
+    assert.deepEqual(branded, expected);
   }
 });
 
@@ -119,6 +155,21 @@ test("the preferred wordmark shifts right without a background fill", () => {
   assert.ok(artLine);
   assert.equal(artLine.indexOf("b a r b a r o") - artLine.indexOf("│"), 12);
   assert.doesNotMatch(artLine, /\u001b\[7m/u);
+  assert.match(rendered, /Space pause/u);
+
+  const paused = renderHorseStudyFrame({
+    width: 80,
+    height: 24,
+    frameIndex: 0,
+    scale: "compact",
+    variant: "riderless",
+    wordmark: "spaced-lower",
+    style: true,
+    interactive: true,
+    paused: true,
+  });
+  assert.match(paused, /Space resume/u);
+  assert.doesNotMatch(paused, /Space pause/u);
 });
 
 test("small terminals get an honest size requirement instead of broken art", () => {

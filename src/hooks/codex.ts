@@ -111,6 +111,7 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
   const projectRoot = resolve(cwd);
   const prompt = typeof input.prompt === "string" ? input.prompt : undefined;
   const tracePath = stringValue(input.transcript_path);
+  const agentTracePath = stringValue(input.agent_transcript_path);
   const nativeTurnId = stringValue(input.turn_id);
   if (event === "UserPromptSubmit") {
     await assertCodexHookTraceIdentity(
@@ -188,9 +189,6 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
   const turnId = nativeTurnId
     ? createTurnId("codex", nativeSessionId, agentId, nativeTurnId)
     : undefined;
-  const rootTurnId = nativeTurnId
-    ? createTurnId("codex", nativeSessionId, "main", nativeTurnId)
-    : undefined;
   const leaseIdentity = {
     lease_id: deriveLeaseId("codex", nativeSessionId, agentId),
     provider: "codex",
@@ -216,12 +214,11 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
 
   if (event === "SubagentStart") {
     const settled = await store.update(leaseIdentity, async (previous) => {
-      const stale = await staleTurnIgnore(
+      const stale = await staleSubagentStartIgnore(
         store,
         leaseIdentity,
         previous,
         turnId,
-        rootTurnId,
       );
       if (stale) return stale;
       return {
@@ -238,13 +235,22 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
 
   if (event === "SubagentStop") {
     const settled = await store.update(leaseIdentity, async (previous) => {
-      const stale = await staleTurnIgnore(
-        store,
-        leaseIdentity,
-        previous,
-        turnId,
-        rootTurnId,
-      );
+      const own = staleTurnDecision(previous, turnId);
+      const stale =
+        own === undefined
+          ? undefined
+          : await attestCodexTurnRollover(
+              {
+                previous,
+                eventTurnId: turnId,
+                nativeTurnId,
+                tracePath: agentTracePath,
+                nativeSessionId,
+                projectRoot,
+                agentId,
+              },
+              own,
+            );
       if (stale) return stale;
       return { write: idleLeaseUpdate(leaseIdentity) };
     });
@@ -253,14 +259,29 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
 
   if (event === "UserPromptSubmit") {
     const prompt = stringValue(input.prompt) ?? "";
-    const lease = await store.write({
-      ...leaseIdentity,
-      state: "working",
-      intent: boundedContent(prompt, ACTIVE_INTENT_BYTES),
-      claims: [],
-      unknown_write_scope: false,
+    const settled = await store.update(leaseIdentity, async (previous) => {
+      const stale = await staleUserPromptIgnore(
+        store,
+        leaseIdentity,
+        previous,
+        turnId,
+      );
+      if (stale) return stale;
+      return {
+        write: {
+          ...leaseIdentity,
+          state: "working",
+          intent: boundedContent(prompt, ACTIVE_INTENT_BYTES),
+          claims: [],
+          unknown_write_scope: false,
+        },
+      };
     });
-    const nudge = agentId === "main" && turnId !== undefined
+    const result = codexUpdateResult(event, settled);
+    const nudge =
+      agentId === "main" &&
+      result.active_revision !== undefined &&
+      turnId !== undefined
       ? await claimHookNudgeDelivery({
           projectRoot,
           provider: "codex",
@@ -272,8 +293,7 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
         })
       : undefined;
     return {
-      event,
-      active_revision: lease.revision,
+      ...result,
       ...note,
       ...(nudge === undefined ? {} : { nudge }),
     };
@@ -284,7 +304,9 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
     const settled = await store.update(
       leaseIdentity,
       async (previous) => {
-        const stale = await staleMainToolTurnDecision({
+        const stale = await staleToolTurnDecision({
+          store,
+          actor: leaseIdentity,
           previous,
           eventTurnId: turnId,
           nativeTurnId,
@@ -343,7 +365,9 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
     const settled = await store.update(
       leaseIdentity,
       async (previous) => {
-        const stale = await staleMainToolTurnDecision({
+        const stale = await staleToolTurnDecision({
+          store,
+          actor: leaseIdentity,
           previous,
           eventTurnId: turnId,
           nativeTurnId,
@@ -392,7 +416,9 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
 
   if (event === "PostToolUse") {
     const settled = await store.update(leaseIdentity, async (previous) => {
-      const stale = await staleMainToolTurnDecision({
+      const stale = await staleToolTurnDecision({
+        store,
+        actor: leaseIdentity,
         previous,
         eventTurnId: turnId,
         nativeTurnId,
@@ -432,8 +458,18 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
   }
 
   if (event === "PreCompact") {
-    const settled = await store.update(leaseIdentity, (previous) => {
-      const stale = staleTurnDecision(previous, turnId);
+    const settled = await store.update(leaseIdentity, async (previous) => {
+      const stale = await staleToolTurnDecision({
+        store,
+        actor: leaseIdentity,
+        previous,
+        eventTurnId: turnId,
+        nativeTurnId,
+        tracePath,
+        nativeSessionId,
+        projectRoot,
+        agentId,
+      });
       if (stale) return stale;
       return {
         write: {
@@ -455,8 +491,18 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
   }
 
   if (event === "PostCompact") {
-    const settled = await store.update(leaseIdentity, (previous) => {
-      const stale = staleTurnDecision(previous, turnId);
+    const settled = await store.update(leaseIdentity, async (previous) => {
+      const stale = await staleToolTurnDecision({
+        store,
+        actor: leaseIdentity,
+        previous,
+        eventTurnId: turnId,
+        nativeTurnId,
+        tracePath,
+        nativeSessionId,
+        projectRoot,
+        agentId,
+      });
       if (stale) return stale;
       return {
         write: {
@@ -616,13 +662,13 @@ function staleTurnDecision(
 }
 
 /**
- * Codex goal-mode continuations do not fire UserPromptSubmit. Their first main
- * tool boundary or Stop can therefore arrive while the idle tombstone still
- * names the preceding turn. Idle alone is ambiguous with a delayed event, so
- * rollover is accepted only when one validated rollout snapshot says this
- * native turn is its latest task_started record.
+ * Codex goal continuations and reused child threads do not necessarily fire a
+ * fresh prompt or SubagentStart. Their next boundary can therefore arrive
+ * while the actor still names its preceding turn. Rollover is accepted only
+ * when one validated rollout snapshot names this native turn as its latest
+ * task_started record.
  */
-interface MainTurnDecisionOptions {
+interface CodexTurnDecisionOptions {
   readonly previous: ActiveLeaseV1 | undefined;
   readonly eventTurnId: string | undefined;
   readonly nativeTurnId: string | undefined;
@@ -632,15 +678,37 @@ interface MainTurnDecisionOptions {
   readonly agentId: string;
 }
 
+interface CodexActiveActor {
+  readonly provider: "codex";
+  readonly session_id: string;
+  readonly agent_id: string;
+}
+
 /**
- * A tool event after an idle tombstone is either the first boundary of a new
- * goal turn or a delayed event from the terminal turn. Only a different,
- * trace-attested main turn may roll that tombstone forward.
+ * Main actors may roll an idle tombstone to a trace-attested goal turn. Child
+ * actors may roll any older lease to a trace-attested follow-up turn because
+ * Codex reuses child threads without another SubagentStart; a same-turn event
+ * after idle remains terminal and is always rejected.
  */
-async function staleMainToolTurnDecision(
-  options: MainTurnDecisionOptions,
+async function staleToolTurnDecision(
+  options: CodexTurnDecisionOptions & {
+    readonly store: ActiveLeaseStore;
+    readonly actor: CodexActiveActor;
+  },
 ): Promise<{ readonly ignore: string } | undefined> {
+  const unseenChild = await staleFirstSeenChildIgnore(
+    options.store,
+    options.actor,
+    options.previous,
+  );
+  if (unseenChild) return unseenChild;
   const stale = staleTurnDecision(options.previous, options.eventTurnId);
+  if (options.agentId !== "main") {
+    if (stale) return attestCodexTurnRollover(options, stale);
+    return options.previous?.state === "idle"
+      ? { ignore: "stale turn event ignored" }
+      : undefined;
+  }
   if (options.previous?.state !== "idle") return stale;
   const fallback = stale ?? { ignore: "stale turn event ignored" };
   if (
@@ -649,27 +717,23 @@ async function staleMainToolTurnDecision(
   ) {
     return fallback;
   }
-  return attestMainIdleRollover(options, fallback);
+  return attestCodexTurnRollover(options, fallback);
 }
 
 async function staleMainTurnDecision(
-  options: MainTurnDecisionOptions,
+  options: CodexTurnDecisionOptions,
 ): Promise<{ readonly ignore: string } | undefined> {
   const stale = staleTurnDecision(options.previous, options.eventTurnId);
   if (stale === undefined) return undefined;
-  return attestMainIdleRollover(options, stale);
+  if (options.previous?.state !== "idle") return stale;
+  return attestCodexTurnRollover(options, stale);
 }
 
-async function attestMainIdleRollover(
-  options: MainTurnDecisionOptions,
+async function attestCodexTurnRollover(
+  options: CodexTurnDecisionOptions,
   stale: { readonly ignore: string },
 ): Promise<{ readonly ignore: string } | undefined> {
-  if (
-    options.agentId !== "main" ||
-    options.previous?.state !== "idle" ||
-    options.nativeTurnId === undefined ||
-    options.tracePath === undefined
-  ) {
+  if (options.nativeTurnId === undefined || options.tracePath === undefined) {
     return stale;
   }
   let attestation: Awaited<ReturnType<typeof readCodexTurnAttestation>>;
@@ -686,6 +750,14 @@ async function attestMainIdleRollover(
     options.nativeSessionId,
     options.projectRoot,
   );
+  if (
+    options.agentId !== "main" &&
+    attestation.identity?.nativeThreadId !== options.agentId
+  ) {
+    throw new Error(
+      "Codex hook agent_id does not match transcript session_meta.id",
+    );
+  }
   if (attestation.malformedLines > 0 || attestation.partialFinalLine) {
     return stale;
   }
@@ -695,34 +767,71 @@ async function attestMainIdleRollover(
 }
 
 /**
- * Subagent events additionally compare their parent turn against the root
- * actor: a delayed SubagentStart can target an actor with no file yet, and
- * turn N must not materialize a new child lease after UserPromptSubmit has
- * advanced the root to N+1. The root read is advisory and lock-free; the
- * decisive comparison against this actor's own lease runs under its lock.
+ * A root prompt authoritatively begins its turn. Child prompts instead belong
+ * to the actor created by SubagentStart: a first-seen prompt requires a live
+ * root, and an existing child accepts only its initial, same-turn prompt while
+ * its lease is still pristine. Delayed prompts must not clear richer activity
+ * or resurrect an idle tombstone.
  */
-async function staleTurnIgnore(
+async function staleUserPromptIgnore(
   store: ActiveLeaseStore,
-  actor: {
-    readonly provider: "codex";
-    readonly session_id: string;
-    readonly agent_id: string;
-  },
+  actor: CodexActiveActor,
   previous: ActiveLeaseV1 | undefined,
   eventTurnId: string | undefined,
-  rootEventTurnId?: string,
+): Promise<{ readonly ignore: string } | undefined> {
+  if (actor.agent_id === "main") return undefined;
+  const own = staleTurnDecision(previous, eventTurnId);
+  if (own) return own;
+  if (previous === undefined) {
+    return staleFirstSeenChildIgnore(store, actor, previous);
+  }
+  const pristine =
+    previous.state === "working" &&
+    previous.intent === undefined &&
+    previous.current_action === undefined &&
+    previous.claims.length === 0 &&
+    previous.unknown_write_scope === false &&
+    previous.extensions === undefined;
+  return pristine ? undefined : { ignore: "stale turn event ignored" };
+}
+
+/**
+ * Current Codex SubagentStart and SubagentStop payloads identify the child's
+ * own turn and expose no parent-turn id. A start is therefore fenced by the
+ * child actor itself plus visible root presence: any existing actor rejects a
+ * duplicate Start so delayed delivery cannot erase live claims or resurrect
+ * an idle tombstone, while a new actor is admitted only while its root session
+ * is active. Stop may safely create an idle tombstone when it wins the race
+ * with Start, making either event order converge to idle.
+ */
+async function staleSubagentStartIgnore(
+  store: ActiveLeaseStore,
+  actor: CodexActiveActor,
+  previous: ActiveLeaseV1 | undefined,
+  eventTurnId: string | undefined,
 ): Promise<{ readonly ignore: string } | undefined> {
   const own = staleTurnDecision(previous, eventTurnId);
   if (own) return own;
-  if (actor.agent_id !== "main" && rootEventTurnId !== undefined) {
-    const root = await store.readSnapshot({
-      provider: "codex",
-      session_id: actor.session_id,
-      agent_id: "main",
-    });
-    if (turnIdsDiffer(root?.turn_id, rootEventTurnId)) {
-      return { ignore: "stale turn event ignored" };
-    }
+  if (previous !== undefined) {
+    return { ignore: "stale turn event ignored" };
+  }
+  return staleFirstSeenChildIgnore(store, actor, previous);
+}
+
+/** A first-seen child can exist only while its root session is visibly live. */
+async function staleFirstSeenChildIgnore(
+  store: ActiveLeaseStore,
+  actor: CodexActiveActor,
+  previous: ActiveLeaseV1 | undefined,
+): Promise<{ readonly ignore: string } | undefined> {
+  if (actor.agent_id === "main" || previous !== undefined) return undefined;
+  const root = await store.readActive({
+    provider: "codex",
+    session_id: actor.session_id,
+    agent_id: "main",
+  });
+  if (root === undefined) {
+    return { ignore: "stale turn event ignored" };
   }
   return undefined;
 }

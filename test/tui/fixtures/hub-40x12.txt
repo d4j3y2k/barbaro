@@ -1,0 +1,12 @@
+Barbaro                                 
+Scope Open workstreams                  
+Store ok                                
+Working 1                               
+Waiting 0                               
+Blocked 0                               
+Shown 1 of 1 open                       
+1 open · 0 completed                    
+Root /tmp/comfort-project               
+                                        
+                                        
+/ completed · r refresh · q quit        

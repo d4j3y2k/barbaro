@@ -1,0 +1,28 @@
+Barbaro                                              Home · Open
+News 1/1 · tui-reboot/Codex · 13 unread · working               
+                                                                
+┌─ Open workstreams · / completed ─────────────────────────────┐
+│                                                              │
+│> tui-reboot                        Working now               │
+│  coordination                      Last shown · 1d22h        │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+│                                                              │
+└───────────────────────────────── 1 of 2 open · 10 completed ─┘
+                                                                
+tui-reboot · open · 3 sessions                                  
+TUI ground-up redesign: the motion study                        
+Working now · latest shown exposure 2 minutes ago               
+ID · ws_44c26310af3c86a04eadf62453776f80                        
+/barbaro join tui-reboot                                        
+Project · barbaro · root /Users/davidkim/Developer/barbaro      
+                                                                
+j/k · Enter · / completed · x complete · n new · ? help · q quit

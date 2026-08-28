@@ -2305,6 +2305,272 @@ test("concurrent subagents use distinct actors and stop independently", async (t
   );
 });
 
+test("SubagentStop settles a child-native turn while the root remains on its parent turn", async (t) => {
+  const project = await temporaryProject(t);
+  const nativeSessionId = "session-child-native-stop";
+  const parentTurnId = "parent-turn";
+  const childTurnId = "child-turn";
+  const childAgentId = "agent-child-native";
+  await joinCodexSession(project, nativeSessionId);
+  await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: parentTurnId,
+    cwd: project,
+    prompt: "Coordinate one child",
+  });
+
+  // Current Codex runtimes report the child's own turn id at both lifecycle
+  // boundaries, rather than repeating the root's parent turn id.
+  await handleCodexHook({
+    hook_event_name: "SubagentStart",
+    session_id: nativeSessionId,
+    turn_id: childTurnId,
+    cwd: project,
+    agent_id: childAgentId,
+    agent_type: "reviewer",
+  });
+
+  const store = new ActiveLeaseStore(join(project, ".barbaro", "active"));
+  const sessionId = createSessionId("codex", nativeSessionId);
+  const childActor = {
+    provider: "codex",
+    session_id: sessionId,
+    agent_id: childAgentId,
+  } as const;
+  assert.equal((await store.readSnapshot(childActor))?.state, "working");
+
+  const childPrompt = await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: childTurnId,
+    cwd: project,
+    agent_id: childAgentId,
+    prompt: "Review the child lifecycle",
+  });
+  assert.equal(childPrompt.active_revision, 2);
+  assert.equal(
+    (await store.readSnapshot(childActor))?.intent?.text,
+    "Review the child lifecycle",
+  );
+
+  const patchInput = {
+    command: "*** Begin Patch\n*** Update File: src/child.ts\n*** End Patch",
+  };
+  await handleCodexHook({
+    hook_event_name: "PreToolUse",
+    session_id: nativeSessionId,
+    turn_id: childTurnId,
+    cwd: project,
+    agent_id: childAgentId,
+    tool_name: "apply_patch",
+    tool_input: patchInput,
+  });
+  await handleCodexHook({
+    hook_event_name: "PermissionRequest",
+    session_id: nativeSessionId,
+    turn_id: childTurnId,
+    cwd: project,
+    agent_id: childAgentId,
+    tool_name: "apply_patch",
+    tool_input: patchInput,
+  });
+  const claimedChild = await store.readSnapshot(childActor);
+  assert.equal(claimedChild?.state, "waiting");
+  assert.deepEqual(claimedChild?.claims, [
+    { path: "src/child.ts", mode: "write", confidence: "exact" },
+  ]);
+
+  const delayedClaimedPrompt = await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: childTurnId,
+    cwd: project,
+    agent_id: childAgentId,
+    prompt: "Delayed prompt after tool activity",
+  });
+  assert.equal(delayedClaimedPrompt.ignored, "stale turn event ignored");
+  assert.deepEqual(await store.readSnapshot(childActor), claimedChild);
+
+  const duplicateStart = await handleCodexHook({
+    hook_event_name: "SubagentStart",
+    session_id: nativeSessionId,
+    turn_id: childTurnId,
+    cwd: project,
+    agent_id: childAgentId,
+    agent_type: "reviewer",
+  });
+  assert.equal(duplicateStart.ignored, "stale turn event ignored");
+  assert.deepEqual(await store.readSnapshot(childActor), claimedChild);
+
+  const stopped = await handleCodexHook({
+    hook_event_name: "SubagentStop",
+    session_id: nativeSessionId,
+    turn_id: childTurnId,
+    cwd: project,
+    agent_id: childAgentId,
+    stop_hook_active: false,
+    last_assistant_message: "Child review complete",
+  });
+  assert.equal(stopped.active_revision, 5);
+  const stoppedChild = await store.readSnapshot(childActor);
+  assert.equal(stoppedChild?.state, "idle");
+
+  const delayedPrompt = await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: childTurnId,
+    cwd: project,
+    agent_id: childAgentId,
+    prompt: "Delayed duplicate child prompt",
+  });
+  assert.equal(delayedPrompt.ignored, "stale turn event ignored");
+  assert.deepEqual(await store.readSnapshot(childActor), stoppedChild);
+
+  const followupTurnId = "child-followup-turn";
+  const childTrace = join(project, "rollout-child-followup.jsonl");
+  await writeFile(
+    childTrace,
+    [
+      rollout("session_meta", {
+        session_id: nativeSessionId,
+        id: childAgentId,
+        cwd: project,
+        cli_version: "0.150.0-alpha.8",
+        thread_source: "subagent",
+        agent_path: "/root/reviewer",
+      }),
+      rollout("event_msg", {
+        type: "task_started",
+        turn_id: followupTurnId,
+      }),
+    ]
+      .map((record) => `${JSON.stringify(record)}\n`)
+      .join(""),
+    "utf8",
+  );
+
+  const followupTool = await handleCodexHook({
+    hook_event_name: "PreToolUse",
+    session_id: nativeSessionId,
+    turn_id: followupTurnId,
+    cwd: project,
+    transcript_path: childTrace,
+    agent_id: childAgentId,
+    tool_name: "Bash",
+    tool_input: { command: "pwd" },
+  });
+  assert.equal(followupTool.active_revision, 6);
+  const workingFollowup = await store.readSnapshot(childActor);
+  assert.equal(workingFollowup?.state, "working");
+  assert.equal(
+    workingFollowup?.turn_id,
+    createTurnId("codex", nativeSessionId, childAgentId, followupTurnId),
+  );
+
+  const delayedPriorTool = await handleCodexHook({
+    hook_event_name: "PostToolUse",
+    session_id: nativeSessionId,
+    turn_id: childTurnId,
+    cwd: project,
+    transcript_path: childTrace,
+    agent_id: childAgentId,
+    tool_name: "Bash",
+  });
+  assert.equal(delayedPriorTool.ignored, "stale turn event ignored");
+  assert.deepEqual(await store.readSnapshot(childActor), workingFollowup);
+
+  const stoppedFollowup = await handleCodexHook({
+    hook_event_name: "SubagentStop",
+    session_id: nativeSessionId,
+    turn_id: followupTurnId,
+    cwd: project,
+    agent_id: childAgentId,
+    agent_transcript_path: childTrace,
+  });
+  assert.equal(stoppedFollowup.active_revision, 7);
+  const idleFollowup = await store.readSnapshot(childActor);
+  assert.equal(idleFollowup?.state, "idle");
+
+  const textOnlyFollowupTurnId = "child-text-only-followup";
+  await appendFile(
+    childTrace,
+    `${JSON.stringify(
+      rollout("event_msg", {
+        type: "task_started",
+        turn_id: textOnlyFollowupTurnId,
+      }),
+    )}\n`,
+    "utf8",
+  );
+  const stoppedTextOnlyFollowup = await handleCodexHook({
+    hook_event_name: "SubagentStop",
+    session_id: nativeSessionId,
+    turn_id: textOnlyFollowupTurnId,
+    cwd: project,
+    agent_id: childAgentId,
+    agent_transcript_path: childTrace,
+  });
+  assert.equal(stoppedTextOnlyFollowup.active_revision, 8);
+  const idleTextOnlyFollowup = await store.readSnapshot(childActor);
+  assert.equal(idleTextOnlyFollowup?.state, "idle");
+  assert.equal(
+    idleTextOnlyFollowup?.turn_id,
+    createTurnId(
+      "codex",
+      nativeSessionId,
+      childAgentId,
+      textOnlyFollowupTurnId,
+    ),
+  );
+  assert.equal(
+    (await store.readSnapshot({
+      provider: "codex",
+      session_id: sessionId,
+      agent_id: "main",
+    }))?.state,
+    "working",
+  );
+
+  const missingStop = await handleCodexHook({
+    hook_event_name: "SubagentStop",
+    session_id: nativeSessionId,
+    turn_id: "different-child-turn",
+    cwd: project,
+    agent_id: "agent-never-started",
+  });
+  assert.equal(missingStop.active_revision, 1);
+  const missingActor = {
+    provider: "codex",
+    session_id: sessionId,
+    agent_id: "agent-never-started",
+  } as const;
+  const earlyTombstone = await store.readSnapshot(missingActor);
+  assert.equal(earlyTombstone?.state, "idle");
+
+  const delayedStart = await handleCodexHook({
+    hook_event_name: "SubagentStart",
+    session_id: nativeSessionId,
+    turn_id: "different-child-turn",
+    cwd: project,
+    agent_id: "agent-never-started",
+    agent_type: "reviewer",
+  });
+  assert.equal(delayedStart.ignored, "stale turn event ignored");
+  assert.deepEqual(await store.readSnapshot(missingActor), earlyTombstone);
+
+  const delayedMissingPrompt = await handleCodexHook({
+    hook_event_name: "UserPromptSubmit",
+    session_id: nativeSessionId,
+    turn_id: "different-child-turn",
+    cwd: project,
+    agent_id: "agent-never-started",
+    prompt: "Prompt delivered after the stop tombstone",
+  });
+  assert.equal(delayedMissingPrompt.ignored, "stale turn event ignored");
+  assert.deepEqual(await store.readSnapshot(missingActor), earlyTombstone);
+});
+
 test("SubagentStop clears activity before ingesting its transcript as evidence", async (t) => {
   const project = await temporaryProject(t);
   await joinCodexSession(project, "session-subagent-stop");
@@ -2480,6 +2746,43 @@ test("session, permission, and compaction hooks follow the frozen lifecycle", as
   assert.equal(ended?.intent, undefined);
 });
 
+test("same-turn compaction hooks cannot resurrect a Stop tombstone", async (t) => {
+  const project = await temporaryProject(t);
+  const nativeSessionId = "session-delayed-compaction";
+  const common = {
+    session_id: nativeSessionId,
+    turn_id: "turn-delayed-compaction",
+    cwd: project,
+  };
+  await joinCodexSession(project, nativeSessionId);
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "UserPromptSubmit",
+    prompt: "Finish before delayed compaction arrives",
+  });
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "Stop",
+    stop_hook_active: false,
+    last_assistant_message: "Finished",
+  });
+  const terminal = await activeSnapshot(project, nativeSessionId);
+  assert.equal(terminal?.state, "idle");
+
+  for (const hook_event_name of ["PreCompact", "PostCompact"] as const) {
+    const delayed = await handleCodexHook({
+      ...common,
+      hook_event_name,
+      trigger: "auto",
+    });
+    assert.equal(delayed.ignored, "stale turn event ignored");
+    assert.deepEqual(
+      await activeSnapshot(project, nativeSessionId),
+      terminal,
+    );
+  }
+});
+
 test("PermissionRequest reconstructs ordinary and await actions without PreToolUse", async (t) => {
   const project = await temporaryProject(t);
   const nativeSessionId = "session-permission-reconstruct";
@@ -2582,7 +2885,7 @@ test("delayed turn events cannot overwrite the authoritative newer prompt", asyn
   }
 });
 
-test("delayed subagent events are bounded by the root's authoritative turn", async (t) => {
+test("subagent lifecycle is child-turn fenced and root-presence bounded", async (t) => {
   const project = await temporaryProject(t);
   const nativeSessionId = "session-delayed-subagent";
   await joinCodexSession(project, nativeSessionId);
@@ -2597,14 +2900,13 @@ test("delayed subagent events are bounded by the root's authoritative turn", asy
     prompt: "current work",
   });
 
-  const delayedStart = await handleCodexHook({
+  await handleCodexHook({
     ...common,
     hook_event_name: "SubagentStart",
-    turn_id: "turn-prior",
+    turn_id: "child-turn-current",
     agent_id: "agent-late",
     agent_type: "explore",
   });
-  assert.equal(delayedStart.ignored, "stale turn event ignored");
 
   const store = new ActiveLeaseStore(join(project, ".barbaro", "active"));
   const actor = {
@@ -2612,27 +2914,111 @@ test("delayed subagent events are bounded by the root's authoritative turn", asy
     session_id: createSessionId("codex", nativeSessionId),
     agent_id: "agent-late",
   } as const;
-  assert.equal(await store.readSnapshot(actor), undefined);
+  const currentChild = await store.readSnapshot(actor);
+  assert.equal(currentChild?.state, "working");
 
-  await handleCodexHook({
+  const delayedStart = await handleCodexHook({
     ...common,
     hook_event_name: "SubagentStart",
-    turn_id: "turn-current",
+    turn_id: "child-turn-prior",
     agent_id: "agent-late",
     agent_type: "explore",
   });
-  const currentChild = await store.readSnapshot(actor);
-  assert.equal(currentChild?.state, "working");
+  assert.equal(delayedStart.ignored, "stale turn event ignored");
+  assert.deepEqual(await store.readSnapshot(actor), currentChild);
 
   const delayedStop = await handleCodexHook({
     ...common,
     hook_event_name: "SubagentStop",
-    turn_id: "turn-prior",
+    turn_id: "child-turn-prior",
     agent_id: "agent-late",
     agent_type: "explore",
   });
   assert.equal(delayedStop.ignored, "stale turn event ignored");
   assert.deepEqual(await store.readSnapshot(actor), currentChild);
+
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "SubagentStop",
+    turn_id: "child-turn-current",
+    agent_id: "agent-late",
+    agent_type: "explore",
+  });
+  const idleChild = await store.readSnapshot(actor);
+  assert.equal(idleChild?.state, "idle");
+
+  const duplicateStart = await handleCodexHook({
+    ...common,
+    hook_event_name: "SubagentStart",
+    turn_id: "child-turn-current",
+    agent_id: "agent-late",
+    agent_type: "explore",
+  });
+  assert.equal(duplicateStart.ignored, "stale turn event ignored");
+  assert.deepEqual(await store.readSnapshot(actor), idleChild);
+
+  const finishingActor = {
+    provider: "codex",
+    session_id: createSessionId("codex", nativeSessionId),
+    agent_id: "agent-finishing-after-root",
+  } as const;
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "SubagentStart",
+    turn_id: "child-finishing-after-root",
+    agent_id: finishingActor.agent_id,
+    agent_type: "explore",
+  });
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "Stop",
+    turn_id: "turn-current",
+  });
+  assert.equal((await store.readSnapshot(finishingActor))?.state, "working");
+  await handleCodexHook({
+    ...common,
+    hook_event_name: "SubagentStop",
+    turn_id: "child-finishing-after-root",
+    agent_id: finishingActor.agent_id,
+    agent_type: "explore",
+  });
+  assert.equal((await store.readSnapshot(finishingActor))?.state, "idle");
+
+  const lateBoundaries = [
+    { hook_event_name: "SubagentStart", agent_type: "explore" },
+    { hook_event_name: "UserPromptSubmit", prompt: "late child prompt" },
+    {
+      hook_event_name: "PreToolUse",
+      tool_name: "Bash",
+      tool_input: { command: "pwd" },
+    },
+    {
+      hook_event_name: "PermissionRequest",
+      tool_name: "Bash",
+      tool_input: { command: "pwd" },
+    },
+    { hook_event_name: "PostToolUse", tool_name: "Bash" },
+    { hook_event_name: "PreCompact", trigger: "auto" },
+    { hook_event_name: "PostCompact", trigger: "auto" },
+  ] as const;
+  for (const [index, boundary] of lateBoundaries.entries()) {
+    const agentId = `agent-after-root-stop-${index}`;
+    const rejected = await handleCodexHook({
+      ...common,
+      ...boundary,
+      turn_id: `child-after-root-stop-${index}`,
+      agent_id: agentId,
+    });
+    assert.equal(rejected.ignored, "stale turn event ignored");
+    assert.equal(
+      await store.readSnapshot({
+        provider: "codex",
+        session_id: createSessionId("codex", nativeSessionId),
+        agent_id: agentId,
+      }),
+      undefined,
+    );
+  }
 });
 
 test("Stop publishes an idle tombstone and ingests the transcript", async (t) => {

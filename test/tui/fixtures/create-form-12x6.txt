@@ -1,0 +1,6 @@
+Barbaro     
+Scope Open w
+Store ok    
+Working 1   
+Waiting 0   
+Esc cancel  
