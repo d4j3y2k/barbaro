@@ -702,6 +702,15 @@ async function runTurnReaderCommand(
       io.stdout(`${stableStringify(projection)}\n`);
       return 0;
     } catch (error: unknown) {
+      if (
+        error instanceof ReaderTurnNotFoundError &&
+        workstreamId !== undefined
+      ) {
+        io.stderr(
+          `${error.message} in the selected workstream; retry with --all-workstreams (and omit --workstream if supplied) to search project-wide\n`,
+        );
+        return 1;
+      }
       const handled = handleReaderFailure(error, io, {
         cursorSupplied: flags.has("cursor"),
       });
@@ -1435,6 +1444,18 @@ function helpText(): string {
     `  Session opt-in: \`/barbaro new|join <name>\` in Claude Code,\n` +
     `                  \`$barbaro new|join <name>\` in Codex; a bare\n` +
     `                  invocation lists workstreams and joins nothing\n\n` +
+    `  Peer retrieval: context, watch, and nudges are bounded attention views.\n` +
+    `                  Its per-session window can omit older turns even when\n` +
+    `                  shown == total; use turn list whenever completeness or\n` +
+    `                  absence matters. When shown < total,\n` +
+    `                  truncated.projection is present, or a nudge count\n` +
+    `                  exceeds the turns shown, always page turn list,\n` +
+    `                  then use turn show <turn_id> --field response. Follow\n` +
+    `                  next_cursor through complete; use evidence show for an\n` +
+    `                  evidence_ref. Supported readers make every canonical\n` +
+    `                  turn byte and referenced canonical evidence reachable;\n` +
+    `                  provider-raw omissions are outside that guarantee. Never\n` +
+    `                  read .barbaro/*.jsonl directly.\n\n` +
     `  barbaro codex status --session-id <id> [--project-root <path>]\n` +
     `  barbaro codex ingest --trace <rollout.jsonl> [--project-root <path>] [--reset]\n` +
     `  barbaro codex hook          # synchronous active-state hook via stdin\n` +

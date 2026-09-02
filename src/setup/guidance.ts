@@ -60,11 +60,13 @@ export function peerContextPreflight(): GuidanceStep[] {
       id: "peer.read-supported-context",
       text:
         `Run \`barbaro context --byte-budget ${PEER_CONTEXT_RENDER_BUDGET_BYTES} --turns-per-session ${PEER_CONTEXT_FEED_RECORDS_PER_SESSION}\`; ` +
-        "it filters expired leases and renders only supported compact projections.",
+        "it is a bounded attention view that filters expired leases and renders only supported compact projections, not the complete peer archive.",
     },
     {
       id: "peer.bound-feed-reads",
-      text: `Read the projected newest ${PEER_CONTEXT_FEED_RECORDS_PER_SESSION} feed records per provider session and honor every shown/total count.`,
+      text:
+        `Read the projected newest ${PEER_CONTEXT_FEED_RECORDS_PER_SESSION} feed records per provider session and honor every shown/total count. The per-session window can omit older turns even when shown equals total, so page \`barbaro turn list\` whenever completeness or absence matters. ` +
+        "Always use that exhaustive index when shown is below total, a turn has truncated.projection, or a nudge count exceeds what context showed, then retrieve each needed answer with `barbaro turn show <turn_id> --field response`.",
     },
     {
       id: "peer.budget-render",
@@ -72,11 +74,18 @@ export function peerContextPreflight(): GuidanceStep[] {
     },
     {
       id: "peer.never-print-canonical",
-      text: "Never print a whole canonical JSONL record; canonical feed and evidence stay complete on disk and are projected, never copied wholesale.",
+      text:
+        "Never read or print `.barbaro/*.jsonl` directly. Retrieve exact canonical bytes only through the supported bounded readers: `barbaro turn show <turn_id> --field record` and `barbaro evidence show <evidence_id> --provider <provider> --session-id <ses_id> --field record`, following each next_cursor until complete.",
     },
     {
       id: "peer.evidence-on-demand",
-      text: "Open evidence only through an evidence_ref you actually need; one child turn can exceed the entire budget.",
+      text:
+        "Open only an evidence_ref you actually need with `barbaro evidence show`; one child turn can exceed the entire context budget, but its referenced canonical evidence remains page-addressable.",
+    },
+    {
+      id: "peer.lossless-canonical-scope",
+      text:
+        "Losslessness covers every canonical turn byte and referenced canonical evidence byte Barbaro stored; provider-native fields or records omitted during adapter mapping are outside that guarantee.",
     },
     {
       id: "peer.state-observations",

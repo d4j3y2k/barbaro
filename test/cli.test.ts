@@ -46,6 +46,18 @@ test("the built CLI runs when process.argv[1] is an npm-style symlink", async (t
   assert.match(stdout, /one item plus its pinned feed-count cursor/u);
   assert.match(stdout, /barbaro turn show <turn_id>/);
   assert.match(stdout, /barbaro evidence show <evidence_id>/);
+  assert.match(stdout, /bounded attention views/u);
+  assert.match(stdout, /older turns even when/u);
+  assert.match(stdout, /completeness or\s+absence matters/u);
+  assert.match(stdout, /shown < total/u);
+  assert.match(stdout, /truncated\.projection/u);
+  assert.match(stdout, /turn show <turn_id> --field response/u);
+  assert.match(
+    stdout,
+    /every canonical\s+turn byte and referenced canonical evidence reachable/u,
+  );
+  assert.match(stdout, /provider-raw omissions are outside that guarantee/u);
+  assert.match(stdout, /Never\s+read \.barbaro\/\*\.jsonl directly/u);
   assert.equal(stderr, "");
 });
 
@@ -735,6 +747,26 @@ test("turn list and show expose exhaustive scoped lossless CLI paging", async (t
     1,
   );
   assert.match(errors.pop()!, /turn record not found/u);
+
+  assert.equal(
+    await main(
+      [
+        "turn",
+        "show",
+        `turn_${"f".repeat(32)}`,
+        "--workstream",
+        "reader-lane",
+        "--project-root",
+        project,
+      ],
+      io,
+    ),
+    1,
+  );
+  assert.match(
+    errors.pop()!,
+    /selected workstream; retry with --all-workstreams/u,
+  );
   await assert.rejects(
     main(
       [

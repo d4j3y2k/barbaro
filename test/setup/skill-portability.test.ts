@@ -5,15 +5,33 @@ import { test } from "node:test";
 const SHIPPED_SKILLS = [
   {
     path: ".agents/skills/barbaro/SKILL.md",
-    commands: ["barbaro codex status", "barbaro await"],
+    commands: [
+      "barbaro codex status",
+      "barbaro await",
+      "barbaro turn list",
+      "barbaro turn show",
+      "barbaro evidence show",
+    ],
   },
   {
     path: ".claude/skills/barbaro/SKILL.md",
-    commands: ["barbaro claude status", "barbaro await"],
+    commands: [
+      "barbaro claude status",
+      "barbaro await",
+      "barbaro turn list",
+      "barbaro turn show",
+      "barbaro evidence show",
+    ],
   },
   {
     path: ".claude/skills/barbaro-watch/SKILL.md",
-    commands: ["barbaro watch", "barbaro context"],
+    commands: [
+      "barbaro watch",
+      "barbaro context",
+      "barbaro turn list",
+      "barbaro turn show",
+      "barbaro evidence show",
+    ],
   },
 ] as const;
 

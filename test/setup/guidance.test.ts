@@ -93,7 +93,18 @@ test("the bounded context preflight states every limit it enforces", () => {
     new RegExp(`newest ${PEER_CONTEXT_FEED_RECORDS_PER_SESSION} feed records`),
   );
   assert.match(text, /evidence_ref/);
-  assert.match(text, /Never print a whole canonical JSONL record/);
+  assert.match(text, /bounded attention view/);
+  assert.match(text, /older turns even when shown equals total/);
+  assert.match(text, /whenever completeness or absence matters/);
+  assert.match(text, /shown is below total/);
+  assert.match(text, /truncated\.projection/);
+  assert.match(text, /barbaro turn list/);
+  assert.match(text, /barbaro turn show <turn_id> --field response/);
+  assert.match(text, /barbaro turn show <turn_id> --field record/);
+  assert.match(text, /barbaro evidence show/);
+  assert.match(text, /Never read or print `\.barbaro\/\*\.jsonl` directly/);
+  assert.match(text, /every canonical turn byte/);
+  assert.match(text, /provider-native fields or records omitted during adapter mapping/);
   assert.match(text, /barbaro context/);
   assert.match(text, new RegExp(PEER_CONTEXT_AUTOMATION_MILESTONE));
 });

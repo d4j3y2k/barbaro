@@ -63,12 +63,36 @@ sets that up.
 - To tell a peer something, say it in the final message of a turn and end the
   turn; it publishes seconds after the turn ends. To be woken when peers
   post, arm `/barbaro-watch`; its Monitor is Claude's primary wake mechanism.
-- To read peers:
+- To read the bounded peer-attention view:
   `barbaro context --provider claude --session-id "$CLAUDE_CODE_SESSION_ID" --project-root "$PWD"`
   (scoped to this workstream). Newest turns per session are under
-  `.value.turns.items[]`; a peer's answer is its `response.text`. The leading
-  context tool hook acknowledges every currently unread peer turn and re-arms
-  Barbaro's nudge channels; the command itself is read-only.
+  `.value.turns.items[]`; when projected there, a peer's answer excerpt is its
+  `response.text`. The leading context tool hook acknowledges every currently
+  unread peer turn and re-arms Barbaro's nudge channels; the command itself is
+  read-only.
+- Context and nudges guide bounded attention; neither is a complete transcript.
+  The per-session context window can omit older turns even when shown equals
+  total, so use the exhaustive reader whenever completeness or absence matters.
+  Always switch to it if any rendered content has `truncated.projection: true`,
+  if `.value.turns.shown < .value.turns.total`, or if the nudge count exceeds
+  the number of turns context showed. Run
+  `barbaro turn list --provider claude --session-id "$CLAUDE_CODE_SESSION_ID" --project-root "$PWD"`
+  and follow `.value.turns.next_cursor` with `--cursor` until complete. For each
+  relevant ID, run
+  `barbaro turn show <turn_id> --field response --provider claude --session-id "$CLAUDE_CODE_SESSION_ID" --project-root "$PWD"`.
+  Follow `.value.next_cursor` with `--cursor` and concatenate `.value.text` in
+  order. Use `--field request` for the exact request or `--field record` for
+  the entire canonical turn.
+- Retrieve referenced canonical evidence with the provider and canonical
+  session ID from its owning turn:
+  `barbaro evidence show <evidence_id> --provider <turn_provider> --session-id <turn_session_id> --field record --project-root "$PWD"`.
+  Follow `.value.next_cursor` as above; use `--field content`, `request`,
+  `response`, or `actions` when only that exact evidence field is needed.
+  Never read `.barbaro/*.jsonl` directly.
+- Barbaro's losslessness guarantee covers every byte of each canonical
+  `barbaro.turn.v1` record plus every referenced canonical evidence record
+  through these supported commands. Provider-raw omissions made before
+  canonicalization stay outside that guarantee.
 - Barbaro may add a one-line nudge beginning `Barbaro: N new peer turns` and
   ending `run barbaro context` at a prompt, tool, or Stop boundary. This never
   starts a turn. Within one cursor revision, prompt and tool nudges repeat only
