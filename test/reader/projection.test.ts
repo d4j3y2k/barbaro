@@ -8,10 +8,12 @@ import type {
 } from "../../src/contracts/v1.js";
 import { stableStringify } from "../../src/core/stable-json.js";
 import {
+  projectContext,
   projectEvidence,
   projectReaderContent,
   projectTurn,
 } from "../../src/reader/projection.js";
+import { READER_CONTEXT_TURN_RETRIEVAL_HINT } from "../../src/reader/types.js";
 
 const SOURCE_REF = { trace_id: "fixture:reader" } as const;
 
@@ -118,6 +120,66 @@ test("turn projection is deterministic, byte-bounded, and reports N-of-M", () =>
     { kind: "api_key", count: 1 },
     { kind: "token", count: 2 },
   ]);
+});
+
+test("bounded context points to lossless turn retrieval only when turns are hidden", () => {
+  const diagnostics = {
+    feed_files: 1,
+    malformed_feed_records: 0,
+    invalid_feed_records: 0,
+    partial_feed_files: 0,
+    scan_limited_feed_files: 0,
+    invalid_active_records: 0,
+  } as const;
+  const hidden = projectContext(
+    [],
+    Array.from({ length: 12 }, (_, index) => ({
+      ...turn(),
+      turn_id: `turn_${(index + 1).toString(16).padStart(32, "0")}`,
+      sequence: index + 1,
+    })),
+    diagnostics,
+    { byteBudget: 2600 },
+  );
+
+  assert.ok(hidden.value.turns.shown < hidden.value.turns.total);
+  assert.equal(
+    hidden.value.turn_retrieval_hint,
+    READER_CONTEXT_TURN_RETRIEVAL_HINT,
+  );
+  assert.equal(
+    hidden.value.turn_retrieval_hint,
+    "Run `barbaro turn list`, then `barbaro turn show <turn_id>`.",
+  );
+
+  const complete = projectContext([], [turn()], diagnostics, {
+    byteBudget: 12_000,
+  });
+  assert.equal(complete.value.turns.shown, complete.value.turns.total);
+  assert.equal("turn_retrieval_hint" in complete.value, false);
+
+  const boundaryTurn: BarbaroTurnV1 = {
+    ...turn(),
+    request: content(""),
+    response: content(""),
+    actions: [],
+    subagents: {
+      total: 0,
+      by_role: [],
+      outcomes: {},
+      changed_paths: [],
+      evidence_refs: [],
+    },
+    evidence_refs: [],
+  };
+  const exactComplete = projectContext([], [boundaryTurn], diagnostics, {
+    byteBudget: 12_000,
+  });
+  const boundary = projectContext([], [boundaryTurn], diagnostics, {
+    byteBudget: exactComplete.utf8_bytes,
+  });
+  assert.equal(boundary.value.turns.shown, boundary.value.turns.total);
+  assert.equal("turn_retrieval_hint" in boundary.value, false);
 });
 
 test("subagent evidence actions page without changing the canonical record", () => {

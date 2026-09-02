@@ -7,6 +7,8 @@ import type {
 
 export const READER_CONTEXT_SCHEMA = "barbaro.reader.context.v1" as const;
 export const READER_EVIDENCE_SCHEMA = "barbaro.reader.evidence.v1" as const;
+export const READER_CONTEXT_TURN_RETRIEVAL_HINT =
+  "Run `barbaro turn list`, then `barbaro turn show <turn_id>`." as const;
 
 /** Read quality for one reader-owned source or derived collection. */
 export type ReaderReadState = "ok" | "degraded" | "refused";
@@ -198,6 +200,8 @@ export interface ReaderContextV1 {
   readonly workstream_id?: string;
   readonly active: ReaderBoundedItems<ReaderActiveSummary>;
   readonly turns: ReaderBoundedItems<ReaderTurnSummary>;
+  /** Additive route to lossless retrieval when this bounded view omits turns. */
+  readonly turn_retrieval_hint?: typeof READER_CONTEXT_TURN_RETRIEVAL_HINT;
   readonly diagnostics: ReaderDiagnostics;
 }
 

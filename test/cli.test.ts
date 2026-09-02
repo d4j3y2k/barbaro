@@ -1,14 +1,27 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, symlink } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import { main } from "../src/cli.js";
+import type {
+  BarbaroAction,
+  BarbaroEvidenceV1,
+  BarbaroTurnV1,
+} from "../src/contracts/v1.js";
 import { createSessionId } from "../src/core/id.js";
+import { stableJsonLine, stableStringify } from "../src/core/stable-json.js";
 import { admitHookSession } from "../src/hooks/participation.js";
 
 const execFileAsync = promisify(execFile);
@@ -29,6 +42,10 @@ test("the built CLI runs when process.argv[1] is an npm-style symlink", async (t
   );
   assert.match(stdout, /^barbaro\n/);
   assert.match(stdout, /barbaro codex hook-ingest/);
+  assert.match(stdout, /barbaro turn list/);
+  assert.match(stdout, /one item plus its pinned feed-count cursor/u);
+  assert.match(stdout, /barbaro turn show <turn_id>/);
+  assert.match(stdout, /barbaro evidence show <evidence_id>/);
   assert.equal(stderr, "");
 });
 
@@ -459,4 +476,539 @@ test("workstream lifecycle verbs warn about presence and flag the listing", asyn
     1,
   );
   assert.match(errors.join(""), /no workstream named "missing"/u);
+});
+
+const CLI_SOURCE_REF = { trace_id: "fixture:cli-lossless-reader" } as const;
+
+function cliContent(text: string) {
+  return {
+    text,
+    fidelity: "verbatim" as const,
+    truncated: false,
+    original_utf8_bytes: Buffer.byteLength(text, "utf8"),
+    redactions: [],
+  };
+}
+
+function cliActions(count: number): BarbaroAction[] {
+  return Array.from({ length: count }, (_, index) => ({
+    action_id: `act_${(index + 1).toString(16).padStart(32, "0")}`,
+    kind: "command" as const,
+    outcome: "success" as const,
+    command: cliContent(`command ${index} ${"x".repeat(90)}`),
+    exit_code: 0,
+    source_refs: [CLI_SOURCE_REF],
+  }));
+}
+
+function cliTurn(
+  seed: number,
+  sessionId: string,
+  workstreamId: string,
+  response = `response ${seed}`,
+): BarbaroTurnV1 {
+  return {
+    schema: "barbaro.turn.v1",
+    turn_id: `turn_${seed.toString(16).padStart(32, "0")}`,
+    provider: "codex",
+    session_id: sessionId,
+    workstream_id: workstreamId,
+    sequence: seed,
+    agent_id: "main",
+    started_at: new Date(Date.parse("2026-09-01T12:00:00.000Z") + seed * 60_000)
+      .toISOString(),
+    ended_at: new Date(Date.parse("2026-09-01T12:00:30.000Z") + seed * 60_000)
+      .toISOString(),
+    outcome: "success",
+    request: cliContent(`request ${seed}`),
+    response: cliContent(response),
+    actions: [],
+    subagents: {
+      total: 0,
+      by_role: [],
+      outcomes: {},
+      changed_paths: [],
+      evidence_refs: [],
+    },
+    evidence_refs: [],
+    source_refs: [CLI_SOURCE_REF],
+  };
+}
+
+async function appendCliRecord(
+  project: string,
+  area: "feed" | "evidence",
+  provider: string,
+  sessionId: string,
+  record: BarbaroTurnV1 | BarbaroEvidenceV1,
+): Promise<void> {
+  const path = join(project, ".barbaro", area, provider, `${sessionId}.jsonl`);
+  await mkdir(dirname(path), { recursive: true });
+  await appendFile(path, stableJsonLine(record), "utf8");
+}
+
+test("turn list and show expose exhaustive scoped lossless CLI paging", async (t) => {
+  const project = await mkdtemp(join(tmpdir(), "barbaro-cli-turn-reader-"));
+  t.after(async () => {
+    await rm(project, { recursive: true, force: true });
+  });
+  const nativeSessionId = "cli-turn-reader";
+  const sessionId = createSessionId("codex", nativeSessionId);
+  await admitHookSession({
+    projectRoot: project,
+    provider: "codex",
+    nativeSessionId,
+    event: "UserPromptSubmit",
+    prompt: "$barbaro new reader-lane",
+  });
+
+  const output: string[] = [];
+  const errors: string[] = [];
+  const io = {
+    stdout: (text: string) => output.push(text),
+    stderr: (text: string) => errors.push(text),
+  };
+  assert.equal(
+    await main(["workstream", "show", "reader-lane", "--project-root", project], io),
+    0,
+  );
+  const workstreamId = (JSON.parse(output.pop()!) as { workstream_id: string })
+    .workstream_id;
+  const largeResponse = "😀é漢字".repeat(4_000);
+  const canonical = cliTurn(1, sessionId, workstreamId, largeResponse);
+  await appendCliRecord(project, "feed", "codex", sessionId, canonical);
+  for (let seed = 2; seed <= 12; seed += 1) {
+    await appendCliRecord(
+      project,
+      "feed",
+      "codex",
+      sessionId,
+      cliTurn(seed, sessionId, workstreamId),
+    );
+  }
+
+  let listCursor: string | undefined;
+  const listedIds: string[] = [];
+  do {
+    const args = [
+      "turn",
+      "list",
+      "--project-root",
+      project,
+      "--byte-budget",
+      "2500",
+      "--provider",
+      "codex",
+      "--session-id",
+      nativeSessionId,
+      ...(listCursor === undefined ? [] : ["--cursor", listCursor]),
+    ];
+    assert.equal(await main(args, io), 0);
+    const page = JSON.parse(output.pop()!) as {
+      byte_budget: number;
+      value: {
+        schema: string;
+        scope: { kind: string; workstream_id: string };
+        turns: {
+          total: number;
+          items: Array<{ turn_id: string }>;
+          next_cursor?: string;
+        };
+      };
+    };
+    assert.equal(page.byte_budget, 2500);
+    assert.equal(page.value.schema, "barbaro.reader.turn-list.v1");
+    assert.deepEqual(page.value.scope, {
+      kind: "workstream",
+      workstream_id: workstreamId,
+    });
+    assert.equal(page.value.turns.total, 12);
+    listedIds.push(...page.value.turns.items.map((item) => item.turn_id));
+    listCursor = page.value.turns.next_cursor;
+  } while (listCursor !== undefined);
+  assert.equal(new Set(listedIds).size, 12);
+  assert.deepEqual(listedIds, [...listedIds].sort().reverse());
+  await assert.rejects(
+    main(
+      [
+        "turn",
+        "list",
+        "--provider",
+        "codex",
+        "--session-id",
+        "typo-session",
+        "--project-root",
+        project,
+      ],
+      io,
+    ),
+    /no enrolled codex session/u,
+  );
+  assert.equal(
+    await main(
+      [
+        "turn",
+        "list",
+        "--provider",
+        "codex",
+        "--session-id",
+        "typo-session",
+        "--all-workstreams",
+        "--project-root",
+        project,
+      ],
+      io,
+    ),
+    0,
+  );
+  output.pop();
+
+  assert.equal(
+    await main(
+      [
+        "turn",
+        "show",
+        canonical.turn_id,
+        "--field",
+        "response",
+        "--provider",
+        "codex",
+        "--session-id",
+        nativeSessionId,
+        "--project-root",
+        project,
+      ],
+      io,
+    ),
+    0,
+  );
+  const defaultPage = JSON.parse(output.pop()!) as {
+    byte_budget: number;
+    value: { complete: boolean; text: string };
+  };
+  assert.equal(defaultPage.byte_budget, 131_072);
+  assert.equal(defaultPage.value.complete, true);
+  assert.equal(defaultPage.value.text, largeResponse);
+
+  let cursor: string | undefined;
+  let reconstructed = "";
+  do {
+    assert.equal(
+      await main(
+        [
+          "turn",
+          "show",
+          canonical.turn_id,
+          "--field",
+          "record",
+          "--byte-budget",
+          "1800",
+          "--workstream",
+          "reader-lane",
+          "--project-root",
+          project,
+          ...(cursor === undefined ? [] : ["--cursor", cursor]),
+        ],
+        io,
+      ),
+      0,
+    );
+    const page = JSON.parse(output.pop()!) as {
+      value: { text: string; next_cursor?: string };
+    };
+    reconstructed += page.value.text;
+    cursor = page.value.next_cursor;
+  } while (cursor !== undefined);
+  assert.equal(reconstructed, stableStringify(canonical));
+
+  assert.equal(
+    await main(
+      [
+        "turn",
+        "show",
+        `turn_${"f".repeat(32)}`,
+        "--project-root",
+        project,
+      ],
+      io,
+    ),
+    1,
+  );
+  assert.match(errors.pop()!, /turn record not found/u);
+  await assert.rejects(
+    main(
+      [
+        "turn",
+        "show",
+        canonical.turn_id,
+        "--cursor",
+        "malformed",
+        "--project-root",
+        project,
+      ],
+      io,
+    ),
+    /Invalid Barbaro record cursor/u,
+  );
+});
+
+test("evidence show retains projected action cursors and adds exact fields", async (t) => {
+  const project = await mkdtemp(join(tmpdir(), "barbaro-cli-evidence-reader-"));
+  t.after(async () => {
+    await rm(project, { recursive: true, force: true });
+  });
+  const nativeSessionId = "cli-evidence-reader";
+  const sessionId = createSessionId("claude", nativeSessionId);
+  await admitHookSession({
+    projectRoot: project,
+    provider: "claude",
+    nativeSessionId,
+    event: "UserPromptSubmit",
+    prompt: "/barbaro new evidence-lane",
+  });
+  const output: string[] = [];
+  const errors: string[] = [];
+  const io = {
+    stdout: (text: string) => output.push(text),
+    stderr: (text: string) => errors.push(text),
+  };
+  assert.equal(
+    await main(["workstream", "show", "evidence-lane", "--project-root", project], io),
+    0,
+  );
+  const workstreamId = (JSON.parse(output.pop()!) as { workstream_id: string })
+    .workstream_id;
+  const evidence: BarbaroEvidenceV1 = {
+    schema: "barbaro.evidence.v1",
+    evidence_id: `ev_${"a".repeat(32)}`,
+    kind: "subagent_turn",
+    turn_id: `turn_${"b".repeat(32)}`,
+    parent_turn_id: `turn_${"c".repeat(32)}`,
+    parent_link: { method: "native", native_key: "worker-1" },
+    provider: "claude",
+    session_id: sessionId,
+    workstream_id: workstreamId,
+    agent_id: "worker-1",
+    occurred_at: "2026-09-01T13:01:00.000Z",
+    source_refs: [CLI_SOURCE_REF],
+    content: {
+      role: "worker",
+      sequence: 1,
+      outcome: "success",
+      started_at: "2026-09-01T13:00:00.000Z",
+      ended_at: "2026-09-01T13:01:00.000Z",
+      request: cliContent("inspect everything"),
+      response: cliContent("complete 😀".repeat(300)),
+      actions: cliActions(20),
+    },
+  };
+  await appendCliRecord(project, "evidence", "claude", sessionId, evidence);
+
+  // The identity flags locate this historical file. Moving its producer must
+  // not silently scope the default read to the producer's current workstream.
+  assert.equal(
+    await main(
+      ["workstream", "new", "evidence-next", "--project-root", project],
+      io,
+    ),
+    0,
+  );
+  output.pop();
+  await admitHookSession({
+    projectRoot: project,
+    provider: "claude",
+    nativeSessionId,
+    event: "UserPromptSubmit",
+    prompt: "/barbaro join evidence-next",
+  });
+
+  const identityArgs = [
+    evidence.evidence_id,
+    "--provider",
+    "claude",
+    "--session-id",
+    sessionId,
+    "--project-root",
+    project,
+  ];
+  assert.equal(
+    await main(
+      ["evidence", "show", ...identityArgs, "--byte-budget", "1800"],
+      io,
+    ),
+    0,
+  );
+  const projected = JSON.parse(output.pop()!) as {
+    value: {
+      schema: string;
+      content: { actions: { shown: number; total: number; next_cursor?: string } };
+    };
+  };
+  assert.equal(projected.value.schema, "barbaro.reader.evidence.v1");
+  assert.ok(projected.value.content.actions.shown > 0);
+  assert.equal(projected.value.content.actions.total, 20);
+  assert.match(projected.value.content.actions.next_cursor ?? "", /^a:[1-9][0-9]*$/u);
+  assert.equal(
+    await main(
+      [
+        "evidence",
+        "show",
+        ...identityArgs,
+        "--byte-budget",
+        "1800",
+        "--action-cursor",
+        projected.value.content.actions.next_cursor!,
+      ],
+      io,
+    ),
+    0,
+  );
+  assert.equal(
+    await main(
+      [
+        "evidence",
+        "show",
+        ...identityArgs,
+        "--workstream",
+        "evidence-next",
+      ],
+      io,
+    ),
+    1,
+  );
+  assert.match(errors.pop()!, /evidence record not found/u);
+
+  let cursor: string | undefined;
+  let reconstructed = "";
+  do {
+    assert.equal(
+      await main(
+        [
+          "evidence",
+          "show",
+          ...identityArgs,
+          "--field",
+          "content",
+          "--workstream",
+          "evidence-lane",
+          "--byte-budget",
+          "1800",
+          ...(cursor === undefined ? [] : ["--cursor", cursor]),
+        ],
+        io,
+      ),
+      0,
+    );
+    const page = JSON.parse(output.pop()!) as {
+      value: { schema: string; text: string; next_cursor?: string };
+    };
+    assert.equal(page.value.schema, "barbaro.reader.evidence-record.v1");
+    reconstructed += page.value.text;
+    cursor = page.value.next_cursor;
+  } while (cursor !== undefined);
+  assert.equal(reconstructed, stableStringify(evidence.content));
+
+  const responseEvidence: BarbaroEvidenceV1 = {
+    schema: "barbaro.evidence.v1",
+    evidence_id: `ev_${"d".repeat(32)}`,
+    kind: "response",
+    turn_id: `turn_${"e".repeat(32)}`,
+    provider: "claude",
+    session_id: sessionId,
+    workstream_id: workstreamId,
+    agent_id: "main",
+    occurred_at: "2026-09-01T13:02:00.000Z",
+    source_refs: [CLI_SOURCE_REF],
+    content: { text: cliContent("intermediate response 😀") },
+  };
+  await appendCliRecord(
+    project,
+    "evidence",
+    "claude",
+    sessionId,
+    responseEvidence,
+  );
+  assert.equal(
+    await main(
+      [
+        "evidence",
+        "show",
+        responseEvidence.evidence_id,
+        "--provider",
+        "claude",
+        "--session-id",
+        sessionId,
+        "--project-root",
+        project,
+      ],
+      io,
+    ),
+    0,
+  );
+  assert.equal(
+    (JSON.parse(output.pop()!) as { value: { kind: string } }).value.kind,
+    "response",
+  );
+  assert.equal(
+    await main(
+      [
+        "evidence",
+        "show",
+        responseEvidence.evidence_id,
+        "--provider",
+        "claude",
+        "--session-id",
+        sessionId,
+        "--field",
+        "response",
+        "--workstream",
+        "evidence-lane",
+        "--project-root",
+        project,
+      ],
+      io,
+    ),
+    0,
+  );
+  assert.equal(
+    (JSON.parse(output.pop()!) as { value: { text: string } }).value.text,
+    "intermediate response 😀",
+  );
+
+  await assert.rejects(
+    main(
+      [
+        "evidence",
+        "show",
+        ...identityArgs,
+        "--field",
+        "record",
+        "--action-cursor",
+        "a:1",
+      ],
+      io,
+    ),
+    /--action-cursor cannot be used with --field/u,
+  );
+  await assert.rejects(
+    main(
+      ["evidence", "show", ...identityArgs, "--cursor", "malformed"],
+      io,
+    ),
+    /--cursor requires --field/u,
+  );
+  await assert.rejects(
+    main(
+      [
+        "evidence",
+        "show",
+        ...identityArgs,
+        "--action-cursor",
+        "wrong",
+      ],
+      io,
+    ),
+    /actionCursor must have the form/u,
+  );
+  assert.deepEqual(errors, []);
 });

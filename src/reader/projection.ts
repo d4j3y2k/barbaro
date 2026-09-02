@@ -22,6 +22,7 @@ import {
 } from "./budget.js";
 import {
   READER_CONTEXT_SCHEMA,
+  READER_CONTEXT_TURN_RETRIEVAL_HINT,
   READER_EVIDENCE_SCHEMA,
   type ReaderActionSummary,
   type ReaderActiveSummary,
@@ -485,6 +486,9 @@ export function projectContext(
       total: turns.length,
       items: turnItems,
     },
+    ...(turnItems.length < turns.length
+      ? { turn_retrieval_hint: READER_CONTEXT_TURN_RETRIEVAL_HINT }
+      : {}),
     diagnostics,
   });
 

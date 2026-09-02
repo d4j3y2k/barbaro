@@ -6,7 +6,26 @@ import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { stableStringify } from "./core/stable-json.js";
-import { readProjectContext } from "./reader/index.js";
+import {
+  readEvidenceRecordPage,
+  readProjectContext,
+  readProjectEvidence,
+  readProjectTurnList,
+  readTurnRecordPage,
+  type ReaderEvidenceRecordField,
+  type ReaderTurnRecordField,
+} from "./reader/index.js";
+import { ReaderByteBudgetTooSmallError } from "./reader/budget.js";
+import {
+  ReaderEvidenceRecordNotFoundError,
+  ReaderRecordCursorError,
+  ReaderTurnNotFoundError,
+} from "./reader/record-page.js";
+import {
+  ReaderEvidenceNotFoundError,
+  ReaderRecordTooLargeError,
+} from "./reader/store.js";
+import { ReaderTurnListSnapshotError } from "./reader/turn-list.js";
 import { createSessionId } from "./core/id.js";
 import {
   AwaitScanFailureLimitError,
@@ -70,6 +89,10 @@ const PROVIDER_HELP_COMMANDS = new Set([
   "hook-ingest",
 ]);
 const WORKSTREAM_HELP_COMMANDS = new Set(["list", "show", "new"]);
+const TURN_HELP_COMMANDS = new Set(["list", "show"]);
+const EVIDENCE_HELP_COMMANDS = new Set(["show"]);
+const DEFAULT_TURN_READER_BYTE_BUDGET = 128 * 1024;
+const DEFAULT_EVIDENCE_BYTE_BUDGET = 16 * 1024;
 
 export async function main(
   argv: readonly string[],
@@ -184,6 +207,14 @@ export async function main(
     });
     io.stdout(`${stableStringify(projection)}\n`);
     return 0;
+  }
+
+  if (argv[0] === "turn") {
+    return runTurnReaderCommand(argv.slice(1), io);
+  }
+
+  if (argv[0] === "evidence") {
+    return runEvidenceReaderCommand(argv.slice(1), io);
   }
 
   if (argv[0] === "tui") {
@@ -545,6 +576,18 @@ function isRecognizedHelpTarget(argv: readonly string[]): boolean {
       (HELP_FLAGS.has(subcommand) || WORKSTREAM_HELP_COMMANDS.has(subcommand))
     );
   }
+  if (command === "turn") {
+    return (
+      subcommand !== undefined &&
+      (HELP_FLAGS.has(subcommand) || TURN_HELP_COMMANDS.has(subcommand))
+    );
+  }
+  if (command === "evidence") {
+    return (
+      subcommand !== undefined &&
+      (HELP_FLAGS.has(subcommand) || EVIDENCE_HELP_COMMANDS.has(subcommand))
+    );
+  }
   if (command === "codex" || command === "claude") {
     return (
       subcommand !== undefined &&
@@ -552,6 +595,354 @@ function isRecognizedHelpTarget(argv: readonly string[]): boolean {
     );
   }
   return false;
+}
+
+type ReaderCommandIo = {
+  readonly stdout: (text: string) => void;
+  readonly stderr: (text: string) => void;
+};
+
+const TURN_RECORD_FIELDS: ReadonlySet<ReaderTurnRecordField> = new Set([
+  "record",
+  "request",
+  "response",
+  "actions",
+]);
+const EVIDENCE_RECORD_FIELDS: ReadonlySet<ReaderEvidenceRecordField> = new Set([
+  "record",
+  "content",
+  "request",
+  "response",
+  "actions",
+]);
+
+async function runTurnReaderCommand(
+  argv: readonly string[],
+  io: ReaderCommandIo,
+): Promise<number> {
+  if (argv[0] === "list") {
+    const flags = parseFlags(
+      argv.slice(1),
+      new Set([
+        "project-root",
+        "byte-budget",
+        "cursor",
+        "provider",
+        "session-id",
+        "workstream",
+        "all-workstreams",
+      ]),
+      new Set(["all-workstreams"]),
+    );
+    const projectRoot = flags.get("project-root") ?? process.cwd();
+    const byteBudget = positiveIntegerFlag(
+      flags,
+      "byte-budget",
+      DEFAULT_TURN_READER_BYTE_BUDGET,
+    );
+    const workstreamId = await resolveLosslessReaderScope(flags, projectRoot);
+    try {
+      const projection = await readProjectTurnList(projectRoot, {
+        byteBudget,
+        ...(workstreamId === undefined ? {} : { workstreamId }),
+        ...(flags.has("cursor") ? { cursor: flags.get("cursor")! } : {}),
+      });
+      io.stdout(`${stableStringify(projection)}\n`);
+      return 0;
+    } catch (error: unknown) {
+      const handled = handleReaderFailure(error, io, {
+        cursorSupplied: flags.has("cursor"),
+      });
+      if (handled !== undefined) return handled;
+      throw error;
+    }
+  }
+
+  if (argv[0] === "show") {
+    const { positional: turnId, rest } = takePositional(
+      argv.slice(1),
+      "turn show <turn_id>",
+    );
+    assertCliId(turnId, /^turn_[0-9a-f]{32}$/u, "turn_id");
+    const flags = parseFlags(
+      rest,
+      new Set([
+        "project-root",
+        "byte-budget",
+        "cursor",
+        "field",
+        "provider",
+        "session-id",
+        "workstream",
+        "all-workstreams",
+      ]),
+      new Set(["all-workstreams"]),
+    );
+    const field = enumFlag(
+      flags,
+      "field",
+      TURN_RECORD_FIELDS,
+      "record",
+    );
+    const projectRoot = flags.get("project-root") ?? process.cwd();
+    const byteBudget = positiveIntegerFlag(
+      flags,
+      "byte-budget",
+      DEFAULT_TURN_READER_BYTE_BUDGET,
+    );
+    const workstreamId = await resolveLosslessReaderScope(flags, projectRoot);
+    try {
+      const projection = await readTurnRecordPage(projectRoot, {
+        turnId,
+        field,
+        byteBudget,
+        ...(workstreamId === undefined ? {} : { workstreamId }),
+        ...(flags.has("cursor") ? { cursor: flags.get("cursor")! } : {}),
+      });
+      io.stdout(`${stableStringify(projection)}\n`);
+      return 0;
+    } catch (error: unknown) {
+      const handled = handleReaderFailure(error, io, {
+        cursorSupplied: flags.has("cursor"),
+      });
+      if (handled !== undefined) return handled;
+      throw error;
+    }
+  }
+
+  io.stderr(`Unknown turn command: ${argv.join(" ")}\n\n${helpText()}`);
+  return 2;
+}
+
+async function runEvidenceReaderCommand(
+  argv: readonly string[],
+  io: ReaderCommandIo,
+): Promise<number> {
+  if (argv[0] !== "show") {
+    io.stderr(`Unknown evidence command: ${argv.join(" ")}\n\n${helpText()}`);
+    return 2;
+  }
+  const { positional: evidenceId, rest } = takePositional(
+    argv.slice(1),
+    "evidence show <evidence_id>",
+  );
+  assertCliId(evidenceId, /^ev_[0-9a-f]{32}$/u, "evidence_id");
+  const flags = parseFlags(
+    rest,
+    new Set([
+      "project-root",
+      "byte-budget",
+      "provider",
+      "session-id",
+      "action-cursor",
+      "field",
+      "cursor",
+      "workstream",
+      "all-workstreams",
+    ]),
+    new Set(["all-workstreams"]),
+  );
+  const provider = requiredFlag(flags, "provider");
+  if (provider !== "claude" && provider !== "codex") {
+    throw new UsageError(`Unknown provider: ${provider}`);
+  }
+  const sessionId = requiredFlag(flags, "session-id");
+  assertCliId(sessionId, /^ses_[0-9a-f]{32}$/u, "session-id");
+  const field = optionalEnumFlag(flags, "field", EVIDENCE_RECORD_FIELDS);
+  if (field === undefined && flags.has("cursor")) {
+    throw new UsageError("--cursor requires --field for exact evidence paging");
+  }
+  if (field !== undefined && flags.has("action-cursor")) {
+    throw new UsageError("--action-cursor cannot be used with --field");
+  }
+  const projectRoot = flags.get("project-root") ?? process.cwd();
+  const byteBudget = positiveIntegerFlag(
+    flags,
+    "byte-budget",
+    field === undefined
+      ? DEFAULT_EVIDENCE_BYTE_BUDGET
+      : DEFAULT_TURN_READER_BYTE_BUDGET,
+  );
+  // These identity flags locate the evidence file; they are not a caller
+  // identity. Defaulting to the producer session's current workstream would
+  // hide historical evidence after that session moves.
+  const workstreamId = await resolveExplicitEvidenceScope(flags, projectRoot);
+
+  try {
+    const projection =
+      field === undefined
+        ? await readProjectEvidence(projectRoot, {
+            provider,
+            sessionId,
+            evidenceId,
+            byteBudget,
+            ...(flags.has("action-cursor")
+              ? { actionCursor: flags.get("action-cursor")! }
+              : {}),
+          })
+        : await readEvidenceRecordPage(projectRoot, {
+            provider,
+            sessionId,
+            evidenceId,
+            field,
+            byteBudget,
+            ...(workstreamId === undefined ? {} : { workstreamId }),
+            ...(flags.has("cursor") ? { cursor: flags.get("cursor")! } : {}),
+          });
+    if (
+      field === undefined &&
+      workstreamId !== undefined &&
+      projection.value.workstream_id !== workstreamId
+    ) {
+      io.stderr(`Barbaro evidence record not found: ${evidenceId}\n`);
+      return 1;
+    }
+    io.stdout(`${stableStringify(projection)}\n`);
+    return 0;
+  } catch (error: unknown) {
+    const handled = handleReaderFailure(error, io, {
+      cursorSupplied: flags.has("cursor"),
+      actionCursorSupplied: flags.has("action-cursor"),
+    });
+    if (handled !== undefined) return handled;
+    throw error;
+  }
+}
+
+async function resolveLosslessReaderScope(
+  flags: ReadonlyMap<string, string>,
+  projectRoot: string,
+): Promise<string | undefined> {
+  const provider = flags.get("provider");
+  const sessionId = flags.get("session-id");
+  if ((provider === undefined) !== (sessionId === undefined)) {
+    throw new UsageError("--provider and --session-id must be supplied together");
+  }
+  if (
+    provider !== undefined &&
+    provider !== "claude" &&
+    provider !== "codex"
+  ) {
+    throw new UsageError(`Unknown provider: ${provider}`);
+  }
+
+  const explicit = flags.get("workstream");
+  if (flags.has("all-workstreams")) {
+    if (explicit !== undefined) {
+      throw new UsageError(
+        "--all-workstreams is mutually exclusive with --workstream",
+      );
+    }
+    return undefined;
+  }
+  if (explicit !== undefined) {
+    const workstream = await new WorkstreamStore(projectRoot).resolve(explicit);
+    if (workstream === undefined) {
+      throw new UsageError(`no workstream named ${JSON.stringify(explicit)}`);
+    }
+    return workstream.workstream_id;
+  }
+  if (provider === undefined || sessionId === undefined) return undefined;
+
+  const store = new SessionParticipationStore(projectRoot);
+  const participation = /^ses_[0-9a-f]{32}$/u.test(sessionId)
+    ? await store.readStable(provider, sessionId)
+    : await store.read(provider, sessionId);
+  if (participation === undefined) {
+    throw new UsageError(
+      `no enrolled ${provider} session matches ${JSON.stringify(sessionId)}; omit the identity flags or use --all-workstreams for project-wide reading`,
+    );
+  }
+  if (participation.workstream_id === undefined) {
+    throw new UsageError(
+      `the ${provider} session has no workstream; omit the identity flags or use --all-workstreams for project-wide reading`,
+    );
+  }
+  return participation.workstream_id;
+}
+
+async function resolveExplicitEvidenceScope(
+  flags: ReadonlyMap<string, string>,
+  projectRoot: string,
+): Promise<string | undefined> {
+  const explicit = flags.get("workstream");
+  if (flags.has("all-workstreams")) {
+    if (explicit !== undefined) {
+      throw new UsageError(
+        "--all-workstreams is mutually exclusive with --workstream",
+      );
+    }
+    return undefined;
+  }
+  if (explicit === undefined) return undefined;
+  const workstream = await new WorkstreamStore(projectRoot).resolve(explicit);
+  if (workstream === undefined) {
+    throw new UsageError(`no workstream named ${JSON.stringify(explicit)}`);
+  }
+  return workstream.workstream_id;
+}
+
+function handleReaderFailure(
+  error: unknown,
+  io: ReaderCommandIo,
+  options: {
+    readonly cursorSupplied?: boolean;
+    readonly actionCursorSupplied?: boolean;
+  },
+): number | undefined {
+  if (
+    error instanceof ReaderTurnNotFoundError ||
+    error instanceof ReaderEvidenceNotFoundError ||
+    error instanceof ReaderEvidenceRecordNotFoundError ||
+    error instanceof ReaderRecordTooLargeError
+  ) {
+    io.stderr(`${error.message}\n`);
+    return 1;
+  }
+  if (
+    error instanceof ReaderByteBudgetTooSmallError ||
+    error instanceof ReaderRecordCursorError ||
+    error instanceof ReaderTurnListSnapshotError ||
+    (options.cursorSupplied === true &&
+      (error instanceof TypeError || error instanceof RangeError) &&
+      /cursor/iu.test(error.message)) ||
+    (options.actionCursorSupplied === true &&
+      (error instanceof TypeError || error instanceof RangeError) &&
+      /actionCursor/iu.test(error.message))
+  ) {
+    throw new UsageError(error instanceof Error ? error.message : String(error));
+  }
+  return undefined;
+}
+
+function assertCliId(value: string, pattern: RegExp, name: string): void {
+  if (!pattern.test(value)) {
+    throw new UsageError(`Invalid ${name}: ${JSON.stringify(value)}`);
+  }
+}
+
+function enumFlag<T extends string>(
+  flags: ReadonlyMap<string, string>,
+  name: string,
+  allowed: ReadonlySet<T>,
+  fallback: T,
+): T {
+  return optionalEnumFlag(flags, name, allowed) ?? fallback;
+}
+
+function optionalEnumFlag<T extends string>(
+  flags: ReadonlyMap<string, string>,
+  name: string,
+  allowed: ReadonlySet<T>,
+): T | undefined {
+  const value = flags.get(name);
+  if (value === undefined) return undefined;
+  if (!allowed.has(value as T)) {
+    throw new UsageError(
+      `--${name} must be one of ${[...allowed].join("|")}`,
+    );
+  }
+  return value as T;
 }
 
 function packageVersion(): string {
@@ -1087,6 +1478,26 @@ function helpText(): string {
                   [--workstream <name|ws_id> | --all-workstreams]
                               # live leases + newest turns, byte-bounded;
                               # scoped to the session's workstream when given
+  barbaro turn list [--project-root <path>] [--byte-budget <n>] [--cursor <cursor>]
+                    [--provider <claude|codex> --session-id <id>]
+                    [--workstream <name|ws_id> | --all-workstreams]
+                              # exhaustive newest-first canonical turn index;
+                              # default budget 131072 bytes; a page must fit
+                              # one item plus its pinned feed-count cursor, so
+                              # high feed counts may require a larger budget
+  barbaro turn show <turn_id> [--project-root <path>] [--byte-budget <n>]
+                    [--field <record|request|response|actions>] [--cursor <cursor>]
+                    [--provider <claude|codex> --session-id <id>]
+                    [--workstream <name|ws_id> | --all-workstreams]
+                              # lossless canonical or direct-field paging;
+                              # default budget 131072 bytes
+  barbaro evidence show <evidence_id> --provider <claude|codex>
+                    --session-id <ses_id> [--project-root <path>]
+                    [--byte-budget <n>] [--action-cursor a:<offset>]
+                    [--workstream <name|ws_id> | --all-workstreams]
+                              # bounded evidence projection (default); use
+                              # --field <record|content|request|response|actions>
+                              # [--cursor <cursor>] for lossless exact paging
   barbaro watch   [--project-root <path>] [--interval-ms <n>] [--json] [--once]
                   [--self <ses_id> | --provider <claude|codex> --session-id <id>]
                   [--workstream <name|ws_id> | --all-workstreams]

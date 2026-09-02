@@ -81,6 +81,12 @@ test("digest exclusion accepts only whole simple Barbaro read commands", () => {
     `'barbaro' "context" --json`,
     'barbaro context --project-root "$PWD"',
     "barbaro context # generated read",
+    "barbaro turn list",
+    "barbaro turn list --all-workstreams --cursor opaque",
+    `'barbaro' "turn" 'show' turn_0123456789abcdef0123456789abcdef`,
+    "barbaro turn show turn_0123456789abcdef0123456789abcdef --field response",
+    "barbaro evidence show evidence_0123456789abcdef0123456789abcdef --provider codex --session-id session-1",
+    "barbaro evidence show evidence_0123456789abcdef0123456789abcdef # generated read",
   ]) {
     assert.equal(isDigestExcludedBarbaroCommand(command), true, command);
   }
@@ -105,8 +111,35 @@ test("digest exclusion accepts only whole simple Barbaro read commands", () => {
     "barbaro context --label 'read;only'",
     `barbaro "context`,
     "barbaro await\\",
+    "barbaro turn",
+    "barbaro turn --help",
+    "barbaro turn delete turn_0123456789abcdef0123456789abcdef",
+    "barbaro turn ingest /tmp/turn.json",
+    "barbaro turning list",
+    "barbaro turn-list",
+    "barbaro evidence",
+    "barbaro evidence --help",
+    "barbaro evidence delete evidence_0123456789abcdef0123456789abcdef",
+    "barbaro evidential show evidence_0123456789abcdef0123456789abcdef",
+    "barbaro turn list | jq .",
+    "barbaro turn show turn_0123456789abcdef0123456789abcdef > /tmp/turn.json",
+    "barbaro evidence show evidence_0123456789abcdef0123456789abcdef $(pwd)",
+    "barbaro evidence show evidence_0123456789abcdef0123456789abcdef\npwd",
+    "barbaro turn show `printf turn_0123456789abcdef0123456789abcdef`",
+    "barbaro turn show turn_0123456789abcdef0123456789abcdef && echo done",
   ]) {
     assert.equal(isDigestExcludedBarbaroCommand(command), false, command);
+  }
+});
+
+test("lossless readers do not become context acknowledgments", () => {
+  for (const command of [
+    "barbaro turn list",
+    "barbaro turn show turn_0123456789abcdef0123456789abcdef",
+    "barbaro evidence show evidence_0123456789abcdef0123456789abcdef",
+  ]) {
+    assert.equal(isDigestExcludedBarbaroCommand(command), true, command);
+    assert.equal(isLeadingBarbaroContextCommand(command), false, command);
   }
 });
 
