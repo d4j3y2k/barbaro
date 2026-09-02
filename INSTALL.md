@@ -90,7 +90,12 @@ command -v barbaro
 
 Merge the applicable template from the installed package into the existing
 configuration at the same scope as the skills. In either template, replace
-`BARBARO_BIN` with the absolute path printed above:
+`BARBARO_BIN` with the absolute path printed above, keeping the surrounding
+single quotes so the shell treats the path literally, spaces, `$`, and
+backticks included. Paste the path inside the JSON string exactly as
+printed; if it contains a backslash or a double quote, escape that character
+as JSON requires (`\\` and `\"`). A path that itself contains a single quote
+is not supported by the templates:
 
 - Codex: merge `examples/codex-hooks.json` into `$HOME/.codex/hooks.json` or
   the target project's `.codex/hooks.json`.

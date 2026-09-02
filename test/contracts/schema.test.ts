@@ -38,7 +38,7 @@ test("Codex hook example splits synchronous activity from terminal ingest", asyn
     assert.ok(
       handlers.some(
         (handler) =>
-          handler.command === "BARBARO_BIN codex hook" && !handler.async,
+          handler.command === "'BARBARO_BIN' codex hook" && !handler.async,
       ),
       event,
     );
@@ -47,7 +47,7 @@ test("Codex hook example splits synchronous activity from terminal ingest", asyn
     assert.ok(
       config.hooks[event]?.[0]?.hooks.some(
         (handler) =>
-          handler.command === "BARBARO_BIN codex hook-ingest" && handler.async,
+          handler.command === "'BARBARO_BIN' codex hook-ingest" && handler.async,
       ),
       event,
     );
@@ -55,13 +55,13 @@ test("Codex hook example splits synchronous activity from terminal ingest", asyn
   assert.ok(
     config.hooks.UserPromptSubmit?.[0]?.hooks.some(
       (handler) =>
-        handler.command === "BARBARO_BIN codex hook-ingest" && handler.async,
+        handler.command === "'BARBARO_BIN' codex hook-ingest" && handler.async,
     ),
   );
   assert.ok(
     config.hooks.SessionEnd?.[0]?.hooks.some(
       (handler) =>
-        handler.command === "BARBARO_BIN codex hook-ingest" &&
+        handler.command === "'BARBARO_BIN' codex hook-ingest" &&
         !handler.async &&
         handler.timeout <= 3,
     ),

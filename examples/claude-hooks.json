@@ -3,6 +3,10 @@
     "Barbaro activation template for Claude Code. Copy these entries into",
     "~/.claude/settings.json (or a project .claude/settings.json) and replace",
     "BARBARO_BIN with the absolute path to the installed `barbaro` binary.",
+    "Keep the surrounding single quotes: the shell then treats the path",
+    "literally, spaces, $ and backticks included. Escape a backslash or a",
+    "double quote in the path as JSON requires. A path that itself contains a",
+    "single quote is not supported by this template.",
     "",
     "These installed hooks stay dormant for every new session until the user",
     "invokes the project skill with `/barbaro`. Mentioning that command",
@@ -31,16 +35,16 @@
     "SessionStart": [
       {
         "hooks": [
-          { "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 },
-          { "type": "command", "command": "BARBARO_BIN claude hook-ingest", "async": true, "timeout": 15 }
+          { "type": "command", "command": "'BARBARO_BIN' claude hook", "timeout": 3 },
+          { "type": "command", "command": "'BARBARO_BIN' claude hook-ingest", "async": true, "timeout": 15 }
         ]
       }
     ],
     "UserPromptSubmit": [
       {
         "hooks": [
-          { "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 },
-          { "type": "command", "command": "BARBARO_BIN claude hook-ingest", "async": true, "timeout": 15 }
+          { "type": "command", "command": "'BARBARO_BIN' claude hook", "timeout": 3 },
+          { "type": "command", "command": "'BARBARO_BIN' claude hook-ingest", "async": true, "timeout": 15 }
         ]
       }
     ],
@@ -48,62 +52,62 @@
       {
         "matcher": "barbaro",
         "hooks": [
-          { "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 },
-          { "type": "command", "command": "BARBARO_BIN claude hook-ingest", "async": true, "timeout": 15 }
+          { "type": "command", "command": "'BARBARO_BIN' claude hook", "timeout": 3 },
+          { "type": "command", "command": "'BARBARO_BIN' claude hook-ingest", "async": true, "timeout": 15 }
         ]
       }
     ],
     "PreToolUse": [
-      { "hooks": [{ "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 }] }
+      { "hooks": [{ "type": "command", "command": "'BARBARO_BIN' claude hook", "timeout": 3 }] }
     ],
     "PostToolUse": [
-      { "hooks": [{ "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 }] }
+      { "hooks": [{ "type": "command", "command": "'BARBARO_BIN' claude hook", "timeout": 3 }] }
     ],
     "PostToolUseFailure": [
-      { "hooks": [{ "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 }] }
+      { "hooks": [{ "type": "command", "command": "'BARBARO_BIN' claude hook", "timeout": 3 }] }
     ],
     "PostToolBatch": [
-      { "hooks": [{ "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 }] }
+      { "hooks": [{ "type": "command", "command": "'BARBARO_BIN' claude hook", "timeout": 3 }] }
     ],
     "SubagentStart": [
-      { "hooks": [{ "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 }] }
+      { "hooks": [{ "type": "command", "command": "'BARBARO_BIN' claude hook", "timeout": 3 }] }
     ],
     "SubagentStop": [
       {
         "hooks": [
-          { "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 },
-          { "type": "command", "command": "BARBARO_BIN claude hook-ingest", "async": true, "timeout": 15 }
+          { "type": "command", "command": "'BARBARO_BIN' claude hook", "timeout": 3 },
+          { "type": "command", "command": "'BARBARO_BIN' claude hook-ingest", "async": true, "timeout": 15 }
         ]
       }
     ],
     "Stop": [
       {
         "hooks": [
-          { "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 },
-          { "type": "command", "command": "BARBARO_BIN claude hook-ingest", "async": true, "timeout": 15 }
+          { "type": "command", "command": "'BARBARO_BIN' claude hook", "timeout": 3 },
+          { "type": "command", "command": "'BARBARO_BIN' claude hook-ingest", "async": true, "timeout": 15 }
         ]
       }
     ],
     "StopFailure": [
       {
         "hooks": [
-          { "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 },
-          { "type": "command", "command": "BARBARO_BIN claude hook-ingest", "async": true, "timeout": 15 }
+          { "type": "command", "command": "'BARBARO_BIN' claude hook", "timeout": 3 },
+          { "type": "command", "command": "'BARBARO_BIN' claude hook-ingest", "async": true, "timeout": 15 }
         ]
       }
     ],
     "TaskCompleted": [
       {
         "hooks": [
-          { "type": "command", "command": "BARBARO_BIN claude hook-ingest", "async": true, "timeout": 15 }
+          { "type": "command", "command": "'BARBARO_BIN' claude hook-ingest", "async": true, "timeout": 15 }
         ]
       }
     ],
     "SessionEnd": [
       {
         "hooks": [
-          { "type": "command", "command": "BARBARO_BIN claude hook", "timeout": 3 },
-          { "type": "command", "command": "BARBARO_BIN claude hook-ingest", "timeout": 10 }
+          { "type": "command", "command": "'BARBARO_BIN' claude hook", "timeout": 3 },
+          { "type": "command", "command": "'BARBARO_BIN' claude hook-ingest", "timeout": 10 }
         ]
       }
     ]
