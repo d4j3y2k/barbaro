@@ -27,7 +27,7 @@ body:
     attributes:
       label: Barbaro version
       description: Paste the output of `barbaro --version`.
-      placeholder: 0.1.0-alpha.4
+      placeholder: 0.1.0-alpha.5
     validations:
       required: true
 

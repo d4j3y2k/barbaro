@@ -20,33 +20,33 @@ separate SHA-256 checksum asset:
 
 ```sh
 curl --fail --location --remote-name \
-  https://github.com/d4j3y2k/barbaro/releases/download/v0.1.0-alpha.4/barbaro-0.1.0-alpha.4.tgz
+  https://github.com/d4j3y2k/barbaro/releases/download/v0.1.0-alpha.5/barbaro-0.1.0-alpha.5.tgz
 curl --fail --location --remote-name \
-  https://github.com/d4j3y2k/barbaro/releases/download/v0.1.0-alpha.4/barbaro-0.1.0-alpha.4.tgz.sha256
+  https://github.com/d4j3y2k/barbaro/releases/download/v0.1.0-alpha.5/barbaro-0.1.0-alpha.5.tgz.sha256
 ```
 
 Run the checksum command for your platform:
 
 ```sh
-sha256sum --check barbaro-0.1.0-alpha.4.tgz.sha256
+sha256sum --check barbaro-0.1.0-alpha.5.tgz.sha256
 ```
 
 On macOS, use:
 
 ```sh
-shasum -a 256 --check barbaro-0.1.0-alpha.4.tgz.sha256
+shasum -a 256 --check barbaro-0.1.0-alpha.5.tgz.sha256
 ```
 
 Then install the verified local archive:
 
 ```sh
-npm install --global ./barbaro-0.1.0-alpha.4.tgz
+npm install --global ./barbaro-0.1.0-alpha.5.tgz
 barbaro --version
 ```
 
 The `github:d4j3y2k/barbaro#<tag>` source-install form is intentionally
 unsupported. In particular, do not use
-`npm install --global github:d4j3y2k/barbaro#v0.1.0-alpha.4`: Git source tags do
+`npm install --global github:d4j3y2k/barbaro#v0.1.0-alpha.5`: Git source tags do
 not contain the ignored `dist/` output, and rebuilding development sources at
 install time is not part of Barbaro's release contract. Use the registry or the
 built release tarball instead.

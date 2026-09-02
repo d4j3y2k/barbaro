@@ -150,13 +150,13 @@ test("README and INSTALL pin the public installation contract", async () => {
   assert.doesNotMatch(install, /barbaro@alpha/u);
   assert.match(
     install,
-    /releases\/download\/v0\.1\.0-alpha\.4\/barbaro-0\.1\.0-alpha\.4\.tgz/u,
+    /releases\/download\/v0\.1\.0-alpha\.5\/barbaro-0\.1\.0-alpha\.5\.tgz/u,
   );
-  assert.match(install, /^npm install --global \.\/barbaro-0\.1\.0-alpha\.4\.tgz$/mu);
-  assert.match(install, /barbaro-0\.1\.0-alpha\.4\.tgz\.sha256/u);
+  assert.match(install, /^npm install --global \.\/barbaro-0\.1\.0-alpha\.5\.tgz$/mu);
+  assert.match(install, /barbaro-0\.1\.0-alpha\.5\.tgz\.sha256/u);
   assert.match(
     install,
-    /github:d4j3y2k\/barbaro#v0\.1\.0-alpha\.4[\s\S]+source tags do\s+not contain/u,
+    /github:d4j3y2k\/barbaro#v0\.1\.0-alpha\.5[\s\S]+source tags do\s+not contain/u,
   );
   assert.match(install, /^command -v barbaro$/mu);
   assert.match(install, /Choose either user scope or project scope/u);
