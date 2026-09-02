@@ -20,6 +20,7 @@ import {
   ReaderEvidenceRecordNotFoundError,
   ReaderRecordCursorError,
   ReaderTurnNotFoundError,
+  ReaderTurnSearchIncompleteError,
 } from "./reader/record-page.js";
 import {
   ReaderEvidenceNotFoundError,
@@ -720,6 +721,12 @@ async function runTurnReaderCommand(
       io.stdout(`${stableStringify(projection)}\n`);
       return 0;
     } catch (error: unknown) {
+      // An incomplete search is not absence: the limits guidance applies and
+      // the scope hint below would be misleading.
+      if (error instanceof ReaderTurnSearchIncompleteError) {
+        io.stderr(`${error.message}\n`);
+        return 1;
+      }
       if (
         error instanceof ReaderTurnNotFoundError &&
         workstreamId !== undefined
@@ -923,6 +930,7 @@ function handleReaderFailure(
 ): number | undefined {
   if (
     error instanceof ReaderTurnNotFoundError ||
+    error instanceof ReaderTurnSearchIncompleteError ||
     error instanceof ReaderEvidenceNotFoundError ||
     error instanceof ReaderEvidenceRecordNotFoundError ||
     error instanceof ReaderRecordTooLargeError

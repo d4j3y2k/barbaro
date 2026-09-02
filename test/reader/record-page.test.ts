@@ -26,6 +26,7 @@ import { ReaderByteBudgetTooSmallError } from "../../src/reader/budget.js";
 import {
   ReaderRecordCursorError,
   ReaderTurnNotFoundError,
+  ReaderTurnSearchIncompleteError,
   readEvidenceRecordPage,
   readTurnRecordPage,
   type ReaderEvidenceRecordField,
@@ -679,7 +680,7 @@ test("record pages preserve no-follow, single-link, and size limits", async (t) 
           byteBudget: 4096,
           maxFileBytes: 128,
         }),
-        (error: unknown) => error instanceof ReaderTurnNotFoundError,
+        (error: unknown) => error instanceof ReaderTurnSearchIncompleteError,
       );
       await assert.rejects(
         readTurnRecordPage(project, {
@@ -687,7 +688,7 @@ test("record pages preserve no-follow, single-link, and size limits", async (t) 
           byteBudget: 4096,
           maxRecordBytes: 128,
         }),
-        (error: unknown) => error instanceof ReaderTurnNotFoundError,
+        (error: unknown) => error instanceof ReaderTurnSearchIncompleteError,
       );
     });
   });

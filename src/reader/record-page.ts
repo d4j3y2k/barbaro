@@ -59,6 +59,8 @@ const EVIDENCE_ID_PATTERN = /^ev_[0-9a-f]{32}$/u;
 const ACTION_ID_PATTERN = /^act_[0-9a-f]{32}$/u;
 const WORKSTREAM_ID_PATTERN = /^ws_[0-9a-f]{32}$/u;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
+const CURSOR_LOCATION_PATTERN =
+  /^[a-z][a-z0-9_-]*\u0000ses_[0-9a-f]{32}$/u;
 
 export type ReaderTurnRecordField =
   | "record"
@@ -154,6 +156,28 @@ export class ReaderTurnNotFoundError extends Error {
   }
 }
 
+/**
+ * No candidate was found, but at least one feed was skipped for exceeding
+ * the exposed limits, so absence is unproven. Deliberately not a
+ * ReaderTurnNotFoundError: a caller treating it as authoritative absence
+ * would be wrong. The message names the flags that widen the search.
+ */
+export class ReaderTurnSearchIncompleteError extends Error {
+  readonly turnId: string;
+  readonly skippedOversizedFeedFiles: number;
+
+  constructor(turnId: string, skippedOversizedFeedFiles: number) {
+    super(
+      `Barbaro turn search incomplete for ${turnId}: ${skippedOversizedFeedFiles} ` +
+        "feed file(s) exceeded the reader limits and were skipped, so absence " +
+        "is unproven; raise --max-file-bytes or --max-record-bytes to include them",
+    );
+    this.name = "ReaderTurnSearchIncompleteError";
+    this.turnId = turnId;
+    this.skippedOversizedFeedFiles = skippedOversizedFeedFiles;
+  }
+}
+
 export class ReaderEvidenceRecordNotFoundError extends Error {
   readonly evidenceId: string;
 
@@ -183,10 +207,33 @@ interface SelectedText {
   readonly representation?: "json-string";
 }
 
-interface FoundTurn {
-  readonly turn: BarbaroTurnV1 | undefined;
-  readonly skippedOversizedFeedFiles: number;
+/** Where one canonical record line lives: a pinned byte range in its file. */
+interface RecordLocation {
+  readonly provider: string;
+  readonly sessionId: string;
+  /** Inclusive byte offset of the record line in the canonical file. */
+  readonly start: number;
+  /** Exclusive byte offset of the record line, excluding its newline. */
+  readonly end: number;
 }
+
+type FoundTurn =
+  | {
+      readonly turn: undefined;
+      readonly skippedOversizedFeedFiles: number;
+    }
+  | {
+      readonly turn: BarbaroTurnV1;
+      readonly location: RecordLocation;
+      readonly skippedOversizedFeedFiles: number;
+    };
+
+type FoundEvidence =
+  | { readonly evidence: undefined }
+  | {
+      readonly evidence: BarbaroEvidenceV1;
+      readonly location: RecordLocation;
+    };
 
 interface CursorBody {
   /** Compact keys keep the opaque cursor from consuming the page payload. */
@@ -199,6 +246,13 @@ interface CursorBody {
   readonly q: string;
   readonly h: string;
   readonly o: number;
+  /** Pinned location: provider and session id separated by NUL. */
+  readonly l: string;
+  /** Pinned byte range of the record line, so growth elsewhere is harmless. */
+  readonly a: number;
+  readonly z: number;
+  /** Diagnostics pinned with the traversal and repeated on every page. */
+  readonly x: number;
 }
 
 interface EncodedCursor {
@@ -217,6 +271,8 @@ interface CursorQueryBinding {
 
 interface CursorBinding extends CursorQueryBinding {
   readonly recordSha256: string;
+  readonly location: RecordLocation;
+  readonly skippedOversizedFeedFiles: number;
 }
 
 interface PageSlice {
@@ -251,20 +307,29 @@ export async function readTurnRecordPage(
     field,
     query: limitsFingerprint(limits),
   };
+  // A continuation reads only the byte range its cursor pinned, so the feed
+  // growing past the exposed file limit between pages cannot strand it.
+  let found: FoundTurn;
   if (options.cursor !== undefined) {
-    assertCursorQueryBeforeSelection(
-      parseCursor(options.cursor),
-      queryBinding,
-    );
+    const body = parseCursor(options.cursor);
+    assertCursorQueryBeforeSelection(body, queryBinding);
+    found = await pinnedTurn(absoluteRoot, body, options.turnId, limits);
+  } else {
+    found = await findTurn(absoluteRoot, options.turnId, limits);
   }
-  const found = await findTurn(absoluteRoot, options.turnId, limits);
-  const turn = found.turn;
-  if (turn === undefined) {
+  if (found.turn === undefined) {
     if (options.cursor !== undefined) {
       throw new ReaderRecordCursorError("target record is no longer available");
     }
+    if (found.skippedOversizedFeedFiles > 0) {
+      throw new ReaderTurnSearchIncompleteError(
+        options.turnId,
+        found.skippedOversizedFeedFiles,
+      );
+    }
     throw new ReaderTurnNotFoundError(options.turnId);
   }
+  const turn = found.turn;
   if (
     options.workstreamId !== undefined &&
     turn.workstream_id !== options.workstreamId
@@ -281,6 +346,8 @@ export async function readTurnRecordPage(
     ...queryBinding,
     field: cursorFieldBinding(field, selected),
     recordSha256,
+    location: found.location,
+    skippedOversizedFeedFiles: found.skippedOversizedFeedFiles,
   };
   return pageSelectedText(
     selected,
@@ -342,25 +409,27 @@ export async function readEvidenceRecordPage(
     field,
     query: limitsFingerprint(limits),
   };
+  let found: FoundEvidence;
   if (options.cursor !== undefined) {
-    assertCursorQueryBeforeSelection(
-      parseCursor(options.cursor),
-      queryBinding,
+    const body = parseCursor(options.cursor);
+    assertCursorQueryBeforeSelection(body, queryBinding);
+    found = await pinnedEvidence(absoluteRoot, body, options, limits);
+  } else {
+    found = await findEvidence(
+      absoluteRoot,
+      options.provider,
+      options.sessionId,
+      options.evidenceId,
+      limits,
     );
   }
-  const evidence = await findEvidence(
-    absoluteRoot,
-    options.provider,
-    options.sessionId,
-    options.evidenceId,
-    limits,
-  );
-  if (evidence === undefined) {
+  if (found.evidence === undefined) {
     if (options.cursor !== undefined) {
       throw new ReaderRecordCursorError("target record is no longer available");
     }
     throw new ReaderEvidenceRecordNotFoundError(options.evidenceId);
   }
+  const evidence = found.evidence;
   if (
     options.workstreamId !== undefined &&
     evidence.workstream_id !== options.workstreamId
@@ -377,6 +446,8 @@ export async function readEvidenceRecordPage(
     ...queryBinding,
     field: cursorFieldBinding(field, selected),
     recordSha256,
+    location: found.location,
+    skippedOversizedFeedFiles: 0,
   };
   return pageSelectedText(
     selected,
@@ -420,6 +491,7 @@ async function findTurn(
   const files = await listFeedFiles(projectRoot);
   let found: BarbaroTurnV1 | undefined;
   let foundCanonical: string | undefined;
+  let foundLocation: RecordLocation | undefined;
   let skippedOversizedFeedFiles = 0;
   for (const file of files) {
     let bytes: Buffer | undefined;
@@ -440,6 +512,7 @@ async function findTurn(
     // Do not publish a candidate seen before a later oversized record.
     let feedTurn: BarbaroTurnV1 | undefined;
     let feedCanonical: string | undefined;
+    let feedLocation: RecordLocation | undefined;
     try {
       for (const line of completeJsonlLines(
         bytes,
@@ -460,20 +533,225 @@ async function findTurn(
         }
         feedTurn = value;
         feedCanonical = canonical;
+        feedLocation = lineLocation(file.provider, file.sessionId, bytes, line);
       }
     } catch (error: unknown) {
       if (!(error instanceof ReaderRecordTooLargeError)) throw error;
       skippedOversizedFeedFiles += 1;
       continue;
     }
-    if (feedTurn === undefined || feedCanonical === undefined) continue;
+    if (
+      feedTurn === undefined ||
+      feedCanonical === undefined ||
+      feedLocation === undefined
+    ) {
+      continue;
+    }
     if (foundCanonical !== undefined && feedCanonical !== foundCanonical) {
       throw new Error(`Conflicting canonical turn ID: ${turnId}`);
     }
     found = feedTurn;
     foundCanonical = feedCanonical;
+    foundLocation = feedLocation;
   }
-  return { turn: found, skippedOversizedFeedFiles };
+  if (found === undefined || foundLocation === undefined) {
+    return { turn: undefined, skippedOversizedFeedFiles };
+  }
+  return { turn: found, location: foundLocation, skippedOversizedFeedFiles };
+}
+
+/** Resume a turn page from the byte range its cursor pinned. */
+async function pinnedTurn(
+  projectRoot: string,
+  body: CursorBody,
+  turnId: string,
+  limits: RecordFileLimits,
+): Promise<FoundTurn> {
+  const location = cursorLocation(body);
+  const boundary = SafeStoreBoundary.forBarbaroProject(projectRoot);
+  const bytes = await readPinnedRecordRange(
+    boundary,
+    ["feed", location.provider, `${location.sessionId}.jsonl`],
+    location,
+    limits,
+  );
+  const value = parseJson(bytes);
+  if (
+    !isTurnV1(value) ||
+    value.turn_id !== turnId ||
+    value.provider !== location.provider ||
+    value.session_id !== location.sessionId
+  ) {
+    throw new ReaderRecordCursorError("target record is no longer available");
+  }
+  if (sha256(stableStringify(value)) !== body.h) {
+    throw new ReaderRecordCursorError("cursor target changed since the prior page");
+  }
+  return { turn: value, location, skippedOversizedFeedFiles: body.x };
+}
+
+/** Resume an evidence page from the byte range its cursor pinned. */
+async function pinnedEvidence(
+  projectRoot: string,
+  body: CursorBody,
+  options: ReaderEvidenceRecordPageOptions,
+  limits: RecordFileLimits,
+): Promise<FoundEvidence> {
+  const location = cursorLocation(body);
+  if (
+    location.provider !== options.provider ||
+    location.sessionId !== options.sessionId
+  ) {
+    throw new ReaderRecordCursorError("cursor does not match this query");
+  }
+  const boundary = SafeStoreBoundary.forBarbaroProject(projectRoot);
+  const bytes = await readPinnedRecordRange(
+    boundary,
+    ["evidence", location.provider, `${location.sessionId}.jsonl`],
+    location,
+    limits,
+  );
+  const value = parseJson(bytes);
+  if (
+    !isEvidenceV1(value) ||
+    value.evidence_id !== options.evidenceId ||
+    value.provider !== location.provider ||
+    value.session_id !== location.sessionId
+  ) {
+    throw new ReaderRecordCursorError("target record is no longer available");
+  }
+  if (sha256(stableStringify(value)) !== body.h) {
+    throw new ReaderRecordCursorError("cursor target changed since the prior page");
+  }
+  return { evidence: value, location };
+}
+
+function cursorLocation(body: CursorBody): RecordLocation {
+  const [provider, sessionId] = body.l.split("\0");
+  if (provider === undefined || sessionId === undefined) {
+    throw new ReaderRecordCursorError("invalid payload");
+  }
+  return { provider, sessionId, start: body.a, end: body.z };
+}
+
+function lineLocation(
+  provider: string,
+  sessionId: string,
+  file: Buffer,
+  line: Buffer,
+): RecordLocation {
+  const start = line.byteOffset - file.byteOffset;
+  return { provider, sessionId, start, end: start + line.byteLength };
+}
+
+/**
+ * Read exactly the pinned byte range of one canonical record. The live file
+ * size is deliberately not held to the exposed file limit: only the pinned
+ * range must still exist, so appends beyond it are harmless.
+ */
+async function readPinnedRecordRange(
+  boundary: SafeStoreBoundary,
+  components: readonly string[],
+  location: RecordLocation,
+  limits: RecordFileLimits,
+): Promise<Buffer> {
+  if (
+    location.end > limits.maxFileBytes ||
+    location.end - location.start > limits.maxRecordBytes
+  ) {
+    throw new ReaderRecordCursorError("pinned record is outside the reader limits");
+  }
+  const parent = await boundary.verifyDirectory(components.slice(0, -1));
+  if (parent === undefined) {
+    throw new ReaderRecordCursorError("target record is no longer available");
+  }
+  const path = boundary.pathFor(components);
+  let handle: FileHandle;
+  try {
+    handle = await open(path, safeReadFlags());
+  } catch (error: unknown) {
+    if (isErrnoCode(error, "ENOENT")) {
+      throw new ReaderRecordCursorError("target record is no longer available");
+    }
+    if (isErrnoCode(error, "ELOOP")) {
+      throw new UnsafeStorePathError(path, "final file is a symbolic link");
+    }
+    throw error;
+  }
+  try {
+    const before = await handle.stat();
+    assertPinnedDescriptor(path, before, location);
+    const bytes = await readAt(
+      handle,
+      location.start,
+      location.end - location.start,
+    );
+    if (bytes.byteLength !== location.end - location.start) {
+      throw new ReaderRecordCursorError("target record is no longer available");
+    }
+    // The range must still be one whole JSONL line: preceded by a newline or
+    // the file start, and terminated by LF or CRLF. Without that framing a
+    // fresh reader would treat the record as partial or merged, so the
+    // continuation must not accept it either.
+    if (location.start > 0) {
+      const preceding = await readAt(handle, location.start - 1, 1);
+      if (preceding[0] !== 0x0a) {
+        throw new ReaderRecordCursorError("pinned record framing changed");
+      }
+    }
+    const following = await readAt(handle, location.end, 2);
+    const terminated =
+      following[0] === 0x0a ||
+      (following[0] === 0x0d && following[1] === 0x0a);
+    if (!terminated) {
+      throw new ReaderRecordCursorError("pinned record framing changed");
+    }
+    // Re-check the descriptor after reading, as the full-file readers do, so
+    // a concurrent truncation or hard link cannot slip inside the read.
+    const after = await handle.stat();
+    assertPinnedDescriptor(path, after, location);
+    assertSameOpenedIdentity(path, before, after);
+    return bytes;
+  } finally {
+    await handle.close();
+  }
+}
+
+function assertPinnedDescriptor(
+  path: string,
+  stats: Awaited<ReturnType<FileHandle["stat"]>>,
+  location: RecordLocation,
+): void {
+  if (!stats.isFile()) {
+    throw new UnsafeStorePathError(path, "opened object is not a regular file");
+  }
+  if (stats.nlink !== 1) {
+    throw new UnsafeStorePathError(path, "final file has multiple hard links");
+  }
+  if (stats.size < location.end) {
+    throw new ReaderRecordCursorError("target record is no longer available");
+  }
+}
+
+/** Read up to `length` bytes at `position`; shorter only at end of file. */
+async function readAt(
+  handle: FileHandle,
+  position: number,
+  length: number,
+): Promise<Buffer> {
+  const buffer = Buffer.allocUnsafe(length);
+  let offset = 0;
+  while (offset < length) {
+    const read = await handle.read(
+      buffer,
+      offset,
+      length - offset,
+      position + offset,
+    );
+    if (read.bytesRead === 0) break;
+    offset += read.bytesRead;
+  }
+  return buffer.subarray(0, offset);
 }
 
 async function findEvidence(
@@ -482,7 +760,7 @@ async function findEvidence(
   sessionId: string,
   evidenceId: string,
   limits: RecordFileLimits,
-): Promise<BarbaroEvidenceV1 | undefined> {
+): Promise<FoundEvidence> {
   const boundary = SafeStoreBoundary.forBarbaroProject(projectRoot);
   const components = ["evidence", provider, `${sessionId}.jsonl`];
   const path = boundary.pathFor(components);
@@ -491,9 +769,10 @@ async function findEvidence(
     components,
     limits.maxFileBytes,
   );
-  if (bytes === undefined) return undefined;
+  if (bytes === undefined) return { evidence: undefined };
   let found: BarbaroEvidenceV1 | undefined;
   let foundCanonical: string | undefined;
+  let foundLocation: RecordLocation | undefined;
   for (const line of completeJsonlLines(bytes, path, limits.maxRecordBytes)) {
     const value = parseJson(line);
     if (!isEvidenceV1(value) || value.evidence_id !== evidenceId) continue;
@@ -506,8 +785,12 @@ async function findEvidence(
     }
     found = value;
     foundCanonical = canonical;
+    foundLocation = lineLocation(provider, sessionId, bytes, line);
   }
-  return found;
+  if (found === undefined || foundLocation === undefined) {
+    return { evidence: undefined };
+  }
+  return { evidence: found, location: foundLocation };
 }
 
 function selectTurnText(
@@ -685,6 +968,10 @@ function encodeCursor(binding: CursorBinding & { readonly offset: number }): str
     q: binding.query,
     h: binding.recordSha256,
     o: binding.offset,
+    l: `${binding.location.provider}\0${binding.location.sessionId}`,
+    a: binding.location.start,
+    z: binding.location.end,
+    x: binding.skippedOversizedFeedFiles,
   };
   const encoded: EncodedCursor = {
     b: body,
@@ -798,8 +1085,28 @@ function cursorChecksum(body: CursorBody): string {
 function isCursorBody(value: unknown): value is CursorBody {
   if (!isObject(value)) return false;
   return (
-    hasExactKeys(value, ["f", "h", "i", "k", "o", "p", "q", "s", "v"]) &&
+    hasExactKeys(value, [
+      "a",
+      "f",
+      "h",
+      "i",
+      "k",
+      "l",
+      "o",
+      "p",
+      "q",
+      "s",
+      "v",
+      "x",
+      "z",
+    ]) &&
     value.v === CURSOR_VERSION &&
+    typeof value.l === "string" &&
+    CURSOR_LOCATION_PATTERN.test(value.l) &&
+    isSafeNonNegativeInteger(value.a) &&
+    isSafePositiveInteger(value.z) &&
+    Number(value.z) > Number(value.a) &&
+    isSafeNonNegativeInteger(value.x) &&
     typeof value.p === "string" &&
     SHA256_PATTERN.test(value.p) &&
     typeof value.s === "string" &&

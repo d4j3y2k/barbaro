@@ -401,7 +401,7 @@ test("turn record pages reconstruct large canonical records and address response
     const absentResponse = await readTurnRecordPage(project, {
       turnId: withoutResponse.turn_id,
       field: "response",
-      byteBudget: 1100,
+      byteBudget: 1300,
       workstreamId: WS_ALPHA,
     });
     assert.equal(absentResponse.value.present, false);
@@ -468,7 +468,7 @@ test("list and record cursors reject malformed, tampered, and foreign queries", 
     const firstRecord = await readTurnRecordPage(project, {
       turnId: records[0]!.turn_id,
       field: "response",
-      byteBudget: 1100,
+      byteBudget: 1300,
       workstreamId: WS_ALPHA,
     });
     const recordCursor = firstRecord.value.next_cursor;
@@ -480,7 +480,7 @@ test("list and record cursors reject malformed, tampered, and foreign queries", 
       readTurnRecordPage(project, {
         turnId: records[0]!.turn_id,
         field: "response",
-        byteBudget: 1100,
+        byteBudget: 1300,
         workstreamId: WS_ALPHA,
         cursor: "not-a-cursor",
       }),
@@ -490,7 +490,7 @@ test("list and record cursors reject malformed, tampered, and foreign queries", 
       readTurnRecordPage(project, {
         turnId: records[0]!.turn_id,
         field: "response",
-        byteBudget: 1100,
+        byteBudget: 1300,
         workstreamId: WS_ALPHA,
         cursor: tamperedRecordCursor,
       }),
@@ -500,7 +500,7 @@ test("list and record cursors reject malformed, tampered, and foreign queries", 
       readTurnRecordPage(project, {
         turnId: records[0]!.turn_id,
         field: "actions",
-        byteBudget: 1100,
+        byteBudget: 1300,
         workstreamId: WS_ALPHA,
         cursor: recordCursor,
       }),
@@ -510,7 +510,7 @@ test("list and record cursors reject malformed, tampered, and foreign queries", 
       readTurnRecordPage(project, {
         turnId: records[1]!.turn_id,
         field: "response",
-        byteBudget: 1100,
+        byteBudget: 1300,
         workstreamId: WS_ALPHA,
         cursor: recordCursor,
       }),
@@ -534,7 +534,7 @@ test("list and record cursors reject malformed, tampered, and foreign queries", 
         readTurnRecordPage(foreignProject, {
           turnId: records[0]!.turn_id,
           field: "response",
-          byteBudget: 1100,
+          byteBudget: 1300,
           workstreamId: WS_ALPHA,
           cursor: recordCursor,
         }),
