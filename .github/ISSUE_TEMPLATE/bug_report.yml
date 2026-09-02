@@ -1,0 +1,87 @@
+name: Bug or compatibility report
+description: Report a sanitized Barbaro installation, provider, or behavior problem
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Barbaro. **Do not attach raw provider traces, `.barbaro/`, credentials, private prompts or responses, local usernames or paths, or proprietary source.** Use synthetic or carefully sanitized material. Report vulnerabilities through the private security link instead.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Installation or packaging
+        - Codex compatibility
+        - Claude Code compatibility
+        - Hooks or enrollment
+        - Workstreams or context
+        - Terminal dashboard
+        - Other behavior
+    validations:
+      required: true
+
+  - type: input
+    id: barbaro-version
+    attributes:
+      label: Barbaro version
+      description: Paste the output of `barbaro --version`.
+      placeholder: 0.1.0-alpha.4
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Operating system and Node.js version
+      description: Include OS version, architecture, and `node --version`.
+      placeholder: macOS 15.6, arm64, Node v24.6.0
+    validations:
+      required: true
+
+  - type: input
+    id: provider
+    attributes:
+      label: Provider and version
+      description: Identify Codex Desktop or Claude Code and its exact version. Use "not applicable" for package-only issues.
+      placeholder: Codex Desktop 0.x.y
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Sanitized reproduction
+      description: List the smallest commands and steps that reproduce the problem. Replace identifying values consistently.
+      placeholder: |
+        1. In a fresh synthetic repository...
+        2. Run...
+        3. Observe...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and sanitized output
+      description: Remove secrets, raw transcripts, `.barbaro/` contents, usernames, and private paths before pasting output.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Data-safety confirmation
+      options:
+        - label: I removed raw traces, `.barbaro/`, secrets, identifying paths, and private project content.
+          required: true
+        - label: I searched existing issues for the same problem.
+          required: true

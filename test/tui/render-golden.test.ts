@@ -6,6 +6,7 @@ import { COMFORT_CARD, SUB_CARD, TEXT_CARD } from "../../src/tui/geometry.js";
 import {
   HORSE_BRAND_WORDMARK,
   HORSE_FRAME_COUNT,
+  HORSE_STANDARD_FRAME_INDEX,
   brandedHeroHorseFrame,
   horseFrame,
 } from "../../src/tui/horse.js";
@@ -468,7 +469,7 @@ test("dashboard-working-64x28 renders byte-identically", async () => {
     frame: {
       kind: "working",
       title: "Motion study",
-      horse: { kind: "gallop", frameIndex: 6 },
+      horse: { kind: "gallop", frameIndex: HORSE_STANDARD_FRAME_INDEX },
       telemetry: "Refresh age 0.4s · 23 shown turns · 284 KiB projected",
       rolls: [
         { selected: true, identity: "codex/58d65273", detail: "Working..." },
@@ -491,6 +492,47 @@ test("dashboard-working-64x28 renders byte-identically", async () => {
   assert.equal(
     rendered(renderComfortCard(view)),
     await readFixture("dashboard-working-64x28.txt"),
+  );
+});
+
+test("dashboard-once-still-64x28 renders byte-identically", async () => {
+  const view: CardView = {
+    location: "tui-reboot · snapshot",
+    truth: "News 13 for codex/58d65273 · 1 working · 1 waiting",
+    frame: {
+      kind: "working",
+      title: "Motion study · snapshot",
+      horse: {
+        kind: "gallop",
+        frameIndex: HORSE_STANDARD_FRAME_INDEX,
+      },
+      rolls: [
+        { selected: true, identity: "codex/58d65273", detail: "Working" },
+        {
+          selected: false,
+          identity: "claude/460d4a94",
+          detail: "Waiting · target unknown",
+        },
+        {
+          selected: false,
+          identity: "claude/969a63de",
+          detail: "No shown lease",
+        },
+      ],
+    },
+    bench: [
+      "codex/58d65273 · working at snapshot",
+      "Latest shown exposure · #23 · succeeded · 02:07",
+      "News 13 for codex/58d65273",
+      "Publication clear",
+      "Snapshot · 2026-08-25 02:07:00Z",
+      "Project · barbaro · root /Users/davidkim/Developer/barbaro",
+    ],
+    keyLine: "Snapshot · tui-reboot · captured 2026-08-25 02:07:00Z",
+  };
+  assert.equal(
+    rendered(renderComfortCard(view)),
+    await readFixture("dashboard-once-still-64x28.txt"),
   );
 });
 

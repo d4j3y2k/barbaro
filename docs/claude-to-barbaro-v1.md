@@ -449,7 +449,7 @@ them, with delay rather than speculative publication as the fallback.
 
 ### Fixtures
 
-[`test/fixtures/claude/`](https://github.com/d4j3y2k/barbaro/tree/v0.1.0-alpha.3/test/fixtures/claude) — sanitized, structurally faithful traces
+[`test/fixtures/claude/`](https://github.com/d4j3y2k/barbaro/tree/main/test/fixtures/claude) — sanitized, structurally faithful traces
 covering missing `origin.kind`, a failed tool loop, subagent parent joining, compaction with forks,
 and a split terminal response. See the fixtures README for what each asserts.
 

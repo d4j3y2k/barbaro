@@ -13,6 +13,10 @@ import type { BarbaroTurnV1 } from "../../src/contracts/v1.js";
 import { stableJsonLine } from "../../src/core/stable-json.js";
 import type { ComfortAppOptions } from "../../src/tui/comfort-app.js";
 import { measureCells } from "../../src/tui/cells.js";
+import {
+  horseFrame,
+  HORSE_STANDARD_FRAME_INDEX,
+} from "../../src/tui/horse.js";
 import { WorkstreamStore } from "../../src/workstreams/store.js";
 
 const execFileAsync = promisify(execFile);
@@ -252,22 +256,35 @@ test("tui --once resolves workstream names and IDs and scopes the reader", async
     for (const reference of ["tui-design", lane.workstream_id]) {
       const rendered = await snapshot(project, ["--workstream", reference]);
       assert.match(rendered, /tui-design \u00b7 snapshot/u);
-      // A working art tier always carries the ordered static strip.
-      assert.match(rendered, /F01.*F04.*F07.*F10/su);
-      assert.match(rendered, /Working at snapshot/u);
+      // A working snapshot carries the same complete horse pose every time.
+      for (const row of horseFrame(
+        HORSE_STANDARD_FRAME_INDEX,
+        "compact",
+        "riderless",
+      )) {
+        assert.ok(rendered.includes(row));
+      }
+      assert.doesNotMatch(rendered, /F01|F04|F07|F10/u);
+      assert.match(rendered, /Motion study · snapshot/u);
       assert.match(rendered, /codex\/11111111/u);
       assert.doesNotMatch(rendered, /claude\/22222222/u);
       assert.doesNotMatch(rendered, /\u001b/u);
       assertFrame(rendered, 64, 28);
     }
-    // --no-motion keeps the same strip and changes only the caption.
+    // --no-motion keeps the same still and states the disabled motion policy.
     const still = await snapshot(project, [
       "--workstream",
       "tui-design",
       "--no-motion",
     ]);
-    assert.match(still, /F01.*F04.*F07.*F10/su);
-    assert.match(still, /Working at snapshot \u00b7 motion off/u);
+    for (const row of horseFrame(
+      HORSE_STANDARD_FRAME_INDEX,
+      "compact",
+      "riderless",
+    )) {
+      assert.ok(still.includes(row));
+    }
+    assert.match(still, /Motion study \u00b7 snapshot \u00b7 motion off/u);
     assert.equal(
       await snapshot(project, ["--workstream", "tui-design"]),
       await snapshot(project, ["--workstream", "tui-design"]),
@@ -670,9 +687,9 @@ test("help documents TUI scope, display, motion, and snapshot flags", async () =
   assert.match(help, /true-size notice/u);
 });
 
-test("README documents the comfort TUI, create flow, and snapshot contract", async () => {
-  const readme = await readFile(
-    fileURLToPath(new URL("../../../README.md", import.meta.url)),
+test("usage guide documents the comfort TUI, create flow, and snapshot contract", async () => {
+  const guide = await readFile(
+    fileURLToPath(new URL("../../../docs/usage.md", import.meta.url)),
     "utf8",
   );
   for (const option of [
@@ -689,28 +706,27 @@ test("README documents the comfort TUI, create flow, and snapshot contract", asy
     "--height",
     "NO_COLOR",
   ]) {
-    assert.ok(readme.includes(option), `README must document ${option}`);
+    assert.ok(guide.includes(option), `usage guide must document ${option}`);
   }
-  assert.match(readme, /centers one fixed comfort card/u);
-  assert.match(readme, /With no scope flag the TUI reads the project catalogue/u);
-  assert.match(readme, /opens on\s+`Home \u00b7 Open`/u);
-  assert.match(readme, /`j`\/`k` or the arrow keys to select a workstream/u);
-  assert.match(readme, /`\/` to switch between Open and Completed/u);
-  assert.match(readme, /`n` to open the create form/u);
-  assert.match(readme, /`x` to complete an open workstream or reopen/u);
-  assert.match(readme, /Ctrl-S creates/u);
-  assert.match(readme, /`c` performs Punch Out/u);
-  assert.match(readme, /Punch Out does\s+not run the join command/u);
-  assert.match(readme, /`q` or Ctrl-C to exit/u);
-  assert.match(readme, /bare snapshot is exactly 64×28/u);
-  assert.match(readme, /below the 12×6 floor receives a true-size notice/u);
-  assert.match(readme, /refuses `TERM=dumb` or an unset `TERM`/u);
-  assert.match(readme, /interactive TUI changes\s+project state only after an explicit create submission or complete\/reopen\s+confirmation/u);
-  assert.match(readme, /complete\s+11-plate branded stride/u);
-  assert.match(readme, /Working, Waiting, and Blocked counts/u);
-  assert.match(readme, /ordered F01\/F04\/F07\/F10 contact strip/u);
-  assert.match(readme, /response-first ledger/u);
-  assert.match(readme, /`j`\/`k` accents the selected session's\s+exposure and roll rows in cyan/u);
-  assert.match(readme, /Enter confirms\s+and Escape refuses/u);
-  assert.match(readme, /Home \u00b7 Open \u00b7 snapshot/u);
+  assert.match(guide, /centers one fixed comfort card/u);
+  assert.match(guide, /With no scope flag the\s+TUI reads the project catalogue/u);
+  assert.match(guide, /opens on `Home \u00b7 Open`/u);
+  assert.match(guide, /`j`\/`k` or the arrow keys select a workstream/u);
+  assert.match(guide, /`\/` switches between Open and Completed/u);
+  assert.match(guide, /`n` opens the create form/u);
+  assert.match(guide, /`x` completes an open workstream or reopens/u);
+  assert.match(guide, /Ctrl-S\s+creates/u);
+  assert.match(guide, /`c` performs Punch Out/u);
+  assert.match(guide, /Punch Out does not\s+run the join command/u);
+  assert.match(guide, /`q` or Ctrl-C exits/u);
+  assert.match(guide, /bare snapshot is exactly 64×28/u);
+  assert.match(guide, /below the 12×6 floor receives a true-size notice/u);
+  assert.match(guide, /refuses `TERM=dumb` or an unset `TERM`/u);
+  assert.match(guide, /interactive TUI changes project state only after an\s+explicit create submission or complete\/reopen confirmation/u);
+  assert.match(guide, /Working, Waiting, and Blocked counts/u);
+  assert.match(guide, /same full horse on one fixed,\s+representative pose/u);
+  assert.match(guide, /prioritizes recent completed\s+responses/u);
+  assert.match(guide, /highlights the selected session's completed-turn and detail\s+rows/u);
+  assert.match(guide, /Enter confirms\s+and Escape refuses/u);
+  assert.match(guide, /Home \u00b7 Open \u00b7 snapshot/u);
 });

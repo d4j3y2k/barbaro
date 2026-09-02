@@ -1,4 +1,13 @@
 {
+  "_comment": [
+    "Barbaro activation template for Codex. Merge these entries into",
+    "~/.codex/hooks.json (or one project .codex/hooks.json) and replace",
+    "BARBARO_BIN with the absolute path printed by `command -v barbaro`.",
+    "Choose one scope only; matching user and project hooks both run.",
+    "The hooks remain dormant until a session explicitly invokes $barbaro.",
+    "Add .barbaro/ to Git ignore rules before use; derived records may",
+    "contain sensitive prompt, response, tool, path, and failure details."
+  ],
   "description": "Dormant Barbaro hooks. A session publishes only after the user explicitly invokes the `$barbaro` skill.",
   "hooks": {
     "SessionStart": [
@@ -6,7 +15,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "barbaro codex hook",
+            "command": "BARBARO_BIN codex hook",
             "timeout": 30,
             "async": false
           }
@@ -18,13 +27,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "barbaro codex hook",
+            "command": "BARBARO_BIN codex hook",
             "timeout": 30,
             "async": false
           },
           {
             "type": "command",
-            "command": "barbaro codex hook-ingest",
+            "command": "BARBARO_BIN codex hook-ingest",
             "timeout": 30,
             "async": true
           }
@@ -36,7 +45,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "barbaro codex hook",
+            "command": "BARBARO_BIN codex hook",
             "timeout": 30,
             "async": false
           }
@@ -48,7 +57,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "barbaro codex hook",
+            "command": "BARBARO_BIN codex hook",
             "timeout": 30,
             "async": false
           }
@@ -60,7 +69,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "barbaro codex hook",
+            "command": "BARBARO_BIN codex hook",
             "timeout": 30,
             "async": false
           }
@@ -72,7 +81,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "barbaro codex hook",
+            "command": "BARBARO_BIN codex hook",
             "timeout": 30,
             "async": false
           }
@@ -84,7 +93,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "barbaro codex hook",
+            "command": "BARBARO_BIN codex hook",
             "timeout": 30,
             "async": false
           }
@@ -96,7 +105,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "barbaro codex hook",
+            "command": "BARBARO_BIN codex hook",
             "timeout": 30,
             "async": false
           }
@@ -108,13 +117,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "barbaro codex hook",
+            "command": "BARBARO_BIN codex hook",
             "timeout": 30,
             "async": false
           },
           {
             "type": "command",
-            "command": "barbaro codex hook-ingest",
+            "command": "BARBARO_BIN codex hook-ingest",
             "timeout": 30,
             "async": true
           }
@@ -126,13 +135,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "barbaro codex hook",
+            "command": "BARBARO_BIN codex hook",
             "timeout": 30,
             "async": false
           },
           {
             "type": "command",
-            "command": "barbaro codex hook-ingest",
+            "command": "BARBARO_BIN codex hook-ingest",
             "timeout": 30,
             "async": true
           }
@@ -144,13 +153,13 @@
         "hooks": [
           {
             "type": "command",
-            "command": "barbaro codex hook",
+            "command": "BARBARO_BIN codex hook",
             "timeout": 3,
             "async": false
           },
           {
             "type": "command",
-            "command": "barbaro codex hook-ingest",
+            "command": "BARBARO_BIN codex hook-ingest",
             "timeout": 3,
             "async": false
           }

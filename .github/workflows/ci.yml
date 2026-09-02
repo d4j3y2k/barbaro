@@ -4,14 +4,15 @@ on:
   push:
     branches:
       - main
+    tags:
+      - "v*"
   pull_request:
   workflow_dispatch:
     inputs:
-      post_publish_registry_check:
-        description: Run the registry install check after a release is published
+      published_version:
+        description: Exact published version to verify; leave blank to skip the registry check
         required: false
-        default: false
-        type: boolean
+        type: string
 
 permissions:
   contents: read
@@ -48,6 +49,9 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Check release metadata
+        run: npm run check:release
 
       - name: Typecheck
         run: npm run typecheck
@@ -151,7 +155,7 @@ jobs:
 
   post-publish-registry-install:
     name: Post-publish registry install / Node ${{ matrix.node }}
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.post_publish_registry_check }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.published_version != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     strategy:
@@ -170,17 +174,19 @@ jobs:
       - name: Install and smoke-test the published CLI
         shell: bash
         env:
+          EXPECTED_VERSION: ${{ inputs.published_version }}
           HOME: ${{ runner.temp }}/barbaro-registry/home
           npm_config_cache: ${{ runner.temp }}/barbaro-registry/cache
           npm_config_userconfig: ${{ runner.temp }}/barbaro-registry/npmrc
           npm_config_prefix: ${{ runner.temp }}/barbaro-registry/prefix
         run: |
           mkdir -p "${HOME}" "${npm_config_cache}" "${npm_config_prefix}"
-          npm install --global barbaro
+          npm install --global "barbaro@${EXPECTED_VERSION}"
           "${npm_config_prefix}/bin/barbaro" --help > "${RUNNER_TEMP}/barbaro-registry-help.txt"
           test -s "${RUNNER_TEMP}/barbaro-registry-help.txt"
-          expected_version="$(node -p \
+          installed_version="$(node -p \
             'require(process.argv[1]).version' \
             "${npm_config_prefix}/lib/node_modules/barbaro/package.json")"
           actual_version="$("${npm_config_prefix}/bin/barbaro" --version)"
-          test "${actual_version}" = "${expected_version}"
+          test "${installed_version}" = "${EXPECTED_VERSION}"
+          test "${actual_version}" = "${EXPECTED_VERSION}"

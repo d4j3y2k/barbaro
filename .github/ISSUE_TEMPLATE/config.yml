@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Private security report
+    url: https://github.com/d4j3y2k/barbaro/security/advisories/new
+    about: Report vulnerabilities and other security-sensitive findings privately.

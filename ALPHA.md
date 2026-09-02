@@ -14,8 +14,11 @@ high-assurance workflows.
 - The v1 interchange schemas are the current normative contract, but the CLI,
   hook configuration, setup flow, and undocumented implementation files may
   change between prereleases.
-- CI currently covers macOS and Linux with supported Node.js releases. Windows
+- CI currently covers macOS and Linux with Node.js 22, 24, and 26. Windows
   behavior is not verified.
+- Coordination state is per checkout. Two Git worktrees have separate
+  `.barbaro/` stores and workstream namespaces; a workstream cannot currently
+  span them.
 - Barbaro coordinates processes that share a trusted local project. It is not a
   distributed coordination service or a boundary between mutually untrusted
   users.

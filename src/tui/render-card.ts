@@ -26,7 +26,6 @@ import {
   brandedHeroHorseFrame,
   horseFrame,
 } from "./horse.js";
-import { stripRows56, stripRows64 } from "./strip.js";
 import type {
   BootTextView,
   BootView,
@@ -342,13 +341,6 @@ function workingRows(
     for (const artRow of plate) {
       rows.push(`${" ".repeat(offset)}${artRow}`);
     }
-  } else if (horse.kind === "strip") {
-    rows.push("");
-    const strip = card.tier === "comfort" ? stripRows64() : stripRows56();
-    rows.push(...strip);
-    rows.push("");
-    rows.push(centerCells(horse.caption, anatomy.interiorCells));
-    rows.push("");
   } else {
     const blank = Math.floor((COMPACT_HORSE_ROWS - 1) / 2);
     for (let row = 0; row < blank; row += 1) rows.push("");

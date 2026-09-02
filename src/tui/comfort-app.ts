@@ -2183,15 +2183,16 @@ export async function runComfortTui(
         title: "No film loaded",
         lines: [
           "No film loaded",
-          "This project has no Barbaro store yet.",
-          "A provider hook creates one when a session joins.",
+          "Press n to create this project's first workstream.",
+          "That establishes Barbaro here.",
+          "Creation enrolls no sessions.",
         ],
       },
       bench: [
         `Project · ${basename(projectRoot)} · root ${projectRoot}`,
         "Nothing was created by looking.",
       ],
-      keyLine: "r refresh · q quit",
+      keyLine: "n new workstream · r refresh · q quit",
     };
   }
 
@@ -2470,6 +2471,9 @@ export async function runComfortTui(
       return "Esc home · r refresh · q quit";
     }
     if (card?.tier === "text" && mode.kind === "home" && create === undefined) {
+      if (model.health?.presence === "absent") {
+        return "n new workstream · r refresh · q quit";
+      }
       const toggle = `/ ${homeFilter === "open" ? "completed" : "open"}`;
       return `${toggle} · r refresh · q quit`;
     }

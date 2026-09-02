@@ -4,7 +4,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { measureCells } from "../../src/tui/cells.js";
-import { stripRows64 } from "../../src/tui/strip.js";
+import {
+  horseFrame,
+  HORSE_STANDARD_FRAME_INDEX,
+} from "../../src/tui/horse.js";
 
 /**
  * Gate 1: the index, this validator, and the fixture directory name the
@@ -23,7 +26,7 @@ export const FIXTURE_INDEX = [
   "create-success-punched-64x28.txt",
   "dashboard-idle-56x22.txt",
   "dashboard-idle-64x28.txt",
-  "dashboard-once-strip-64x28.txt",
+  "dashboard-once-still-64x28.txt",
   "dashboard-working-56x22.txt",
   "dashboard-working-64x28.txt",
   "help-64x28.txt",
@@ -87,11 +90,15 @@ test("fixture footers never advertise bare refresh, help, or motion keys", async
   }
 });
 
-test("the checked-in strip asset is byte-identical to its keyframe", async () => {
+test("the checked-in snapshot carries the standard complete horse still", async () => {
   const lines = fixtureLines(
-    await readFixture("dashboard-once-strip-64x28.txt"),
+    await readFixture("dashboard-once-still-64x28.txt"),
   );
-  // Card rows 6-10 are the label row and four art rows inside the walls.
-  const interior = lines.slice(5, 10).map((line) => line.slice(1, 63));
-  assert.deepEqual(stripRows64(), interior);
+  const interior = lines.slice(4, 12).map((line) => line.slice(1, 63));
+  assert.deepEqual(
+    interior,
+    horseFrame(HORSE_STANDARD_FRAME_INDEX, "compact", "riderless").map(
+      (row) => `${" ".repeat(13)}${row}${" ".repeat(13)}`,
+    ),
+  );
 });

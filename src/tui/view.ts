@@ -31,7 +31,6 @@ export interface HubFrameView {
 
 export type HorseView =
   | { readonly kind: "gallop"; readonly frameIndex: number }
-  | { readonly kind: "strip"; readonly caption: string }
   | { readonly kind: "intertitle"; readonly text: string };
 
 /** The standalone launch title: identity plus measured first-read telemetry. */

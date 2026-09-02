@@ -10,5 +10,4 @@ export * from "./once.js";
 export * from "./punch.js";
 export * from "./reduce.js";
 export * from "./render-card.js";
-export * from "./strip.js";
 export * from "./view.js";

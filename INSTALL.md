@@ -1,14 +1,16 @@
 # Install Barbaro
 
 Barbaro requires Node.js 22 or newer. The npm registry package is the canonical
-installation path and installs a normal npm-managed `barbaro` executable on
-`PATH` without running a build during installation.
+installation path and installs a normal npm-managed `barbaro` executable into
+npm's global bin directory without running a build. That directory must already
+be on `PATH`.
 
 ## Install from npm
 
 ```sh
 npm install --global barbaro
 barbaro --version
+command -v barbaro
 ```
 
 ## Install a GitHub release asset
@@ -18,40 +20,44 @@ separate SHA-256 checksum asset:
 
 ```sh
 curl --fail --location --remote-name \
-  https://github.com/d4j3y2k/barbaro/releases/download/v0.1.0-alpha.3/barbaro-0.1.0-alpha.3.tgz
+  https://github.com/d4j3y2k/barbaro/releases/download/v0.1.0-alpha.4/barbaro-0.1.0-alpha.4.tgz
 curl --fail --location --remote-name \
-  https://github.com/d4j3y2k/barbaro/releases/download/v0.1.0-alpha.3/barbaro-0.1.0-alpha.3.tgz.sha256
+  https://github.com/d4j3y2k/barbaro/releases/download/v0.1.0-alpha.4/barbaro-0.1.0-alpha.4.tgz.sha256
 ```
 
 Run the checksum command for your platform:
 
 ```sh
-sha256sum --check barbaro-0.1.0-alpha.3.tgz.sha256
+sha256sum --check barbaro-0.1.0-alpha.4.tgz.sha256
 ```
 
 On macOS, use:
 
 ```sh
-shasum -a 256 --check barbaro-0.1.0-alpha.3.tgz.sha256
+shasum -a 256 --check barbaro-0.1.0-alpha.4.tgz.sha256
 ```
 
 Then install the verified local archive:
 
 ```sh
-npm install --global ./barbaro-0.1.0-alpha.3.tgz
+npm install --global ./barbaro-0.1.0-alpha.4.tgz
 barbaro --version
 ```
 
 The `github:d4j3y2k/barbaro#<tag>` source-install form is intentionally
 unsupported. In particular, do not use
-`npm install --global github:d4j3y2k/barbaro#v0.1.0-alpha.3`: Git source tags do
+`npm install --global github:d4j3y2k/barbaro#v0.1.0-alpha.4`: Git source tags do
 not contain the ignored `dist/` output, and rebuilding development sources at
 install time is not part of Barbaro's release contract. Use the registry or the
 built release tarball instead.
 
 ## Install the opt-in skills
 
-Locate the shipped package and copy its skills to user scope:
+Choose either user scope or project scope for each provider, not both. Matching
+hooks installed at both scopes run twice, and duplicate skill copies make it
+unclear which definition a session used.
+
+For a user-scoped installation, locate the shipped package and copy its skills:
 
 ```sh
 BARBARO_PACKAGE="$(npm root --global)/barbaro"
@@ -65,9 +71,9 @@ cp -R "$BARBARO_PACKAGE/.claude/skills/barbaro-watch/." "$HOME/.claude/skills/ba
 ```
 
 For a project-local installation, use `.agents/skills/` and `.claude/skills/`
-under the target project instead. Installing skills and hooks does not enroll a
-session: every Codex or Claude Code session stays dormant until the user invokes
-the shipped Barbaro skill.
+under the target project instead and skip the user-scoped copies above.
+Installing skills and hooks does not enroll a session: every Codex or Claude
+Code session stays dormant until the user invokes the shipped Barbaro skill.
 
 ## Install hooks
 
@@ -76,19 +82,26 @@ Before enabling hooks, add `.barbaro/` either to the target project's
 coordination data can contain sensitive request, response, tool, path, and
 failure excerpts.
 
+Resolve the installed executable first:
+
+```sh
+command -v barbaro
+```
+
 Merge the applicable template from the installed package into the existing
-configuration at the same scope as the skills:
+configuration at the same scope as the skills. In either template, replace
+`BARBARO_BIN` with the absolute path printed above:
 
 - Codex: merge `examples/codex-hooks.json` into `$HOME/.codex/hooks.json` or
   the target project's `.codex/hooks.json`.
 - Claude Code: merge `examples/claude-hooks.json` into
   `$HOME/.claude/settings.json` or the target project's
-  `.claude/settings.json`, replacing `BARBARO_BIN` with the absolute path from
-  `command -v barbaro`.
+  `.claude/settings.json`.
 
-Append to existing hook arrays; do not overwrite other tools' hooks. Restart the
-provider if newly installed skills do not appear, then inspect its installed
-skills and hooks before using them.
+Append to existing hook arrays; do not overwrite other tools' hooks or register
+Barbaro at both user and project scope. Restart the provider if newly installed
+skills do not appear, then inspect its installed skills and hooks before using
+them.
 
 Read the [public-alpha limitations](ALPHA.md) and
 [security policy](SECURITY.md) before enabling coordination. Barbaro does not

@@ -72,15 +72,17 @@ structured report stays the source of truth for any wrapper.
 A stale view is reported as stale, never as current: treat it as *no* peer
 context rather than as peer context that happens to be old.
 
-## Parallel actors in this checkout
+## Parallel actors and checkout boundaries
 
-This working copy is a Git repository. Give concurrent actors separate
-worktrees when practical; separate branches in one shared working tree do not
-isolate filesystem writes. When actors share this checkout, disjoint ownership
-and live peer context remain required:
+Choose the boundary deliberately. Separate worktrees isolate filesystem writes
+but are separate Barbaro projects: they do not share a `.barbaro/` store,
+workstream, context, or advisory claims. Actors that need Barbaro coordination
+must use this same checkout and protect it with disjoint path ownership. A
+branch name alone never isolates filesystem writes.
 
-1. **Isolate the checkout when possible.** Use one worktree and branch per
-   actor. Never treat a branch name alone as filesystem isolation.
+1. **Pick isolation or one shared coordination store.** Use a worktree and
+   branch per actor when filesystem isolation matters more than shared Barbaro
+   context. Use one checkout only when the actors need the same workstream.
 2. **One lane per actor.** Every prompt states the paths the actor owns *and*
    the paths it must not touch. Two actors never own the same path.
 3. **Leases are advisory.** `.barbaro/active/` is a snapshot with an expiry,
@@ -168,15 +170,31 @@ Before planning any work:
 2. **Read the bounded turns.** Inspect the newest projected turns per session,
    including their sequence, timing, outcome, and touched paths. Honor every
    `shown` / `total` count rather than assuming the projection is complete.
+   Context is a bounded attention view whose per-session window can omit older
+   turns even when shown equals total. Use the exhaustive index whenever
+   completeness or absence matters; any rendered content with
+   `truncated.projection: true`, `turns.shown < turns.total`, or a nudge count
+   above what context showed requires exact retrieval.
 3. **Stay inside the byte budget.** The top-level `byte_budget` and `utf8_bytes`
    make the render limit explicit. Increase it deliberately when necessary.
-4. **Never print canonical JSONL as a shortcut.** Canonical feed and evidence
-   stay complete on disk; the reader projects them without rewriting them. One
-   busy turn can exceed an entire context budget on its own.
-5. **Open evidence on demand only.** Follow an `evidence_ref` needed for the
-   task, never scan the whole evidence directory into context.
+4. **Escalate through supported readers.** Run `barbaro turn list` in the same
+   scope, then `barbaro turn show <turn_id> --field response`; follow each
+   `next_cursor` with `--cursor`. `turn show` also pages exact `record`,
+   `request`, and `actions` fields. If a page reports
+   `representation: "json-string"`, concatenate all page text and JSON-parse it
+   once.
+5. **Open evidence on demand only.** Follow a needed `evidence_ref` with
+   `barbaro evidence show`, using its exact `record`, `content`, `request`,
+   `response`, or `actions` field when the bounded projection is insufficient.
+   Never read or print `.barbaro/**/*.jsonl` directly.
 6. **Restate before editing.** Say what peer activity you observed and what
    your exact file scope is, then run `barbaro context` again before each edit.
+
+Within the readers' exposed `--max-file-bytes` and `--max-record-bytes` limits,
+lossless retrieval means every byte of a canonical Barbaro turn plus its
+referenced canonical evidence remains reachable through those commands. Raise
+the limits deliberately for larger stores or records. This does not claim that
+provider-raw fields or records omitted during adapter mapping are present.
 
 ## Reading a doctor report
 

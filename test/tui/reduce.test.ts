@@ -12,6 +12,7 @@ import type {
   ReaderTurnSummary,
 } from "../../src/reader/types.js";
 import type { ReaderUnreadSummary } from "../../src/reader/unread.js";
+import { HORSE_STANDARD_FRAME_INDEX } from "../../src/tui/horse.js";
 import {
   clockHHMM,
   compactAge,
@@ -1088,10 +1089,13 @@ test("a working lease gallops; motion policy chooses the treatment", () => {
     motionOff: true,
   });
   if (snapshot.frame.kind === "working") {
-    assert.equal(snapshot.frame.title, "Motion study · snapshot");
+    assert.equal(
+      snapshot.frame.title,
+      "Motion study · snapshot · motion off",
+    );
     assert.deepEqual(snapshot.frame.horse, {
-      kind: "strip",
-      caption: "Working at snapshot · motion off",
+      kind: "gallop",
+      frameIndex: HORSE_STANDARD_FRAME_INDEX,
     });
     assert.deepEqual(snapshot.frame.rolls.map((row) => row.detail), [
       "Working",

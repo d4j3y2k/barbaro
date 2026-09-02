@@ -38,8 +38,8 @@ export const ONCE_DEFAULT_HEIGHT = COMFORT_CARD.height;
  * `--once` (§8): one pinned reader snapshot, one reference time, and a
  * deterministic byte-for-byte composition. No ANSI, OSC 52, clipboard
  * discovery, cursor commands, alternate screen, terminal probing, phase
- * clock, or live wording appears; a working art tier always carries the
- * ordered labeled F01/F04/F07/F10 strip, `--no-motion` included.
+ * clock, or live wording appears; a working art tier carries one fixed,
+ * full-size horse pose so repeated snapshots remain byte-identical.
  */
 
 export interface OnceReaders {

@@ -470,7 +470,22 @@ test("an absent store is the No film loaded screen and reads no catalogue", asyn
   await completeBoot(harness);
   const frame = harness.writes.join("");
   assert.match(frame, /No film loaded/u);
+  assert.match(frame, /Press n to create this project's first workstream\./u);
+  assert.match(frame, /That establishes Barbaro here\./u);
+  assert.match(frame, /Creation enrolls no sessions\./u);
+  assert.match(frame, /n new workstream · r refresh · q quit/u);
   assert.equal(harness.counters.catalogue, 0);
+
+  harness.resize(40, 12);
+  assert.match(
+    harness.writes.at(-1)!,
+    /n new workstream · r refresh · q quit/u,
+  );
+
+  harness.resize(64, 28);
+  harness.feed("n");
+  assert.match(harness.writes.at(-1)!, /New workstream/u);
+  assert.match(harness.writes.at(-1)!, /Ctrl-S create/u);
   harness.feed("\u0003");
   assert.equal(await run, 0);
 });

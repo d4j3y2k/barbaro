@@ -71,6 +71,7 @@ try {
     "README.md",
     "INSTALL.md",
     "ALPHA.md",
+    "CONTRIBUTING.md",
     "SECURITY.md",
     "LICENSE",
     "dist/src/cli.js",
@@ -261,6 +262,7 @@ async function verifyPackagedDocumentation(installedPackage) {
     "README.md",
     "INSTALL.md",
     "ALPHA.md",
+    "CONTRIBUTING.md",
     "SECURITY.md",
     ...trackedDocs,
   ]) {

@@ -4,7 +4,7 @@ Sanitized, structurally faithful Claude Code JSONL traces for the Claude provide
 
 **Sanitized** means: synthetic content, no real paths, prompts, credentials, or file bodies. Every
 field name, envelope shape, nesting, and directory layout matches production traces as measured in
-[`../../docs/claude-code-jsonl-schema.md`](../../docs/claude-code-jsonl-schema.md). Content that is
+[`../../../docs/claude-code-jsonl-schema.md`](../../../docs/claude-code-jsonl-schema.md). Content that is
 never copied into Barbaro is present but stubbed (`REDACTED-THINKING-CONTENT`, `REDACTED-FILE-BODY`,
 `REDACTED-SIGNATURE`) so the adapter still exercises its exclusion paths.
 

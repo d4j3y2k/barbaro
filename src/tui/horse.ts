@@ -11,6 +11,8 @@ const CLEAR_SCREEN = "\u001b[H\u001b[2J";
 
 export const HORSE_FRAME_INTERVAL_MS = 100;
 export const HORSE_FRAME_COUNT = HORSE_HERO_FRAMES.length;
+/** The clearest full horse pose for static and reduced-motion presentations. */
+export const HORSE_STANDARD_FRAME_INDEX = 6;
 export const HORSE_BRAND_WORDMARK = "b a r b a r o";
 export const RIDERLESS_SOURCE_CAPTION =
   "SALLIE GARDNER · 1878 · RIDER REMOVED FROM SOURCE";

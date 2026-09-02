@@ -113,38 +113,31 @@ test("the watcher skill distinguishes external wake from cursor nudges", async (
 });
 
 test("README and INSTALL pin the public installation contract", async () => {
-  const [readme, install] = await Promise.all([
+  const [readme, install, contributing, horseStudy] = await Promise.all([
     readFile("README.md", "utf8"),
     readFile("INSTALL.md", "utf8"),
+    readFile("CONTRIBUTING.md", "utf8"),
+    readFile("docs/horse-study.md", "utf8"),
   ]);
   const readmeInstall = readme.match(
-    /^## Install$[\s\S]+?(?=^## Cowork quickstart:)/mu,
+    /^## Install$[\s\S]+?(?=^## Quick start$)/mu,
   )?.[0];
 
   assert.ok(readmeInstall, "README must put Install before the quickstart");
   assert.match(readmeInstall, /\[`INSTALL\.md`\]\(INSTALL\.md\)/u);
   assert.match(readmeInstall, /^npm install --global barbaro$/mu);
   assert.doesNotMatch(readmeInstall, /barbaro@alpha/u);
-  assert.match(readmeInstall, /barbaro-0\.1\.0-alpha\.3\.tgz/u);
-  assert.match(readmeInstall, /barbaro-0\.1\.0-alpha\.3\.tgz\.sha256/u);
+  assert.doesNotMatch(readmeInstall, /barbaro-0\.1\.0-alpha/u);
+  assert.match(readme, /\[alpha limitations\]\(ALPHA\.md\)/u);
+  assert.match(readme, /\[security policy\]\(SECURITY\.md\)/u);
+  assert.doesNotMatch(readme, /npm link/u);
   assert.match(
-    readmeInstall,
-    /`github:d4j3y2k\/barbaro#<tag>`[\s\S]+intentionally unsupported/u,
-  );
-  assert.match(readmeInstall, /\[public-alpha limitations\]\(ALPHA\.md\)/u);
-  assert.match(readmeInstall, /\[security policy\]\(SECURITY\.md\)/u);
-
-  const readmeMaintainerIndex = readme.indexOf(
-    "## Maintainer-only checkout development",
-  );
-  assert.notEqual(readmeMaintainerIndex, -1);
-  assert.doesNotMatch(readme.slice(0, readmeMaintainerIndex), /npm link/u);
-  assert.doesNotMatch(readme.slice(0, readmeMaintainerIndex), /npm run build/u);
-  assert.match(readme.slice(readmeMaintainerIndex), /^npm link$/mu);
-  assert.match(
-    readme,
+    horseStudy,
     /npm --prefix "\$\(npm root --global\)\/barbaro" run study:horse/u,
   );
+  assert.match(contributing, /^npm ci$/mu);
+  assert.match(contributing, /^npm run typecheck$/mu);
+  assert.match(contributing, /^npm test$/mu);
 
   const registryIndex = install.indexOf("npm install --global barbaro");
   const assetIndex = install.indexOf("## Install a GitHub release asset");
@@ -157,14 +150,17 @@ test("README and INSTALL pin the public installation contract", async () => {
   assert.doesNotMatch(install, /barbaro@alpha/u);
   assert.match(
     install,
-    /releases\/download\/v0\.1\.0-alpha\.3\/barbaro-0\.1\.0-alpha\.3\.tgz/u,
+    /releases\/download\/v0\.1\.0-alpha\.4\/barbaro-0\.1\.0-alpha\.4\.tgz/u,
   );
-  assert.match(install, /^npm install --global \.\/barbaro-0\.1\.0-alpha\.3\.tgz$/mu);
-  assert.match(install, /barbaro-0\.1\.0-alpha\.3\.tgz\.sha256/u);
+  assert.match(install, /^npm install --global \.\/barbaro-0\.1\.0-alpha\.4\.tgz$/mu);
+  assert.match(install, /barbaro-0\.1\.0-alpha\.4\.tgz\.sha256/u);
   assert.match(
     install,
-    /github:d4j3y2k\/barbaro#v0\.1\.0-alpha\.3[\s\S]+source tags do\s+not contain/u,
+    /github:d4j3y2k\/barbaro#v0\.1\.0-alpha\.4[\s\S]+source tags do\s+not contain/u,
   );
+  assert.match(install, /^command -v barbaro$/mu);
+  assert.match(install, /Choose either user scope or project scope/u);
+  assert.match(install, /replace\s+`BARBARO_BIN` with the absolute path/u);
   assert.match(install, /\[public-alpha limitations\]\(ALPHA\.md\)/u);
   assert.match(install, /\[security policy\]\(SECURITY\.md\)/u);
   assert.doesNotMatch(install.slice(0, maintainerIndex), /npm link/u);
@@ -176,47 +172,47 @@ test("README and INSTALL pin the public installation contract", async () => {
   );
 });
 
-test("README documents consent-gated, workstream-scoped await", async () => {
-  const readme = await readFile("README.md", "utf8");
-  assert.match(readme, /barbaro await/u);
-  assert.match(readme, /stable `--self <ses_id>`/u);
-  assert.match(readme, /observes the joined session's hook-owned unread cursor/u);
-  assert.match(readme, /cursor always belongs to the\s+session's current workstream/u);
-  assert.match(readme, /default timeout is 600000 ms/u);
-  assert.match(readme, /hard\s+cap is 3600000 ms/u);
-  assert.match(readme, /returns\s+immediately when peer turns are already unread/u);
-  assert.match(readme, /Every peer turn counts/u);
-  assert.match(readme, /command is read-only/u);
-  assert.match(readme, /concurrent waits[\s\S]+cannot consume or hide/u);
-  assert.match(readme, /refuses identity-less,\s+all-workstream, and foreign-workstream reads/u);
+test("usage guide documents consent-gated, workstream-scoped await", async () => {
+  const guide = await readFile("docs/usage.md", "utf8");
+  assert.match(guide, /barbaro await/u);
+  assert.match(guide, /stable\s+`--self <ses_id>`/u);
+  assert.match(guide, /observes the joined session's hook-owned unread cursor/u);
+  assert.match(guide, /cursor always belongs to the session's\s+current workstream/u);
+  assert.match(guide, /default timeout is 600000 ms/u);
+  assert.match(guide, /hard cap is 3600000\s+ms/u);
+  assert.match(guide, /returns\s+immediately when peer turns are already unread/u);
+  assert.match(guide, /Every peer turn counts/u);
+  assert.match(guide, /bounded, read-only cursor observer/u);
+  assert.match(guide, /Concurrent waits[\s\S]+cannot consume or hide/u);
+  assert.match(guide, /refuses identity-less, all-workstream, and\s+foreign-workstream reads/u);
 });
 
-test("README teaches the gated Codex-builder and Claude-reviewer loop", async () => {
-  const readme = await readFile("README.md", "utf8");
-  const quickstart = readme.match(
-    /^## Cowork quickstart:[\s\S]+?(?=^## Maintainer-only checkout development$)/mu,
-  )?.[0];
+test("the optional guide teaches the gated builder-reviewer loop", async () => {
+  const [readme, workflow] = await Promise.all([
+    readFile("README.md", "utf8"),
+    readFile("docs/gated-review.md", "utf8"),
+  ]);
 
-  assert.ok(quickstart, "README must include the cowork quickstart");
-  assert.match(quickstart, /barbaro workstream new alpha-demo/u);
-  assert.match(quickstart, /Codex Desktop, switch the composer to Goal mode/u);
-  assert.match(quickstart, /Goal mode belongs to Codex, not Barbaro/u);
-  assert.match(quickstart, /^\$barbaro join alpha-demo /mu);
-  assert.match(quickstart, /^\/barbaro join alpha-demo /mu);
-  assert.match(quickstart, /^\/barbaro-watch$/mu);
-  assert.match(quickstart, /runs exactly one\s+cursor observer/u);
-  assert.match(quickstart, /resume the same execution/u);
-  assert.match(quickstart, /run exactly one context read/u);
-  assert.match(quickstart, /pending review is `WAITING`, never `BLOCKED`/u);
-  assert.match(quickstart, /^PLAN REQUEST v1:/mu);
-  assert.match(quickstart, /^CHECKPOINT 1:/mu);
-  assert.match(quickstart, /^DONE:/mu);
-  assert.match(quickstart, /verdict turn must begin at byte zero/u);
+  assert.match(workflow, /Goal mode belongs to Codex/u);
+  assert.match(workflow, /not a Barbaro command or requirement/u);
+  assert.match(workflow, /^\$barbaro join api-cleanup /mu);
+  assert.match(workflow, /^\/barbaro join api-cleanup /mu);
+  assert.match(workflow, /\/barbaro-watch/u);
+  assert.match(workflow, /runs exactly one cursor observer/u);
+  assert.match(workflow, /resume it rather than launching a replacement/u);
+  assert.match(workflow, /run one context read/u);
+  assert.match(workflow, /pending review is `WAITING`, not\s+`BLOCKED`/u);
+  assert.match(workflow, /^PLAN REQUEST v1:/mu);
+  assert.match(workflow, /^CHECKPOINT 1:/mu);
+  assert.match(workflow, /^DONE: <commits>$/mu);
+  assert.doesNotMatch(workflow, /DONE: <commits and tag>/u);
+  assert.match(workflow, /begins at byte zero/u);
 
-  assert.match(readme, /^### Platform availability$/mu);
-  assert.match(readme, /Codex Desktop is Barbaro's first-class Codex environment/u);
-  assert.match(readme, /only\s+on iOS or in the cloud is not visible/u);
-  assert.match(readme, /rollout\s+lands locally/u);
+  assert.match(readme, /^## Availability and boundaries$/mu);
+  assert.match(readme, /Codex Desktop is the first-class Codex environment/u);
+  assert.match(readme, /only on iOS or in\s+the cloud is invisible/u);
+  assert.match(readme, /rollout lands locally/u);
+  assert.match(readme, /Cross-worktree workstreams are not supported/u);
 });
 
 test("nudge RFC records cursor ownership and the watch-only echo limitation", async () => {

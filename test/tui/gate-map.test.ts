@@ -74,7 +74,7 @@ const GATE_MAP: readonly GateEntry[] = [
   },
   {
     gate: 6,
-    claim: "live cards use the complete 36x8 plate; statics use the strip",
+    claim: "live and static working cards use a complete 36x8 horse plate",
     coveredBy: [
       {
         file: "test/tui/render-golden.test.ts",
@@ -86,7 +86,7 @@ const GATE_MAP: readonly GateEntry[] = [
       },
       {
         file: "test/tui/fixtures.test.ts",
-        test: "the checked-in strip asset is byte-identical to its keyframe",
+        test: "the checked-in snapshot carries the standard complete horse still",
       },
     ],
   },
@@ -124,11 +124,15 @@ const GATE_MAP: readonly GateEntry[] = [
   },
   {
     gate: 9,
-    claim: "same inputs produce byte-identical --once output with the strip",
+    claim: "same inputs produce byte-identical --once output with the fixed still",
     coveredBy: [
       {
         file: "test/tui/cli.test.ts",
         test: "tui --once resolves workstream names and IDs and scopes the reader",
+      },
+      {
+        file: "test/tui/render-golden.test.ts",
+        test: "dashboard-once-still-64x28 renders byte-identically",
       },
     ],
   },
@@ -414,7 +418,7 @@ test("no keyframe canvas carries banned chrome (gate 4)", async () => {
     "create-success-64x28.txt",
     "create-success-punched-64x28.txt",
     "create-success-no-clipboard-64x28.txt",
-    "dashboard-once-strip-64x28.txt",
+    "dashboard-once-still-64x28.txt",
     "dashboard-working-56x22.txt",
     "help-64x28.txt",
   ];

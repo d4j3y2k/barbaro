@@ -11,6 +11,7 @@ import type {
 import type { ReaderUnreadSummaryReady } from "../reader/unread.js";
 
 import { clipWords } from "./cells.js";
+import { HORSE_STANDARD_FRAME_INDEX } from "./horse.js";
 import type {
   ExposureRowView,
   FrameView,
@@ -340,7 +341,7 @@ export function reduceDashboard(
         kind: "working",
         title:
           motion.kind === "snapshot"
-            ? "Motion study · snapshot"
+            ? `Motion study · snapshot${motion.motionOff ? " · motion off" : ""}`
             : motion.kind === "paused"
               ? "Motion study · paused"
               : "Motion study",
@@ -440,10 +441,8 @@ function horseView(motion: MotionPolicy): HorseView {
       return { kind: "intertitle", text: "Working · motion off" };
     case "snapshot":
       return {
-        kind: "strip",
-        caption: motion.motionOff
-          ? "Working at snapshot · motion off"
-          : "Working at snapshot",
+        kind: "gallop",
+        frameIndex: HORSE_STANDARD_FRAME_INDEX,
       };
   }
 }
