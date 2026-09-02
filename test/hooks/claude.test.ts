@@ -388,6 +388,33 @@ test("a shell command declares unknown write scope instead of inventing paths", 
   assert.equal(lease.current_action?.command?.text, "rm -rf build && npm run build");
 });
 
+test("lossless reader commands are known read-only shell activity", async () => {
+  const cases = [
+    ["barbaro turn list --all-workstreams", false],
+    [`barbaro turn show turn_${"1".repeat(32)} --field response`, false],
+    [
+      `barbaro evidence show ev_${"2".repeat(32)} --provider claude --session-id ses_${"3".repeat(32)}`,
+      false,
+    ],
+    ["barbaro turn list | jq .value", true],
+    ["barbaro workstream new mutating-lane", true],
+  ] as const;
+
+  for (const [command, unknownWriteScope] of cases) {
+    const { root, store } = await project();
+    await handleClaudeHook({
+      hook_event_name: "PreToolUse",
+      session_id: SESSION,
+      cwd: root,
+      tool_name: "Bash",
+      tool_input: { command },
+    });
+    const lease = await store.readSnapshot(identity());
+    assert.equal(lease?.unknown_write_scope, unknownWriteScope, command);
+    assert.deepEqual(lease?.claims, [], command);
+  }
+});
+
 test("an await command waits without claims until its tool batch settles", async () => {
   const { root, store } = await project();
   await handleClaudeHook({

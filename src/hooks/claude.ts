@@ -1145,6 +1145,7 @@ function describeToolScope(
   if (toolName === "Bash") {
     const command = stringValue(toolInput.command) ?? "";
     const awaitCommand = classifyAwaitCommand(command);
+    const digestExcludedCommand = isDigestExcludedBarbaroCommand(command);
     const contextCommand = isLeadingBarbaroContextCommand(command);
     return {
       action: {
@@ -1156,8 +1157,7 @@ function describeToolScope(
       // requires saying so rather than inventing paths.
       claims: [],
       unknownWriteScope:
-        awaitCommand === undefined &&
-        !(contextCommand && isDigestExcludedBarbaroCommand(command)),
+        awaitCommand === undefined && !digestExcludedCommand,
       ...(awaitCommand === undefined ? {} : { awaitCommand }),
       ...(contextCommand ? { contextCommand: true } : {}),
     };

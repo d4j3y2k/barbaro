@@ -102,8 +102,11 @@ test("the bounded context preflight states every limit it enforces", () => {
   assert.match(text, /barbaro turn show <turn_id> --field response/);
   assert.match(text, /barbaro turn show <turn_id> --field record/);
   assert.match(text, /barbaro evidence show/);
-  assert.match(text, /Never read or print `\.barbaro\/\*\.jsonl` directly/);
+  assert.match(text, /Never read or print `\.barbaro\/\*\*\/\*\.jsonl` directly/);
+  assert.match(text, /initial `barbaro context` attention view/);
+  assert.match(text, /exhaustive turn and evidence retrieval remains available/);
   assert.match(text, /every canonical turn byte/);
+  assert.match(text, /exposed file and record limits/);
   assert.match(text, /provider-native fields or records omitted during adapter mapping/);
   assert.match(text, /barbaro context/);
   assert.match(text, new RegExp(PEER_CONTEXT_AUTOMATION_MILESTONE));

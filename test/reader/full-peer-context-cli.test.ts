@@ -39,6 +39,11 @@ interface TurnListValue {
   readonly schema: "barbaro.reader.turn-list.v1";
   readonly complete: boolean;
   readonly range: { readonly start: number; readonly end: number };
+  readonly diagnostics: {
+    readonly malformed_feed_records: number;
+    readonly invalid_feed_records: number;
+    readonly skipped_oversized_feed_files: number;
+  };
   readonly turns: {
     readonly shown: number;
     readonly total: number;
@@ -57,6 +62,8 @@ interface ExactPageValue {
   readonly sha256: string;
   readonly complete: boolean;
   readonly next_cursor?: string;
+  readonly representation?: "json-string";
+  readonly diagnostics?: { readonly skipped_oversized_feed_files: number };
 }
 
 interface CliFailure extends Error {
@@ -822,4 +829,147 @@ test("built CLI keeps projected evidence action paging and makes both evidence k
   assert.deepEqual(await readFile(fixture.evidencePath), initialEvidence);
   assert.deepEqual(await readFile(fixture.nudgeCursorPath), initialNudgeCursor);
   await assert.rejects(access(fixture.absentNudgeCursorPath), { code: "ENOENT" });
+});
+
+test("built CLI exposes bounded reader limits without letting unrelated feeds block turn retrieval", async (t) => {
+  const project = await mkdtemp(join(tmpdir(), "barbaro-full-peer-cli-limits-"));
+  t.after(() => rm(project, { recursive: true, force: true }));
+
+  const target = turn({
+    seed: 800,
+    provider: "codex",
+    sessionId: CODEX_SESSION,
+    workstreamId: `ws_${"8".repeat(32)}`,
+    sequence: 1,
+    endedAt: "2026-09-01T14:00:00.000Z",
+    responseText: "target \ud800 😀 ".repeat(500),
+  });
+  await appendTurn(project, target);
+  const targetRecordBytes = Buffer.byteLength(stableStringify(target), "utf8");
+  const targetFileBytes = Buffer.byteLength(stableJsonLine(target), "utf8");
+  await appendTurn(
+    project,
+    turn({
+      seed: 801,
+      provider: "claude",
+      sessionId: CLAUDE_SESSION,
+      workstreamId: target.workstream_id!,
+      sequence: 1,
+      endedAt: "2026-09-01T14:01:00.000Z",
+      responseText: "unrelated oversized ".repeat(targetFileBytes),
+    }),
+  );
+
+  const limitArgs = [
+    "--max-file-bytes",
+    String(targetFileBytes),
+    "--max-record-bytes",
+    String(targetRecordBytes),
+  ];
+  const listed = await invokeJson<TurnListValue>(project, [
+    "turn",
+    "list",
+    "--all-workstreams",
+    "--byte-budget",
+    "5000",
+    ...limitArgs,
+  ]);
+  assert.deepEqual(listed.value.diagnostics, {
+    malformed_feed_records: 0,
+    invalid_feed_records: 0,
+    skipped_oversized_feed_files: 1,
+  });
+  assert.deepEqual(
+    listed.value.turns.items.map((item) => item.turn_id),
+    [target.turn_id],
+  );
+
+  const first = await invokeJson<ExactPageValue>(project, [
+    "turn",
+    "show",
+    target.turn_id,
+    "--field",
+    "response",
+    "--all-workstreams",
+    "--byte-budget",
+    "1500",
+    ...limitArgs,
+  ]);
+  assert.deepEqual(first.value.diagnostics, {
+    skipped_oversized_feed_files: 1,
+  });
+  assert.equal(first.value.representation, "json-string");
+  assert.ok(first.value.next_cursor !== undefined);
+  assert.ok(stableStringify(target.response!.text).startsWith(first.value.text));
+
+  const changedLimits = await invokeFailure(project, [
+    "turn",
+    "show",
+    target.turn_id,
+    "--field",
+    "response",
+    "--all-workstreams",
+    "--byte-budget",
+    "1500",
+    "--max-file-bytes",
+    String(targetFileBytes + 1),
+    "--max-record-bytes",
+    String(targetRecordBytes),
+    "--cursor",
+    first.value.next_cursor!,
+  ]);
+  assert.equal(changedLimits.code, 2);
+  assert.match(changedLimits.stderr ?? "", /cursor/iu);
+
+  const evidence: BarbaroEvidenceV1 = {
+    schema: "barbaro.evidence.v1",
+    evidence_id: identity("ev", 802),
+    kind: "response",
+    turn_id: target.turn_id,
+    provider: "codex",
+    session_id: CODEX_SESSION,
+    workstream_id: target.workstream_id!,
+    agent_id: "main",
+    occurred_at: "2026-09-01T14:02:00.000Z",
+    source_refs: [SOURCE_REF],
+    content: { message: "bounded evidence 😀".repeat(100) },
+  };
+  const evidenceLine = stableJsonLine(evidence);
+  const evidencePath = join(
+    project,
+    ".barbaro",
+    "evidence",
+    "codex",
+    `${CODEX_SESSION}.jsonl`,
+  );
+  await mkdir(dirname(evidencePath), { recursive: true });
+  await writeFile(evidencePath, evidenceLine, "utf8");
+  const evidencePage = await invokeJson<ExactPageValue>(project, [
+    "evidence",
+    "show",
+    evidence.evidence_id,
+    "--provider",
+    "codex",
+    "--session-id",
+    CODEX_SESSION,
+    "--field",
+    "record",
+    "--byte-budget",
+    "5000",
+    "--max-file-bytes",
+    String(Buffer.byteLength(evidenceLine, "utf8")),
+    "--max-record-bytes",
+    String(Buffer.byteLength(stableStringify(evidence), "utf8")),
+  ]);
+  assert.equal(evidencePage.value.text, stableStringify(evidence));
+
+  const invalidLimit = await invokeFailure(project, [
+    "turn",
+    "list",
+    "--all-workstreams",
+    "--max-file-bytes",
+    "0",
+  ]);
+  assert.equal(invalidLimit.code, 2);
+  assert.match(invalidLimit.stderr ?? "", /positive integer/iu);
 });

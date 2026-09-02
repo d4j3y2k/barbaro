@@ -56,8 +56,12 @@ test("the built CLI runs when process.argv[1] is an npm-style symlink", async (t
     stdout,
     /every canonical\s+turn byte and referenced canonical evidence reachable/u,
   );
+  assert.match(stdout, /within their exposed file and record limits/u);
   assert.match(stdout, /provider-raw omissions are outside that guarantee/u);
-  assert.match(stdout, /Never\s+read \.barbaro\/\*\.jsonl directly/u);
+  assert.match(stdout, /Never\s+read \.barbaro\/\*\*\/\*\.jsonl directly/u);
+  assert.match(stdout, /representation=json-string/u);
+  assert.match(stdout, /--max-file-bytes <n>/u);
+  assert.match(stdout, /--max-record-bytes <n>/u);
   assert.equal(stderr, "");
 });
 
@@ -903,6 +907,10 @@ test("evidence show retains projected action cursors and adds exact fields", asy
         ...identityArgs,
         "--workstream",
         "evidence-next",
+        "--byte-budget",
+        "1",
+        "--action-cursor",
+        "not-an-action-cursor",
       ],
       io,
     ),

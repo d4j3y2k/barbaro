@@ -50,6 +50,7 @@ const CURSOR_SCHEMA = READER_RECORD_CURSOR_SCHEMA;
 const CURSOR_VERSION = READER_RECORD_CURSOR_VERSION;
 const TURN_PAGE_SCHEMA = READER_TURN_RECORD_SCHEMA;
 const EVIDENCE_PAGE_SCHEMA = READER_EVIDENCE_RECORD_SCHEMA;
+const JSON_STRING_CURSOR_SUFFIX = "\0json-string-v1";
 
 const PROVIDER_PATTERN = /^[a-z][a-z0-9_-]*$/u;
 const SESSION_ID_PATTERN = /^ses_[0-9a-f]{32}$/u;
@@ -84,8 +85,11 @@ interface ReaderRecordPageBase<Field extends string> {
   /** Distinguishes an absent optional field from a present empty string. */
   readonly present: boolean;
   readonly encoding: "utf-8";
-  /** A Unicode-safe fragment. Concatenating page text reconstructs the field. */
+  /** JSON string token used when plain UTF-8 cannot preserve lone surrogates. */
+  readonly representation?: "json-string";
+  /** A Unicode-safe fragment of the selected representation. */
   readonly text: string;
+  /** Byte count of the selected representation, not merely this page. */
   readonly total_utf8_bytes: number;
   readonly range: ReaderRecordRange;
   /** SHA-256 of the complete selected field, not merely this page. */
@@ -101,6 +105,10 @@ export interface ReaderTurnRecordPageV1
   readonly provider: string;
   readonly session_id: string;
   readonly workstream_id?: string;
+  /** Feed files skipped because the exposed file or record limit was exceeded. */
+  readonly diagnostics: {
+    readonly skipped_oversized_feed_files: number;
+  };
 }
 
 export interface ReaderEvidenceRecordPageV1
@@ -172,6 +180,12 @@ interface RecordFileLimits {
 interface SelectedText {
   readonly present: boolean;
   readonly text: string;
+  readonly representation?: "json-string";
+}
+
+interface FoundTurn {
+  readonly turn: BarbaroTurnV1 | undefined;
+  readonly skippedOversizedFeedFiles: number;
 }
 
 interface CursorBody {
@@ -238,9 +252,13 @@ export async function readTurnRecordPage(
     query: limitsFingerprint(limits),
   };
   if (options.cursor !== undefined) {
-    assertCursorQuery(parseCursor(options.cursor), queryBinding);
+    assertCursorQueryBeforeSelection(
+      parseCursor(options.cursor),
+      queryBinding,
+    );
   }
-  const turn = await findTurn(absoluteRoot, options.turnId, limits);
+  const found = await findTurn(absoluteRoot, options.turnId, limits);
+  const turn = found.turn;
   if (turn === undefined) {
     if (options.cursor !== undefined) {
       throw new ReaderRecordCursorError("target record is no longer available");
@@ -261,6 +279,7 @@ export async function readTurnRecordPage(
   const recordSha256 = sha256(stableStringify(turn));
   const binding: CursorBinding = {
     ...queryBinding,
+    field: cursorFieldBinding(field, selected),
     recordSha256,
   };
   return pageSelectedText(
@@ -276,9 +295,15 @@ export async function readTurnRecordPage(
       ...(turn.workstream_id === undefined
         ? {}
         : { workstream_id: turn.workstream_id }),
+      diagnostics: {
+        skipped_oversized_feed_files: found.skippedOversizedFeedFiles,
+      },
       field,
       present: selected.present,
       encoding: "utf-8",
+      ...(selected.representation === undefined
+        ? {}
+        : { representation: selected.representation }),
       text: page.text,
       total_utf8_bytes: Buffer.byteLength(selected.text, "utf8"),
       range: { start: page.start, end: page.end },
@@ -318,7 +343,10 @@ export async function readEvidenceRecordPage(
     query: limitsFingerprint(limits),
   };
   if (options.cursor !== undefined) {
-    assertCursorQuery(parseCursor(options.cursor), queryBinding);
+    assertCursorQueryBeforeSelection(
+      parseCursor(options.cursor),
+      queryBinding,
+    );
   }
   const evidence = await findEvidence(
     absoluteRoot,
@@ -347,6 +375,7 @@ export async function readEvidenceRecordPage(
   const recordSha256 = sha256(stableStringify(evidence));
   const binding: CursorBinding = {
     ...queryBinding,
+    field: cursorFieldBinding(field, selected),
     recordSha256,
   };
   return pageSelectedText(
@@ -367,6 +396,9 @@ export async function readEvidenceRecordPage(
       field,
       present: selected.present,
       encoding: "utf-8",
+      ...(selected.representation === undefined
+        ? {}
+        : { representation: selected.representation }),
       text: page.text,
       total_utf8_bytes: Buffer.byteLength(selected.text, "utf8"),
       range: { start: page.start, end: page.end },
@@ -383,33 +415,65 @@ async function findTurn(
   projectRoot: string,
   turnId: string,
   limits: RecordFileLimits,
-): Promise<BarbaroTurnV1 | undefined> {
+): Promise<FoundTurn> {
   const boundary = SafeStoreBoundary.forBarbaroProject(projectRoot);
   const files = await listFeedFiles(projectRoot);
   let found: BarbaroTurnV1 | undefined;
   let foundCanonical: string | undefined;
+  let skippedOversizedFeedFiles = 0;
   for (const file of files) {
-    const bytes = await readPinnedRegularFile(
-      boundary,
-      boundary.componentsForPath(file.path),
-      limits.maxFileBytes,
-    );
-    if (bytes === undefined) continue;
-    for (const line of completeJsonlLines(bytes, file.path, limits.maxRecordBytes)) {
-      const value = parseJson(line);
-      if (!isTurnV1(value) || value.turn_id !== turnId) continue;
-      if (value.provider !== file.provider || value.session_id !== file.sessionId) {
-        throw new Error("Turn identity does not match its storage path");
-      }
-      const canonical = stableStringify(value);
-      if (foundCanonical !== undefined && canonical !== foundCanonical) {
-        throw new Error(`Conflicting canonical turn ID: ${turnId}`);
-      }
-      found = value;
-      foundCanonical = canonical;
+    let bytes: Buffer | undefined;
+    try {
+      bytes = await readPinnedRegularFile(
+        boundary,
+        boundary.componentsForPath(file.path),
+        limits.maxFileBytes,
+      );
+    } catch (error: unknown) {
+      if (!(error instanceof StoreFileTooLargeError)) throw error;
+      skippedOversizedFeedFiles += 1;
+      continue;
     }
+    if (bytes === undefined) continue;
+
+    // A feed is either wholly inside the exposed limits or wholly skipped.
+    // Do not publish a candidate seen before a later oversized record.
+    let feedTurn: BarbaroTurnV1 | undefined;
+    let feedCanonical: string | undefined;
+    try {
+      for (const line of completeJsonlLines(
+        bytes,
+        file.path,
+        limits.maxRecordBytes,
+      )) {
+        const value = parseJson(line);
+        if (!isTurnV1(value) || value.turn_id !== turnId) continue;
+        if (
+          value.provider !== file.provider ||
+          value.session_id !== file.sessionId
+        ) {
+          throw new Error("Turn identity does not match its storage path");
+        }
+        const canonical = stableStringify(value);
+        if (feedCanonical !== undefined && canonical !== feedCanonical) {
+          throw new Error(`Conflicting canonical turn ID: ${turnId}`);
+        }
+        feedTurn = value;
+        feedCanonical = canonical;
+      }
+    } catch (error: unknown) {
+      if (!(error instanceof ReaderRecordTooLargeError)) throw error;
+      skippedOversizedFeedFiles += 1;
+      continue;
+    }
+    if (feedTurn === undefined || feedCanonical === undefined) continue;
+    if (foundCanonical !== undefined && feedCanonical !== foundCanonical) {
+      throw new Error(`Conflicting canonical turn ID: ${turnId}`);
+    }
+    found = feedTurn;
+    foundCanonical = feedCanonical;
   }
-  return found;
+  return { turn: found, skippedOversizedFeedFiles };
 }
 
 async function findEvidence(
@@ -454,11 +518,11 @@ function selectTurnText(
     case "record":
       return { present: true, text: stableStringify(turn) };
     case "request":
-      return { present: true, text: turn.request.text };
+      return selectDirectText(turn.request.text);
     case "response":
       return turn.response === undefined
         ? { present: false, text: "" }
-        : { present: true, text: turn.response.text };
+        : selectDirectText(turn.response.text);
     case "actions":
       return { present: true, text: stableStringify(turn.actions) };
   }
@@ -475,29 +539,60 @@ function selectEvidenceText(
       return { present: true, text: stableStringify(evidence.content) };
     case "request": {
       if (evidence.kind === "subagent_turn") {
-        return { present: true, text: evidence.content.request.text };
+        return selectDirectText(evidence.content.request.text);
       }
       const text = nestedContentText(evidence, "prompt");
       return text === undefined
         ? { present: false, text: "" }
-        : { present: true, text };
+        : selectDirectText(text);
     }
     case "response": {
       if (evidence.kind === "subagent_turn") {
         return evidence.content.response === undefined
           ? { present: false, text: "" }
-          : { present: true, text: evidence.content.response.text };
+          : selectDirectText(evidence.content.response.text);
       }
       const text = nestedContentText(evidence, "response");
       return text === undefined
         ? { present: false, text: "" }
-        : { present: true, text };
+        : selectDirectText(text);
     }
     case "actions":
       return evidence.kind === "subagent_turn"
         ? { present: true, text: stableStringify(evidence.content.actions) }
         : { present: false, text: "" };
   }
+}
+
+function selectDirectText(text: string): SelectedText {
+  if (!hasLoneSurrogate(text)) return { present: true, text };
+  return {
+    present: true,
+    text: stableStringify(text),
+    representation: "json-string",
+  };
+}
+
+function hasLoneSurrogate(text: string): boolean {
+  for (let index = 0; index < text.length; index += 1) {
+    const unit = text.charCodeAt(index);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = text.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        index += 1;
+        continue;
+      }
+      return true;
+    }
+    if (unit >= 0xdc00 && unit <= 0xdfff) return true;
+  }
+  return false;
+}
+
+function cursorFieldBinding(field: string, selected: SelectedText): string {
+  return selected.representation === "json-string"
+    ? `${field}${JSON_STRING_CURSOR_SUFFIX}`
+    : field;
 }
 
 function nestedContentText(
@@ -666,6 +761,30 @@ function assertCursorQuery(
     body.k !== expected.recordKind ||
     body.i !== expected.identity ||
     body.f !== expected.field ||
+    body.q !== expected.query
+  ) {
+    throw new ReaderRecordCursorError("cursor does not match this query");
+  }
+}
+
+/**
+ * Validate every query component available before the target field is loaded.
+ * The exceptional JSON-string binding is accepted provisionally; the exact
+ * representation is checked by decodeCursor after selection. Plain UTF-8
+ * fields keep their original binding, so their existing cursors remain valid.
+ */
+function assertCursorQueryBeforeSelection(
+  body: CursorBody,
+  expected: CursorQueryBinding,
+): void {
+  if (
+    body.p !== expected.project ||
+    body.s !== expected.scope ||
+    body.k !== expected.recordKind ||
+    body.i !== expected.identity ||
+    ![expected.field, `${expected.field}${JSON_STRING_CURSOR_SUFFIX}`].includes(
+      body.f,
+    ) ||
     body.q !== expected.query
   ) {
     throw new ReaderRecordCursorError("cursor does not match this query");

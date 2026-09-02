@@ -6,6 +6,7 @@ import {
   mkdtemp,
   readFile,
   rm,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -15,11 +16,9 @@ import test from "node:test";
 
 import type { BarbaroTurnV1 } from "../../src/contracts/v1.js";
 import {
-  StoreFileTooLargeError,
   UnsafeStorePathError,
 } from "../../src/core/safe-store.js";
 import { stableJsonLine, stableStringify } from "../../src/core/stable-json.js";
-import { ReaderRecordTooLargeError } from "../../src/reader/store.js";
 import {
   readProjectTurnList,
   ReaderTurnListSnapshotError,
@@ -171,13 +170,18 @@ test("turn list pages the exact pinned scoped history without writes", async () 
     });
     assert.equal(first.value.range.start, 0);
     assert.equal(first.value.range.end, first.value.turns.shown);
+    assert.deepEqual(first.value.diagnostics, {
+      malformed_feed_records: 0,
+      invalid_feed_records: 0,
+      skipped_oversized_feed_files: 0,
+    });
     assert.equal(
       Buffer.byteLength(stableStringify(first), "utf8"),
       first.utf8_bytes,
     );
 
     const listed = [...first.value.turns.items];
-    let cursor = first.value.turns.next_cursor;
+    let cursor: string | undefined = first.value.turns.next_cursor;
     assert.ok(cursor !== undefined, "fixture must require pagination");
     await appendTurn(
       project,
@@ -212,6 +216,116 @@ test("turn list pages the exact pinned scoped history without writes", async () 
       listed[1]?.evidence_ref_count,
       alpha.at(-2)?.evidence_refs.length,
     );
+  });
+});
+
+test("turn-list diagnostics are complete and pinned across pages", async () => {
+  await temporaryProject(async (project) => {
+    const included = Array.from({ length: 8 }, (_, index) =>
+      turn(index + 1, { workstreamId: WS_ALPHA }),
+    );
+    for (const record of included) await appendTurn(project, record);
+
+    const includedPath = feedPath(project, included[0]!);
+    await appendFile(includedPath, "not-json\n", "utf8");
+    await appendFile(
+      includedPath,
+      `${stableStringify({ schema: "not-a-turn" })}\n`,
+      "utf8",
+    );
+    const maxFileBytes = (await stat(includedPath)).size;
+    const maxRecordBytes = Math.max(
+      ...included.map((record) =>
+        Buffer.byteLength(stableStringify(record), "utf8")
+      ),
+    );
+
+    await appendTurn(
+      project,
+      turn(100, {
+        provider: "claude",
+        sessionId: CLAUDE_SESSION,
+        workstreamId: WS_ALPHA,
+        response: "x".repeat(maxFileBytes),
+      }),
+    );
+    await appendTurn(
+      project,
+      turn(101, {
+        provider: "codex",
+        sessionId: "ses_33333333333333333333333333333333",
+        workstreamId: WS_ALPHA,
+        response: "r".repeat(maxRecordBytes),
+      }),
+    );
+
+    const options = {
+      byteBudget: 2200,
+      workstreamId: WS_ALPHA,
+      maxFileBytes,
+      maxRecordBytes,
+    } as const;
+    const first = await readProjectTurnList(project, options);
+    const replay = await readProjectTurnList(project, options);
+    assert.deepEqual(replay, first);
+    assert.deepEqual(first.value.diagnostics, {
+      malformed_feed_records: 1,
+      invalid_feed_records: 1,
+      skipped_oversized_feed_files: 2,
+    });
+    assert.ok(first.value.turns.next_cursor !== undefined);
+
+    const listed = [...first.value.turns.items];
+    let cursor: string | undefined = first.value.turns.next_cursor;
+    while (cursor !== undefined) {
+      const page = await readProjectTurnList(project, { ...options, cursor });
+      assert.deepEqual(page.value.diagnostics, first.value.diagnostics);
+      listed.push(...page.value.turns.items);
+      cursor = page.value.turns.next_cursor;
+    }
+    assert.deepEqual(
+      listed.map((entry) => entry.turn_id),
+      [...included].reverse().map((record) => record.turn_id),
+    );
+  });
+});
+
+test("pinned continuation ignores later bytes beyond maxFileBytes", async () => {
+  await temporaryProject(async (project) => {
+    const pinned = Array.from({ length: 8 }, (_, index) =>
+      turn(index + 1, { workstreamId: WS_ALPHA }),
+    );
+    for (const record of pinned) await appendTurn(project, record);
+    const path = feedPath(project, pinned[0]!);
+    const maxFileBytes = (await stat(path)).size;
+    const options = {
+      byteBudget: 2200,
+      workstreamId: WS_ALPHA,
+      maxFileBytes,
+    } as const;
+
+    const first = await readProjectTurnList(project, options);
+    assert.ok(first.value.turns.next_cursor !== undefined);
+    await appendTurn(project, turn(100, { workstreamId: WS_ALPHA }));
+    assert.ok((await stat(path)).size > maxFileBytes);
+
+    const listed = [...first.value.turns.items];
+    let cursor: string | undefined = first.value.turns.next_cursor;
+    while (cursor !== undefined) {
+      const page = await readProjectTurnList(project, { ...options, cursor });
+      assert.deepEqual(page.value.diagnostics, {
+        malformed_feed_records: 0,
+        invalid_feed_records: 0,
+        skipped_oversized_feed_files: 0,
+      });
+      listed.push(...page.value.turns.items);
+      cursor = page.value.turns.next_cursor;
+    }
+    assert.deepEqual(
+      listed.map((entry) => entry.turn_id),
+      [...pinned].reverse().map((record) => record.turn_id),
+    );
+    assert.ok(!listed.some((entry) => entry.turn_id === turn(100).turn_id));
   });
 });
 
@@ -400,19 +514,20 @@ test("turn list retains canonical feed path and size protections", async (t) => 
         response: "x".repeat(2048),
       });
       await appendTurn(project, record);
-      await assert.rejects(
-        readProjectTurnList(project, {
-          byteBudget: 4096,
-          maxFileBytes: 512,
-        }),
-        (error: unknown) => error instanceof StoreFileTooLargeError,
-      );
-      await assert.rejects(
-        readProjectTurnList(project, {
-          byteBudget: 4096,
-          maxRecordBytes: 512,
-        }),
-        (error: unknown) => error instanceof ReaderRecordTooLargeError,
+      const skipped = await readProjectTurnList(project, {
+        byteBudget: 4096,
+        maxFileBytes: 512,
+      });
+      assert.equal(skipped.value.turns.total, 0);
+      assert.equal(skipped.value.diagnostics.skipped_oversized_feed_files, 1);
+      const recordSkipped = await readProjectTurnList(project, {
+        byteBudget: 4096,
+        maxRecordBytes: 512,
+      });
+      assert.equal(recordSkipped.value.turns.total, 0);
+      assert.equal(
+        recordSkipped.value.diagnostics.skipped_oversized_feed_files,
+        1,
       );
     });
   });

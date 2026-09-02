@@ -33,11 +33,14 @@ test("peer skills distinguish bounded attention from lossless retrieval", async 
       path,
     );
     assert.match(skill, /--field request/u, path);
+    assert.match(skill, /representation` is `json-string`/u, path);
+    assert.match(skill, /JSON-parse the complete\s+concatenated value once/u, path);
     assert.match(skill, /barbaro evidence show <evidence_id>/u, path);
     assert.match(skill, /--field record/u, path);
-    assert.match(skill, /Never read `\.barbaro\/\*\.jsonl` directly/u, path);
+    assert.match(skill, /Never read `\.barbaro\/\*\*\/\*\.jsonl` directly/u, path);
     assert.match(skill, /canonical\s+`barbaro\.turn\.v1`/u, path);
     assert.match(skill, /referenced canonical evidence/u, path);
+    assert.match(skill, /exposed file and record\s+limits/u, path);
     assert.match(skill, /provider-raw omissions/iu, path);
     assert.match(skill, /outside (?:that |the )?guarantee/u, path);
   }

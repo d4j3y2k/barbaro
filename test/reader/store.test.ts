@@ -232,6 +232,68 @@ test("evidence is loaded only by an exact evidence_ref and remains canonical", a
   }
 });
 
+test("projected evidence enforces workstream scope before projection", async () => {
+  const project = await mkdtemp(join(tmpdir(), "barbaro-reader-evidence-scope-"));
+  const directory = join(project, ".barbaro", "evidence", "codex");
+  const evidenceId = "ev_66666666666666666666666666666666";
+  const owningWorkstream = "ws_77777777777777777777777777777777";
+  const otherWorkstream = "ws_88888888888888888888888888888888";
+  const evidence: BarbaroEvidenceV1 = {
+    schema: "barbaro.evidence.v1",
+    evidence_id: evidenceId,
+    kind: "subagent_turn",
+    turn_id: "turn_99999999999999999999999999999999",
+    parent_turn_id: "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    parent_link: { method: "native", native_key: "worker-1" },
+    provider: "codex",
+    session_id: SESSION_ID,
+    workstream_id: owningWorkstream,
+    agent_id: "worker-1",
+    occurred_at: "2026-08-16T20:04:00.000Z",
+    source_refs: [SOURCE_REF],
+    content: {
+      role: "worker",
+      sequence: 1,
+      outcome: "success",
+      started_at: "2026-08-16T20:03:00.000Z",
+      ended_at: "2026-08-16T20:04:00.000Z",
+      request: content("inspect"),
+      response: content("done"),
+      actions: [],
+    },
+  };
+  try {
+    await mkdir(directory, { recursive: true });
+    await writeFile(
+      join(directory, `${SESSION_ID}.jsonl`),
+      stableJsonLine(evidence),
+      "utf8",
+    );
+
+    await assert.rejects(
+      readProjectEvidence(project, {
+        provider: "codex",
+        sessionId: SESSION_ID,
+        evidenceId,
+        workstreamId: otherWorkstream,
+        byteBudget: 1,
+        actionCursor: "not-an-action-cursor",
+      }),
+      (error: unknown) => error instanceof ReaderEvidenceNotFoundError,
+    );
+    const projected = await readProjectEvidence(project, {
+      provider: "codex",
+      sessionId: SESSION_ID,
+      evidenceId,
+      workstreamId: owningWorkstream,
+      byteBudget: 1200,
+    });
+    assert.equal(projected.value.workstream_id, owningWorkstream);
+  } finally {
+    await rm(project, { recursive: true, force: true });
+  }
+});
+
 test("canonical readers reject symlinks, hard links, and oversized files", async (t) => {
   await t.test("final symlink", async () => {
     const { project, feedPath } = await createFeedProject();

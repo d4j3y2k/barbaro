@@ -180,6 +180,14 @@ export async function readProjectEvidence(
   if (!EVIDENCE_ID_PATTERN.test(options.evidenceId)) {
     throw new TypeError(`Invalid evidenceId: ${JSON.stringify(options.evidenceId)}`);
   }
+  if (
+    options.workstreamId !== undefined &&
+    !WORKSTREAM_ID_PATTERN.test(options.workstreamId)
+  ) {
+    throw new TypeError(
+      `Invalid workstreamId: ${JSON.stringify(options.workstreamId)}`,
+    );
+  }
   const limits = fileLimits(options);
   const boundary = SafeStoreBoundary.forBarbaroProject(resolve(projectRoot));
   const components = [
@@ -222,6 +230,15 @@ export async function readProjectEvidence(
     foundCanonical = canonical;
   }
   if (found === undefined) {
+    throw new ReaderEvidenceNotFoundError(options.evidenceId);
+  }
+  // Enforce scope before projection parses an action cursor or applies the
+  // caller's byte budget. Out-of-scope records behave exactly like missing
+  // records and cannot leak projection-specific validation details.
+  if (
+    options.workstreamId !== undefined &&
+    found.workstream_id !== options.workstreamId
+  ) {
     throw new ReaderEvidenceNotFoundError(options.evidenceId);
   }
   return projectEvidence(found, options);

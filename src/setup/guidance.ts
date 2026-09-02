@@ -70,12 +70,12 @@ export function peerContextPreflight(): GuidanceStep[] {
     },
     {
       id: "peer.budget-render",
-      text: `Cap all rendered peer context at ${PEER_CONTEXT_RENDER_BUDGET_BYTES} bytes total and report N-of-M when you truncate.`,
+      text: `Cap the initial \`barbaro context\` attention view at ${PEER_CONTEXT_RENDER_BUDGET_BYTES} bytes total and report N-of-M when you truncate; exhaustive turn and evidence retrieval remains available through bounded pages.`,
     },
     {
       id: "peer.never-print-canonical",
       text:
-        "Never read or print `.barbaro/*.jsonl` directly. Retrieve exact canonical bytes only through the supported bounded readers: `barbaro turn show <turn_id> --field record` and `barbaro evidence show <evidence_id> --provider <provider> --session-id <ses_id> --field record`, following each next_cursor until complete.",
+        "Never read or print `.barbaro/**/*.jsonl` directly. Retrieve exact canonical bytes only through the supported bounded readers: `barbaro turn show <turn_id> --field record` and `barbaro evidence show <evidence_id> --provider <provider> --session-id <ses_id> --field record`, following each next_cursor until complete.",
     },
     {
       id: "peer.evidence-on-demand",
@@ -85,7 +85,7 @@ export function peerContextPreflight(): GuidanceStep[] {
     {
       id: "peer.lossless-canonical-scope",
       text:
-        "Losslessness covers every canonical turn byte and referenced canonical evidence byte Barbaro stored; provider-native fields or records omitted during adapter mapping are outside that guarantee.",
+        "Within the readers' exposed file and record limits, losslessness covers every canonical turn byte and referenced canonical evidence byte Barbaro stored; provider-native fields or records omitted during adapter mapping are outside that guarantee.",
     },
     {
       id: "peer.state-observations",

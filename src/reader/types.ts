@@ -268,6 +268,8 @@ export interface ReaderEvidenceOptions extends ReaderProjectionOptions {
   readonly provider: string;
   readonly sessionId: string;
   readonly evidenceId: string;
+  /** When set, the evidence must belong to this workstream. */
+  readonly workstreamId?: string;
   /** Cursor returned by a prior evidence projection, if any. */
   readonly actionCursor?: string;
   readonly maxFileBytes?: number;

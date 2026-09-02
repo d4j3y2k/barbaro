@@ -20,15 +20,12 @@ import type {
   BarbaroEvidenceV1,
   BarbaroTurnV1,
 } from "../../src/contracts/v1.js";
-import {
-  StoreFileTooLargeError,
-  UnsafeStorePathError,
-} from "../../src/core/safe-store.js";
+import { UnsafeStorePathError } from "../../src/core/safe-store.js";
 import { stableJsonLine, stableStringify } from "../../src/core/stable-json.js";
 import { ReaderByteBudgetTooSmallError } from "../../src/reader/budget.js";
 import {
   ReaderRecordCursorError,
-  ReaderRecordTooLargeError,
+  ReaderTurnNotFoundError,
   readEvidenceRecordPage,
   readTurnRecordPage,
   type ReaderEvidenceRecordField,
@@ -141,10 +138,17 @@ async function collectTurn(
   project: string,
   field: ReaderTurnRecordField,
   byteBudget = 6000,
-): Promise<{ readonly text: string; readonly pages: number }> {
+): Promise<{
+  readonly text: string;
+  readonly pages: number;
+  readonly representations: ReadonlySet<"json-string" | undefined>;
+}> {
   let cursor: string | undefined;
   let reconstructed = "";
   let pages = 0;
+  let totalUtf8Bytes: number | undefined;
+  let selectedSha256: string | undefined;
+  const representations = new Set<"json-string" | undefined>();
   do {
     const page = await readTurnRecordPage(project, {
       turnId: TURN_ID,
@@ -158,13 +162,23 @@ async function collectTurn(
       page.value.range.end - page.value.range.start,
       Buffer.byteLength(page.value.text, "utf8"),
     );
-    assert.equal(Buffer.byteLength(stableStringify(page), "utf8"), page.utf8_bytes);
+    assert.equal(
+      Buffer.byteLength(stableStringify(page), "utf8"),
+      page.utf8_bytes,
+    );
     assert.ok(page.utf8_bytes <= page.byte_budget);
+    totalUtf8Bytes ??= page.value.total_utf8_bytes;
+    selectedSha256 ??= page.value.sha256;
+    assert.equal(page.value.total_utf8_bytes, totalUtf8Bytes);
+    assert.equal(page.value.sha256, selectedSha256);
+    representations.add(page.value.representation);
     reconstructed += page.value.text;
     pages += 1;
     cursor = page.value.next_cursor;
   } while (cursor !== undefined);
-  return { text: reconstructed, pages };
+  assert.equal(Buffer.byteLength(reconstructed, "utf8"), totalUtf8Bytes);
+  assert.equal(digest(reconstructed), selectedSha256);
+  return { text: reconstructed, pages, representations };
 }
 
 test("turn pages reconstruct stable JSON and directly page Unicode fields", async () => {
@@ -179,6 +193,7 @@ test("turn pages reconstruct stable JSON and directly page Unicode fields", asyn
 
     const response = await collectTurn(project, "response");
     assert.equal(response.text, canonical.response?.text);
+    assert.deepEqual([...response.representations], [undefined]);
     assert.ok(response.pages > 1);
     assert.ok(response.pages < record.pages);
 
@@ -186,6 +201,128 @@ test("turn pages reconstruct stable JSON and directly page Unicode fields", asyn
     assert.equal(actionField.text, stableStringify(canonical.actions));
     assert.ok(actionField.pages > 1);
     assert.deepEqual(await readFile(path), before);
+  });
+});
+
+test("lone-surrogate fields page an exact JSON string representation", async () => {
+  await withProject(async (project) => {
+    const text = (
+      "\ud800 paired 😀 replacement � low \udc00 quote \" slash \\ newline\n"
+    ).repeat(80);
+    const canonical = turn({
+      request: content(text),
+      response: content(text),
+      actions: [
+        {
+          action_id: "act_99999999999999999999999999999999",
+          kind: "command",
+          outcome: "success",
+          command: content(text),
+          exit_code: 0,
+          source_refs: [SOURCE_REF],
+        },
+      ],
+    });
+    await writeTurn(project, canonical);
+
+    const escaped = stableStringify(text);
+    for (const field of ["request", "response"] as const) {
+      const selected = await collectTurn(project, field, 1600);
+      assert.ok(selected.pages > 1);
+      assert.deepEqual([...selected.representations], ["json-string"]);
+      assert.equal(selected.text, escaped);
+      assert.equal(JSON.parse(selected.text), text);
+      assert.equal(digest(selected.text), digest(escaped));
+      assert.equal(
+        Buffer.byteLength(selected.text, "utf8"),
+        Buffer.byteLength(escaped, "utf8"),
+      );
+    }
+
+    const record = await collectTurn(project, "record", 1600);
+    assert.equal(record.text, stableStringify(canonical));
+    assert.deepEqual([...record.representations], [undefined]);
+    const actionField = await collectTurn(project, "actions", 1600);
+    assert.equal(actionField.text, stableStringify(canonical.actions));
+    assert.deepEqual([...actionField.representations], [undefined]);
+    assert.deepEqual(JSON.parse(actionField.text), canonical.actions);
+
+    let minimumBudget = 1;
+    try {
+      await readTurnRecordPage(project, {
+        turnId: TURN_ID,
+        field: "response",
+        byteBudget: minimumBudget,
+        workstreamId: WORKSTREAM_ID,
+      });
+      assert.fail("one byte cannot hold a record-page envelope");
+    } catch (error: unknown) {
+      assert.ok(error instanceof ReaderByteBudgetTooSmallError);
+      minimumBudget = error.requiredBytes;
+    }
+    let splitEscape = false;
+    for (
+      let byteBudget = minimumBudget;
+      byteBudget < minimumBudget + 64;
+      byteBudget += 1
+    ) {
+      try {
+        const page = await readTurnRecordPage(project, {
+          turnId: TURN_ID,
+          field: "response",
+          byteBudget,
+          workstreamId: WORKSTREAM_ID,
+        });
+        const end = page.value.range.end;
+        const escapeStart = escaped.indexOf("\\ud800");
+        if (end > escapeStart && end < escapeStart + 6) {
+          splitEscape = true;
+          assert.equal(page.value.representation, "json-string");
+          assert.equal(page.value.text, escaped.slice(0, end));
+          break;
+        }
+      } catch (error: unknown) {
+        assert.ok(error instanceof ReaderByteBudgetTooSmallError);
+      }
+    }
+    assert.equal(
+      splitEscape,
+      true,
+      "paging may split an escaped surrogate safely",
+    );
+
+    const evidence: BarbaroEvidenceV1 = {
+      schema: "barbaro.evidence.v1",
+      evidence_id: EVIDENCE_ID,
+      kind: "response",
+      turn_id: TURN_ID,
+      provider: "codex",
+      session_id: SESSION_ID,
+      workstream_id: WORKSTREAM_ID,
+      agent_id: "root",
+      occurred_at: "2026-09-01T12:00:30.000Z",
+      source_refs: [SOURCE_REF],
+      content: { text: content(text) },
+    };
+    await writeEvidence(project, evidence);
+    let cursor: string | undefined;
+    let evidenceText = "";
+    do {
+      const page = await readEvidenceRecordPage(project, {
+        provider: evidence.provider,
+        sessionId: evidence.session_id,
+        evidenceId: evidence.evidence_id,
+        field: "response",
+        byteBudget: 1600,
+        workstreamId: WORKSTREAM_ID,
+        ...(cursor === undefined ? {} : { cursor }),
+      });
+      assert.equal(page.value.representation, "json-string");
+      evidenceText += page.value.text;
+      cursor = page.value.next_cursor;
+    } while (cursor !== undefined);
+    assert.equal(evidenceText, escaped);
+    assert.equal(JSON.parse(evidenceText), text);
   });
 });
 
@@ -455,6 +592,53 @@ test("response and subagent evidence remain exactly retrievable", async () => {
   });
 });
 
+test("turn pages skip and count unrelated feeds beyond reader limits", async (t) => {
+  for (const mode of ["file", "record"] as const) {
+    await t.test(mode, async () => {
+      await withProject(async (project) => {
+        const responseText = "target 😀 ".repeat(450);
+        const target = turn({ response: content(responseText), actions: [] });
+        await writeTurn(project, target);
+        const targetRecordBytes = Buffer.byteLength(
+          stableStringify(target),
+          "utf8",
+        );
+        const unrelated = turn({
+          turn_id: "turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          provider: "claude",
+          session_id: "ses_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          response: content("oversized unrelated ".repeat(targetRecordBytes)),
+          actions: [],
+        });
+        await writeTurn(project, unrelated);
+        const limits =
+          mode === "file"
+            ? { maxFileBytes: targetRecordBytes + 1 }
+            : { maxRecordBytes: targetRecordBytes };
+
+        let cursor: string | undefined;
+        let reconstructed = "";
+        do {
+          const page = await readTurnRecordPage(project, {
+            turnId: target.turn_id,
+            field: "response",
+            byteBudget: 1500,
+            workstreamId: WORKSTREAM_ID,
+            ...limits,
+            ...(cursor === undefined ? {} : { cursor }),
+          });
+          assert.deepEqual(page.value.diagnostics, {
+            skipped_oversized_feed_files: 1,
+          });
+          reconstructed += page.value.text;
+          cursor = page.value.next_cursor;
+        } while (cursor !== undefined);
+        assert.equal(reconstructed, responseText);
+      });
+    });
+  }
+});
+
 test("record pages preserve no-follow, single-link, and size limits", async (t) => {
   await t.test("symbolic link", async () => {
     await withProject(async (project) => {
@@ -475,7 +659,7 @@ test("record pages preserve no-follow, single-link, and size limits", async (t) 
     });
   });
 
-  await t.test("hard link and limits", async () => {
+  await t.test("hard link and target beyond limits", async () => {
     await withProject(async (project) => {
       const path = await writeTurn(project, turn());
       const outside = await mkdtemp(join(tmpdir(), "barbaro-record-page-link-"));
@@ -495,7 +679,7 @@ test("record pages preserve no-follow, single-link, and size limits", async (t) 
           byteBudget: 4096,
           maxFileBytes: 128,
         }),
-        (error: unknown) => error instanceof StoreFileTooLargeError,
+        (error: unknown) => error instanceof ReaderTurnNotFoundError,
       );
       await assert.rejects(
         readTurnRecordPage(project, {
@@ -503,7 +687,7 @@ test("record pages preserve no-follow, single-link, and size limits", async (t) 
           byteBudget: 4096,
           maxRecordBytes: 128,
         }),
-        (error: unknown) => error instanceof ReaderRecordTooLargeError,
+        (error: unknown) => error instanceof ReaderTurnNotFoundError,
       );
     });
   });

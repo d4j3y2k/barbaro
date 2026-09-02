@@ -1339,6 +1339,9 @@ function classifyToolActivity(
   if (toolName === "Bash" || toolName === "exec") {
     const command = stringValue(toolInput.command);
     const awaitCommand = command ? classifyAwaitCommand(command) : undefined;
+    const digestExcludedCommand = command
+      ? isDigestExcludedBarbaroCommand(command)
+      : false;
     const contextCommand = command
       ? isLeadingBarbaroContextCommand(command)
       : false;
@@ -1351,8 +1354,7 @@ function classifyToolActivity(
       },
       claims: [],
       unknownWriteScope:
-        awaitCommand === undefined &&
-        !(contextCommand && isDigestExcludedBarbaroCommand(command ?? "")),
+        awaitCommand === undefined && !digestExcludedCommand,
       ...(awaitCommand === undefined ? {} : { awaitCommand }),
       ...(contextCommand ? { contextCommand: true } : {}),
     };

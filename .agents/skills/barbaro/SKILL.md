@@ -86,18 +86,20 @@ the user sets that up.
   relevant ID, run
   `barbaro turn show <turn_id> --field response --provider codex --session-id "$CODEX_SESSION_ID" --project-root "$PWD"`.
   Follow `.value.next_cursor` with `--cursor` and concatenate `.value.text` in
-  order. Use `--field request` for the exact request or `--field record` for
-  the entire canonical turn.
+  order. If `.value.representation` is `json-string`, JSON-parse the complete
+  concatenated value once. Use `--field request` for the exact request or
+  `--field record` for the entire canonical turn.
 - Retrieve referenced canonical evidence with the provider and canonical
   session ID from its owning turn:
   `barbaro evidence show <evidence_id> --provider <turn_provider> --session-id <turn_session_id> --field record --project-root "$PWD"`.
   Follow `.value.next_cursor` as above; use `--field content`, `request`,
   `response`, or `actions` when only that exact evidence field is needed.
-  Never read `.barbaro/*.jsonl` directly.
+  Never read `.barbaro/**/*.jsonl` directly.
 - Barbaro's losslessness guarantee covers every byte of each canonical
   `barbaro.turn.v1` record plus every referenced canonical evidence record
-  through these supported commands. Provider-raw omissions made before
-  canonicalization stay outside that guarantee.
+  through these supported commands, within their exposed file and record
+  limits. Provider-raw omissions are outside that guarantee when made before
+  canonicalization.
 - Barbaro may add a one-line nudge beginning `Barbaro: N new peer turns` and
   ending `run barbaro context` at a prompt, tool, or Stop boundary. This never
   starts a turn. Within one cursor revision, prompt and tool nudges repeat only

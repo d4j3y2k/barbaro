@@ -631,6 +631,8 @@ async function runTurnReaderCommand(
         "session-id",
         "workstream",
         "all-workstreams",
+        "max-file-bytes",
+        "max-record-bytes",
       ]),
       new Set(["all-workstreams"]),
     );
@@ -640,10 +642,17 @@ async function runTurnReaderCommand(
       "byte-budget",
       DEFAULT_TURN_READER_BYTE_BUDGET,
     );
+    const maxFileBytes = optionalPositiveIntegerFlag(flags, "max-file-bytes");
+    const maxRecordBytes = optionalPositiveIntegerFlag(
+      flags,
+      "max-record-bytes",
+    );
     const workstreamId = await resolveLosslessReaderScope(flags, projectRoot);
     try {
       const projection = await readProjectTurnList(projectRoot, {
         byteBudget,
+        ...(maxFileBytes === undefined ? {} : { maxFileBytes }),
+        ...(maxRecordBytes === undefined ? {} : { maxRecordBytes }),
         ...(workstreamId === undefined ? {} : { workstreamId }),
         ...(flags.has("cursor") ? { cursor: flags.get("cursor")! } : {}),
       });
@@ -675,6 +684,8 @@ async function runTurnReaderCommand(
         "session-id",
         "workstream",
         "all-workstreams",
+        "max-file-bytes",
+        "max-record-bytes",
       ]),
       new Set(["all-workstreams"]),
     );
@@ -690,12 +701,19 @@ async function runTurnReaderCommand(
       "byte-budget",
       DEFAULT_TURN_READER_BYTE_BUDGET,
     );
+    const maxFileBytes = optionalPositiveIntegerFlag(flags, "max-file-bytes");
+    const maxRecordBytes = optionalPositiveIntegerFlag(
+      flags,
+      "max-record-bytes",
+    );
     const workstreamId = await resolveLosslessReaderScope(flags, projectRoot);
     try {
       const projection = await readTurnRecordPage(projectRoot, {
         turnId,
         field,
         byteBudget,
+        ...(maxFileBytes === undefined ? {} : { maxFileBytes }),
+        ...(maxRecordBytes === undefined ? {} : { maxRecordBytes }),
         ...(workstreamId === undefined ? {} : { workstreamId }),
         ...(flags.has("cursor") ? { cursor: flags.get("cursor")! } : {}),
       });
@@ -748,6 +766,8 @@ async function runEvidenceReaderCommand(
       "cursor",
       "workstream",
       "all-workstreams",
+      "max-file-bytes",
+      "max-record-bytes",
     ]),
     new Set(["all-workstreams"]),
   );
@@ -772,6 +792,11 @@ async function runEvidenceReaderCommand(
       ? DEFAULT_EVIDENCE_BYTE_BUDGET
       : DEFAULT_TURN_READER_BYTE_BUDGET,
   );
+  const maxFileBytes = optionalPositiveIntegerFlag(flags, "max-file-bytes");
+  const maxRecordBytes = optionalPositiveIntegerFlag(
+    flags,
+    "max-record-bytes",
+  );
   // These identity flags locate the evidence file; they are not a caller
   // identity. Defaulting to the producer session's current workstream would
   // hide historical evidence after that session moves.
@@ -785,6 +810,9 @@ async function runEvidenceReaderCommand(
             sessionId,
             evidenceId,
             byteBudget,
+            ...(maxFileBytes === undefined ? {} : { maxFileBytes }),
+            ...(maxRecordBytes === undefined ? {} : { maxRecordBytes }),
+            ...(workstreamId === undefined ? {} : { workstreamId }),
             ...(flags.has("action-cursor")
               ? { actionCursor: flags.get("action-cursor")! }
               : {}),
@@ -795,17 +823,11 @@ async function runEvidenceReaderCommand(
             evidenceId,
             field,
             byteBudget,
+            ...(maxFileBytes === undefined ? {} : { maxFileBytes }),
+            ...(maxRecordBytes === undefined ? {} : { maxRecordBytes }),
             ...(workstreamId === undefined ? {} : { workstreamId }),
             ...(flags.has("cursor") ? { cursor: flags.get("cursor")! } : {}),
           });
-    if (
-      field === undefined &&
-      workstreamId !== undefined &&
-      projection.value.workstream_id !== workstreamId
-    ) {
-      io.stderr(`Barbaro evidence record not found: ${evidenceId}\n`);
-      return 1;
-    }
     io.stdout(`${stableStringify(projection)}\n`);
     return 0;
   } catch (error: unknown) {
@@ -1260,6 +1282,13 @@ function positiveIntegerFlag(
   return value;
 }
 
+function optionalPositiveIntegerFlag(
+  flags: ReadonlyMap<string, string>,
+  name: string,
+): number | undefined {
+  return flags.has(name) ? positiveIntegerFlag(flags, name, 1) : undefined;
+}
+
 function integerFlagAtLeast(
   flags: ReadonlyMap<string, string>,
   name: string,
@@ -1453,9 +1482,12 @@ function helpText(): string {
     `                  then use turn show <turn_id> --field response. Follow\n` +
     `                  next_cursor through complete; use evidence show for an\n` +
     `                  evidence_ref. Supported readers make every canonical\n` +
-    `                  turn byte and referenced canonical evidence reachable;\n` +
+    `                  turn byte and referenced canonical evidence reachable\n` +
+    `                  within their exposed file and record limits;\n` +
     `                  provider-raw omissions are outside that guarantee. Never\n` +
-    `                  read .barbaro/*.jsonl directly.\n\n` +
+    `                  read .barbaro/**/*.jsonl directly. If a direct field\n` +
+    `                  page says representation=json-string, concatenate all\n` +
+    `                  page text and JSON.parse it once.\n\n` +
     `  barbaro codex status --session-id <id> [--project-root <path>]\n` +
     `  barbaro codex ingest --trace <rollout.jsonl> [--project-root <path>] [--reset]\n` +
     `  barbaro codex hook          # synchronous active-state hook via stdin\n` +
@@ -1500,6 +1532,7 @@ function helpText(): string {
                               # live leases + newest turns, byte-bounded;
                               # scoped to the session's workstream when given
   barbaro turn list [--project-root <path>] [--byte-budget <n>] [--cursor <cursor>]
+                    [--max-file-bytes <n>] [--max-record-bytes <n>]
                     [--provider <claude|codex> --session-id <id>]
                     [--workstream <name|ws_id> | --all-workstreams]
                               # exhaustive newest-first canonical turn index;
@@ -1508,6 +1541,7 @@ function helpText(): string {
                               # high feed counts may require a larger budget
   barbaro turn show <turn_id> [--project-root <path>] [--byte-budget <n>]
                     [--field <record|request|response|actions>] [--cursor <cursor>]
+                    [--max-file-bytes <n>] [--max-record-bytes <n>]
                     [--provider <claude|codex> --session-id <id>]
                     [--workstream <name|ws_id> | --all-workstreams]
                               # lossless canonical or direct-field paging;
@@ -1515,6 +1549,7 @@ function helpText(): string {
   barbaro evidence show <evidence_id> --provider <claude|codex>
                     --session-id <ses_id> [--project-root <path>]
                     [--byte-budget <n>] [--action-cursor a:<offset>]
+                    [--max-file-bytes <n>] [--max-record-bytes <n>]
                     [--workstream <name|ws_id> | --all-workstreams]
                               # bounded evidence projection (default); use
                               # --field <record|content|request|response|actions>

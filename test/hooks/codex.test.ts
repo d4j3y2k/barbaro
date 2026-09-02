@@ -2828,6 +2828,36 @@ test("PermissionRequest reconstructs ordinary and await actions without PreToolU
   );
 });
 
+test("lossless reader commands are known read-only shell activity", async (t) => {
+  const cases = [
+    ["barbaro turn list --all-workstreams", false],
+    [`barbaro turn show turn_${"1".repeat(32)} --field response`, false],
+    [
+      `barbaro evidence show ev_${"2".repeat(32)} --provider codex --session-id ses_${"3".repeat(32)}`,
+      false,
+    ],
+    ["barbaro turn list | jq .value", true],
+    ["barbaro workstream new mutating-lane", true],
+  ] as const;
+
+  for (const [index, [command, unknownWriteScope]] of cases.entries()) {
+    const project = await temporaryProject(t);
+    const nativeSessionId = `session-reader-scope-${index}`;
+    await joinCodexSession(project, nativeSessionId);
+    await handleCodexHook({
+      hook_event_name: "PermissionRequest",
+      session_id: nativeSessionId,
+      turn_id: `turn-reader-scope-${index}`,
+      cwd: project,
+      tool_name: "Bash",
+      tool_input: { command },
+    });
+    const snapshot = await activeSnapshot(project, nativeSessionId);
+    assert.equal(snapshot?.unknown_write_scope, unknownWriteScope, command);
+    assert.deepEqual(snapshot?.claims, [], command);
+  }
+});
+
 test("delayed turn events cannot overwrite the authoritative newer prompt", async (t) => {
   const project = await temporaryProject(t);
   const nativeSessionId = "session-delayed-active-event";

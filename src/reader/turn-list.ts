@@ -81,6 +81,12 @@ export interface ReaderTurnListV1 {
     readonly start: number;
     readonly end: number;
   };
+  /** Counts are pinned with the traversal and repeat on every page. */
+  readonly diagnostics: {
+    readonly malformed_feed_records: number;
+    readonly invalid_feed_records: number;
+    readonly skipped_oversized_feed_files: number;
+  };
   readonly turns: {
     readonly shown: number;
     readonly total: number;
@@ -132,7 +138,21 @@ interface TurnListCursorState {
   readonly snapshotBinding: string;
   readonly after: TurnOrderingKey;
   readonly total: number;
+  readonly skippedOversizedFeedFiles: number;
 }
+
+interface CapturedFeedSnapshots {
+  readonly snapshots: readonly FeedSnapshot[];
+  readonly skippedOversizedFeedFiles: number;
+}
+
+interface ParsedFeedTurns {
+  readonly turns: readonly BarbaroTurnV1[];
+  readonly malformed: number;
+  readonly invalid: number;
+}
+
+interface PinnedTurns extends ParsedFeedTurns {}
 
 /** A valid cursor can no longer be resolved against its pinned snapshot. */
 export class ReaderTurnListSnapshotError extends RangeError {
@@ -183,24 +203,28 @@ export async function readProjectTurnList(
 
   let snapshots: readonly FeedSnapshot[];
   let snapshotBinding: string;
+  let skippedOversizedFeedFiles: number;
   let cursorState: TurnListCursorState | undefined;
   if (options.cursor === undefined) {
-    snapshots = await captureFeedSnapshots(boundary, limits);
+    const captured = await captureFeedSnapshots(boundary, limits);
+    snapshots = captured.snapshots;
+    skippedOversizedFeedFiles = captured.skippedOversizedFeedFiles;
     snapshotBinding = bindFeedSnapshots(snapshots);
   } else {
     cursorState = decodeTurnListCursor(options.cursor);
     assertCursorBinding(cursorState, projectBinding, scope, queryBinding);
     snapshots = cursorState.feeds;
     snapshotBinding = cursorState.snapshotBinding;
+    skippedOversizedFeedFiles = cursorState.skippedOversizedFeedFiles;
   }
 
-  const turns = await readPinnedTurns(
+  const pinned = await readPinnedTurns(
     boundary,
     snapshots,
     limits,
     snapshotBinding,
   );
-  const scoped = turns.filter(
+  const scoped = pinned.turns.filter(
     (turn) => workstreamId === undefined || turn.workstream_id === workstreamId,
   );
   scoped.sort(compareTurnsNewestFirst);
@@ -233,6 +257,11 @@ export async function readProjectTurnList(
     queryBinding,
     options.byteBudget,
     workstreamId,
+    {
+      malformed_feed_records: pinned.malformed,
+      invalid_feed_records: pinned.invalid,
+      skipped_oversized_feed_files: skippedOversizedFeedFiles,
+    },
   );
 }
 
@@ -248,6 +277,7 @@ function projectTurnListPage(
   queryBinding: string,
   byteBudget: number,
   workstreamId: string | undefined,
+  diagnostics: ReaderTurnListV1["diagnostics"],
 ): ReaderProjection<ReaderTurnListV1> {
   if (start > turns.length) {
     throw new ReaderTurnListSnapshotError(
@@ -268,6 +298,8 @@ function projectTurnListPage(
           snapshotBinding,
           after: orderingKey(turns[end - 1]!),
           total: turns.length,
+          skippedOversizedFeedFiles:
+            diagnostics.skipped_oversized_feed_files,
         });
     return {
       schema: READER_TURN_LIST_SCHEMA,
@@ -276,6 +308,7 @@ function projectTurnListPage(
         : { kind: "workstream", workstream_id: workstreamId },
       complete,
       range: { start, end },
+      diagnostics,
       turns: {
         shown,
         total: turns.length,
@@ -335,14 +368,28 @@ function projectTurnListEntry(turn: BarbaroTurnV1): ReaderTurnListEntry {
 async function captureFeedSnapshots(
   boundary: SafeStoreBoundary,
   limits: TurnListLimits,
-): Promise<FeedSnapshot[]> {
+): Promise<CapturedFeedSnapshots> {
   const files = await listFeedFiles(boundary);
   const snapshots: FeedSnapshot[] = [];
+  let skippedOversizedFeedFiles = 0;
   for (const file of files) {
-    const captured = await readFeedAtEndpoint(boundary, file, limits);
-    snapshots.push(captured.snapshot);
+    try {
+      const captured = await readFeedAtEndpoint(boundary, file, limits);
+      // Reject a record-oversized feed before pinning it into a traversal so
+      // it behaves like a file-oversized feed on every continuation page.
+      parseFeedTurns(captured.bytes, captured.path, captured.snapshot, limits);
+      snapshots.push(captured.snapshot);
+    } catch (error: unknown) {
+      if (
+        !(error instanceof StoreFileTooLargeError) &&
+        !(error instanceof ReaderRecordTooLargeError)
+      ) {
+        throw error;
+      }
+      skippedOversizedFeedFiles += 1;
+    }
   }
-  return snapshots;
+  return { snapshots, skippedOversizedFeedFiles };
 }
 
 async function readPinnedTurns(
@@ -350,12 +397,14 @@ async function readPinnedTurns(
   snapshots: readonly FeedSnapshot[],
   limits: TurnListLimits,
   expectedSnapshotBinding: string,
-): Promise<BarbaroTurnV1[]> {
+): Promise<PinnedTurns> {
   const turnsById = new Map<
     string,
     { readonly turn: BarbaroTurnV1; readonly canonical: string }
   >();
   const observedSnapshots: FeedSnapshot[] = [];
+  let malformed = 0;
+  let invalid = 0;
   for (const snapshot of snapshots) {
     const read = await readFeedAtEndpoint(
       boundary,
@@ -364,7 +413,10 @@ async function readPinnedTurns(
       snapshot,
     );
     observedSnapshots.push(read.snapshot);
-    for (const turn of parseFeedTurns(read.bytes, read.path, snapshot, limits)) {
+    const parsed = parseFeedTurns(read.bytes, read.path, snapshot, limits);
+    malformed += parsed.malformed;
+    invalid += parsed.invalid;
+    for (const turn of parsed.turns) {
       const canonical = stableStringify(turn);
       const previous = turnsById.get(turn.turn_id);
       if (previous === undefined) {
@@ -379,7 +431,11 @@ async function readPinnedTurns(
       "Pinned feed identities or contents changed",
     );
   }
-  return [...turnsById.values()].map((entry) => entry.turn);
+  return {
+    turns: [...turnsById.values()].map((entry) => entry.turn),
+    malformed,
+    invalid,
+  };
 }
 
 async function listFeedFiles(
@@ -467,7 +523,8 @@ async function readFeedAtEndpoint(
       throw new UnsafeStorePathError(path, "final file has multiple hard links");
     }
     const before = snapshotFromStats(beforeStats);
-    if (before.size > limits.maxFileBytes) {
+    const endOffset = expected?.endOffset ?? before.size;
+    if (endOffset > limits.maxFileBytes) {
       throw new StoreFileTooLargeError(path, limits.maxFileBytes);
     }
     if (
@@ -476,7 +533,6 @@ async function readFeedAtEndpoint(
     ) {
       throw new ReaderTurnListSnapshotError(`Pinned feed was rotated: ${path}`);
     }
-    const endOffset = expected?.endOffset ?? before.size;
     if (before.size < endOffset) {
       throw new ReaderTurnListSnapshotError(`Pinned feed was truncated: ${path}`);
     }
@@ -487,9 +543,6 @@ async function readFeedAtEndpoint(
       throw new UnsafeStorePathError(path, "opened feed lost its regular single-link identity");
     }
     const after = snapshotFromStats(afterStats);
-    if (after.size > limits.maxFileBytes) {
-      throw new StoreFileTooLargeError(path, limits.maxFileBytes);
-    }
     if (
       !fileIdentityEquals(before.identity, after.identity) ||
       after.size < endOffset
@@ -524,8 +577,10 @@ function parseFeedTurns(
   path: string,
   feed: FeedFile,
   limits: TurnListLimits,
-): BarbaroTurnV1[] {
+): ParsedFeedTurns {
   const turns: BarbaroTurnV1[] = [];
+  let malformed = 0;
+  let invalid = 0;
   let start = 0;
   for (let index = 0; index < bytes.byteLength; index += 1) {
     if (bytes[index] !== 0x0a) continue;
@@ -536,8 +591,10 @@ function parseFeedTurns(
       throw new ReaderRecordTooLargeError(path, limits.maxRecordBytes);
     }
     if (line.byteLength > 0) {
-      const turn = parseTurnLine(line, feed);
-      if (turn !== undefined) turns.push(turn);
+      const parsed = parseTurnLine(line, feed);
+      if (parsed.kind === "turn") turns.push(parsed.turn);
+      if (parsed.kind === "malformed") malformed += 1;
+      if (parsed.kind === "invalid") invalid += 1;
     }
     start = index + 1;
   }
@@ -545,28 +602,33 @@ function parseFeedTurns(
   if (partialBytes > limits.maxRecordBytes) {
     throw new ReaderRecordTooLargeError(path, limits.maxRecordBytes);
   }
-  return turns;
+  return { turns, malformed, invalid };
 }
+
+type ParsedTurnLine =
+  | { readonly kind: "turn"; readonly turn: BarbaroTurnV1 }
+  | { readonly kind: "malformed" }
+  | { readonly kind: "invalid" };
 
 function parseTurnLine(
   line: Buffer,
   feed: FeedFile,
-): BarbaroTurnV1 | undefined {
+): ParsedTurnLine {
   let value: unknown;
   try {
     const text = new TextDecoder("utf-8", { fatal: true }).decode(line);
     value = JSON.parse(text);
   } catch {
-    return undefined;
+    return { kind: "malformed" };
   }
   if (
     !isTurnV1(value) ||
     value.provider !== feed.provider ||
     value.session_id !== feed.sessionId
   ) {
-    return undefined;
+    return { kind: "invalid" };
   }
-  return value;
+  return { kind: "turn", turn: value };
 }
 
 function compareTurnsNewestFirst(
@@ -725,6 +787,7 @@ function encodeTurnListCursor(state: TurnListCursorState): string {
       state.after.turnId,
     ],
     state.total,
+    state.skippedOversizedFeedFiles,
   ];
   const compressed = deflateRawSync(
     Buffer.from(stableStringify(payload), "utf8"),
@@ -774,7 +837,10 @@ function decodeTurnListCursor(cursor: string): TurnListCursorState {
 }
 
 function parseCursorPayload(value: unknown): TurnListCursorState {
-  if (!Array.isArray(value) || value.length !== 8) {
+  if (
+    !Array.isArray(value) ||
+    (value.length !== 8 && value.length !== 9)
+  ) {
     throw new TypeError("Malformed turn-list cursor payload");
   }
   const [
@@ -786,6 +852,7 @@ function parseCursorPayload(value: unknown): TurnListCursorState {
     snapshotBinding,
     rawAfter,
     total,
+    rawSkippedOversizedFeedFiles,
   ] = value;
   if (version !== READER_TURN_LIST_CURSOR_VERSION) {
     throw new TypeError("Unsupported turn-list cursor version");
@@ -815,6 +882,13 @@ function parseCursorPayload(value: unknown): TurnListCursorState {
   if (!isSafeNonNegativeInteger(total)) {
     throw new TypeError("Malformed turn-list cursor total");
   }
+  const skippedOversizedFeedFiles =
+    rawSkippedOversizedFeedFiles === undefined
+      ? 0
+      : rawSkippedOversizedFeedFiles;
+  if (!isSafeNonNegativeInteger(skippedOversizedFeedFiles)) {
+    throw new TypeError("Malformed turn-list cursor diagnostics");
+  }
   return {
     projectBinding,
     scope,
@@ -823,6 +897,7 @@ function parseCursorPayload(value: unknown): TurnListCursorState {
     snapshotBinding,
     after,
     total,
+    skippedOversizedFeedFiles,
   };
 }
 
