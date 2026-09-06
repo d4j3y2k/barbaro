@@ -44,8 +44,8 @@ one.
 
 ## Reading the events
 
-Each line is one event, already filtered. `active/` churn is deliberately not
-reported, so anything arriving is real.
+Each line is one event, already filtered. Routine lease renewal is silent.
+Path warnings are advisory, with confidence and owning workstreams stated.
 
 - `WATCH armed` — the baseline banner. `live` counts sessions with unexpired
   working leases; `enrolled` counts every session that ever joined. When this
@@ -67,21 +67,42 @@ reported, so anything arriving is real.
   or a stalled hook looks identical to a crash. A session that goes idle
   first is saying goodbye and is deliberately not reported, and a subagent
   lease lapsing under a still-live session is routine completion, not news.
+- `CONFLICT` — known live paths in this workstream overlap paths held by a
+  foreign workstream (including unscoped actors). Only appearance or a material
+  path/confidence/unknown-scope change emits; renewal, tool activity, unrelated
+  paths and watcher replies stay silent. Expired claims leave the current set.
+  Exact same paths can have exact confidence; ancestor/descendant overlap is
+  inferred. Unknown scope alone never asserts a collision. Inspect the claims
+  before deciding what this means for the planned write.
 - `WATCH-ERROR` — the watcher itself is struggling; five in a row and it
   stops.
+
+These delivery commands require matching alpha.6 hooks and CLI. During an
+explicitly staged rollout, follow the approved runtime plan; do not replace a
+running build merely to update guidance. With alpha.6 hooks, legacy `context`
+and `turn show` remain observers.
 
 ## Acting on them
 
 - Say what the event *means* for the work in hand. Never paste the raw line
   at the user and leave them to decode it.
 - Run
-  `barbaro context --provider claude --session-id "$CLAUDE_CODE_SESSION_ID" --project-root "$PWD"`
+  `barbaro read context --provider claude --session-id "$CLAUDE_CODE_SESSION_ID" --project-root "$PWD"`
   when an event could change what this session is about to do or a Barbaro
-  nudge says peer turns are unread. Its leading tool hook acknowledges the
-  current unread cursor, and the command shows the peer content. It is scoped
-  to this session's workstream; add `--all-workstreams` to see the whole
-  project, including other workstreams' write claims. Do not read on a
-  cadence; most wakes need no follow-up read.
+  nudge says peer turns are unread. Run one foreground Bash command with
+  complete unfiltered output. PreToolUse only reserves; successful PostToolUse
+  stages stdout and the matching PostToolBatch model text acknowledges complete
+  attention fields. The default 8192-byte ceiling includes the envelope and
+  newline; larger actual output, failure and previews are observers. A partial
+  window leaves older gaps unread. Do not read on a cadence.
+- Inspect `.value.project_claims` in scoped context before writing. It includes
+  project-wide paths, workstream/actor identity, confidence, unknown scope and
+  expiry, without foreign conversation or ordinary activity. Check shown/total
+  and coverage for omitted or invalid claims; an incomplete view does not prove
+  a path free. Observer `barbaro context` with a larger `--byte-budget` in the same
+  scope can show more. During the approved alpha.5 staged runtime, use legacy
+  `barbaro context --all-workstreams --project-root "$PWD"`. Foreign/all-workstream
+  reads never acknowledge this session's scoped peer turns.
 - Treat watch and context as bounded attention, not a complete transcript. The
   per-session context window can omit older turns even when shown equals total,
   so use the exhaustive reader whenever completeness or absence matters. Always
@@ -91,10 +112,11 @@ reported, so anything arriving is real.
   `barbaro turn list --provider claude --session-id "$CLAUDE_CODE_SESSION_ID" --project-root "$PWD"`
   and follow `.value.turns.next_cursor` with `--cursor` until complete. Read a
   relevant answer exactly with
-  `barbaro turn show <turn_id> --field response --provider claude --session-id "$CLAUDE_CODE_SESSION_ID" --project-root "$PWD"`;
+  `barbaro read turn show <turn_id> --field response --provider claude --session-id "$CLAUDE_CODE_SESSION_ID" --project-root "$PWD"`;
   follow `.value.next_cursor` and concatenate `.value.text`. If
   `.value.representation` is `json-string`, JSON-parse the complete
-  concatenated value once. Use `--field request` for the exact request or
+  concatenated value once. Use `--field request` when the response is absent
+  or you need the exact request; use
   `--field record` for the canonical turn.
 - Retrieve an evidence reference exactly with the provider and canonical
   session ID from its owning turn:

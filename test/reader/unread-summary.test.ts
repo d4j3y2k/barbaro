@@ -21,10 +21,12 @@ import {
 } from "../../src/core/checkpoint.js";
 import { readJsonlForward } from "../../src/core/jsonl-reader.js";
 import {
-  NUDGE_CURSOR_SCHEMA,
+  NUDGE_CURSOR_SCHEMA_V2,
   NUDGE_CURSOR_SCHEMA_V1,
+  NUDGE_CURSOR_SCHEMA,
   type NudgeCursorV2,
 } from "../../src/nudge/types.js";
+import { InvalidNudgeCursorError, NudgeCursorStateStore } from "../../src/nudge/store.js";
 import {
   readUnreadSummaryBatch,
   type ReaderUnreadBatch,
@@ -132,7 +134,7 @@ async function writeCursor(
   const path = cursorPath(project, key.provider, key.session_id);
   await mkdir(dirname(path), { recursive: true });
   const value: NudgeCursorV2 = {
-    schema: NUDGE_CURSOR_SCHEMA,
+    schema: NUDGE_CURSOR_SCHEMA_V2,
     provider: key.provider,
     session_id: key.session_id,
     workstream_id: key.workstream_id,
@@ -178,6 +180,34 @@ function assertUnknown(
   assert.equal("unread_count" in summary, false);
   assert.equal("newest" in summary, false);
 }
+
+test("both cursor decoders refuse malformed v3 delivery state without rewriting it", async (t) => {
+  const project = await temporaryProject(t);
+  const key = recipient(RECIPIENT_A);
+  const path = await writeCursor(project, key, []);
+  const legacy = JSON.parse(await readFile(path, "utf8")) as Record<string, unknown>;
+  const empty = { pending: [], coverage: [], outside_window: false };
+  const good = { ...legacy, schema: NUDGE_CURSOR_SCHEMA, reads: empty };
+  const store = new NudgeCursorStateStore(project);
+  for (const invalid of [
+    { ...good, reads: undefined },
+    { ...good, extra: true },
+    { ...good, reads: { ...empty, unexpected: true } },
+    { ...good, reads: { ...empty, coverage: [{}] } },
+    { ...good, reads: { ...empty, pending: [{}] } },
+    { ...good, reads: { ...empty, outside_window: 1 } },
+    { ...good, delivery: { highest_unread_count: 0, last_turn: { kind: "codex", turn_id: `turn_${"a".repeat(32)}` } } },
+  ]) {
+    await writeFile(path, `${JSON.stringify(invalid)}\n`);
+    const before = await readFile(path);
+    await assert.rejects(store.read(key.provider, key.session_id), InvalidNudgeCursorError);
+    assertUnknown(only(await readUnreadSummaryBatch(options(project, [key]))), "cursor_invalid");
+    assert.deepEqual(await readFile(path), before);
+  }
+  await writeFile(path, `${JSON.stringify(good)}\n`);
+  assert.deepEqual(await store.read(key.provider, key.session_id), good);
+  assert.equal(only(await readUnreadSummaryBatch(options(project, [key]))).status, "ready");
+});
 
 test("an absent store yields a pure deterministic virtual zero", async (t) => {
   const project = await temporaryProject(t);

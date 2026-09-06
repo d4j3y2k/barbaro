@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { utimesSync, writeFileSync } from "node:fs";
 import {
   appendFile,
   mkdtemp,
@@ -18,11 +19,13 @@ import type {
   BarbaroEvidenceV1,
   BarbaroTurnV1,
 } from "../../src/contracts/v1.js";
+import { ClaudeTurnNormalizer } from "../../src/providers/claude/normalizer.js";
 import { handleClaudeIngestHook } from "../../src/hooks/claude.js";
 import type { BarbaroIngestAttemptJournalV2 } from "../../src/hooks/ingest-attempt.js";
 import { admitHookSession } from "../../src/hooks/participation.js";
 import {
   claudeRunnerStatePath,
+  computeActiveMembership,
   discoverSubagentFiles,
   runClaudeTrace,
 } from "../../src/runner/claude.js";
@@ -1394,6 +1397,360 @@ async function rowsOf(tracePath: string): Promise<string[]> {
   return (await readFile(tracePath, "utf8")).split("\n").filter(Boolean);
 }
 
+test("a pointer inside an unfinished response retains its complete settlement", async (t) => {
+  for (const [scenario, sessionId, verdict, count] of [
+    ["pointer-last-call", "12121212-1212-4212-8212-121212121212", "CHECKPOINT 1 APPROVED — replay verdict.", 1],
+    ["pointer-first-result", PARALLEL_GROUP, "Config looks right and the tests pass.", 2],
+  ] as const) {
+    for (const variant of ["native", "first-call", "first-result", "last-result", "reversed-results", "terminal-on-first-result"] as const) {
+      await t.test(`${scenario}/${variant}`, async () => {
+        const { projectRoot, tracePath } = await stageScenario(scenario, sessionId);
+        const rows = (await rowsOf(tracePath)).map((line) => JSON.parse(line));
+        const results = rows.filter((r) => r.uuid?.startsWith("pointer-result-"));
+        if (["first-call", "first-result", "last-result"].includes(variant)) {
+          const pointer = rows.splice(rows.findIndex((r) => r.type === "last-prompt"), 1)[0];
+          pointer.leafUuid = variant === "first-call" ? "pointer-call-0" : variant === "first-result" ? results[0].uuid : results.at(-1).uuid;
+          rows.splice(rows.findIndex((r) => r.uuid === pointer.leafUuid) + 1, 0, pointer);
+        }
+        if (variant === "reversed-results") {
+          const indexes = rows.flatMap((r, i) => results.includes(r) ? [i] : []);
+          indexes.forEach((index, i) => { rows[index] = results[results.length - i - 1]; });
+        }
+        if (variant === "terminal-on-first-result") {
+          const child = rows.find((r) => r.parentUuid === results.at(-1).uuid);
+          assert.ok(child);
+          child.parentUuid = results[0].uuid;
+        }
+        await writeFile(tracePath, rows.map((r) => JSON.stringify(r) + "\n").join(""));
+        await joinClaudeSession(projectRoot, sessionId);
+        const stopped = await handleClaudeIngestHook({
+          hook_event_name: "Stop", session_id: sessionId, cwd: projectRoot, transcript_path: tracePath,
+          stop_hook_active: scenario === "pointer-last-call", last_assistant_message: verdict,
+        }, { trailingTimeoutMs: 100, sleep: async () => assert.fail("complete settlement needs no later event") });
+        assert.equal(stopped.ingested?.input.withheld_reason, undefined);
+        assert.equal(stopped.ingested?.output.turns_appended, count);
+        assert.equal(stopped.ingested?.diagnostics.unpaired_tool_uses, 0);
+        const feed = join(projectRoot, ".barbaro/feed/claude", `${stopped.ingested!.session_id}.jsonl`);
+        const evidence = join(projectRoot, ".barbaro/evidence/claude", `${stopped.ingested!.session_id}.jsonl`);
+        const before = [await readFile(feed, "utf8"), await readFile(evidence, "utf8")];
+        const turns = await readJsonl<BarbaroTurnV1>(feed);
+        assert.equal(turns.length, count);
+        const target = turns.at(-1)!;
+        if (scenario === "pointer-last-call") {
+          // Nonterminal commentary belongs to evidence, not terminal response
+          // composition. The two terminal verdicts retain their exact bytes.
+          assert.equal(target.response?.text, `CHECKPOINT 1 APPROVED — replay verdict.\n\n${verdict}`);
+          assert.deepEqual(target.actions.filter((a) => a.kind === "command" && a.command.text.startsWith("node fixture-read")).map((a) => a.kind === "command" ? a.command.text : ""), ["alpha", "beta", "gamma"].map((n) => `node fixture-read.mjs ${n}.txt`));
+        } else {
+          assert.equal(target.response?.text, verdict);
+          assert.deepEqual(target.actions.map((a) => a.kind === "tool" ? a.tool_name : a.kind), ["Read", "test"]);
+        }
+        for (const [index, reset] of [false, false, true].entries()) {
+          if (index === 1) await appendFile(tracePath, JSON.stringify({
+            ...rows.find((r) => r.type === "last-prompt"), leafUuid: rows.at(-1).uuid,
+          }) + "\n");
+          const replay = await runClaudeTrace({ projectRoot, tracePath, final: true, sourceFinal: false, reset });
+          assert.equal(replay.input.withheld_reason, undefined);
+          assert.equal(replay.output.turns_appended, 0);
+          assert.equal(replay.output.evidence_appended, 0);
+          assert.equal(replay.output.conflicted, 0);
+          assert.deepEqual([await readFile(feed, "utf8"), await readFile(evidence, "utf8")], before);
+        }
+      });
+    }
+  }
+});
+
+test("a serialized response publishes at its own Stop through validated result and attachment bridges", async (t) => {
+  const session = "34343434-3434-4434-8434-343434343434";
+  const verdict = "CHECKPOINT 5 APPROVED — serialized verdict.";
+  for (const variant of ["last-call", "last-result", "first-result", "middle-result", "first-call", "middle-call", "direct-edge", "attachment-chain"] as const) {
+    await t.test(variant, async () => {
+      const { projectRoot, tracePath } = await stageScenario("serialized-response", session);
+      const rows = (await rowsOf(tracePath)).map((line) => JSON.parse(line));
+      const pointer = rows.splice(rows.findIndex((r) => r.type === "last-prompt"), 1)[0];
+      const selected = { "last-call": "serial-call-2", "last-result": "serial-result-2",
+        "first-result": "serial-result-0", "middle-result": "serial-result-1",
+        "first-call": "serial-call-0", "middle-call": "serial-call-1",
+        "direct-edge": "serial-call-2", "attachment-chain": "serial-call-2" }[variant];
+      if (variant === "direct-edge") {
+        rows.splice(rows.findIndex((r) => r.uuid === "serial-inline"), 1);
+        rows.find((r) => r.uuid === "serial-call-2").parentUuid = "serial-result-1";
+      }
+      if (variant === "attachment-chain") {
+        const inline = rows.find((r) => r.uuid === "serial-inline");
+        rows.splice(rows.indexOf(inline) + 1, 0, { ...inline, uuid: "serial-inline-extra", parentUuid: inline.uuid });
+        rows.find((r) => r.uuid === "serial-call-2").parentUuid = "serial-inline-extra";
+      }
+      pointer.leafUuid = selected;
+      rows.splice(rows.findIndex((r) => r.uuid === selected) + 1, 0, pointer);
+      await writeFile(tracePath, rows.map((r) => JSON.stringify(r) + "\n").join(""));
+      await joinClaudeSession(projectRoot, session);
+      const stopped = await handleClaudeIngestHook({
+        hook_event_name: "Stop", session_id: session, cwd: projectRoot, transcript_path: tracePath,
+        last_assistant_message: verdict,
+      }, { trailingTimeoutMs: 100, sleep: async () => assert.fail("complete serialized settlement needs no later event") });
+      assert.equal(stopped.ingested?.input.withheld_reason, undefined);
+      assert.equal(stopped.ingested?.output.turns_appended, 1);
+      assert.equal(stopped.ingested?.diagnostics.unpaired_tool_uses, 0);
+      const feed = join(projectRoot, ".barbaro/feed/claude", `${stopped.ingested!.session_id}.jsonl`);
+      const evidence = join(projectRoot, ".barbaro/evidence/claude", `${stopped.ingested!.session_id}.jsonl`);
+      const canonical = [await readFile(feed, "utf8"), await readFile(evidence, "utf8")];
+      const turns = await readJsonl<BarbaroTurnV1>(feed);
+      assert.equal(turns[0]?.response?.text, verdict);
+      assert.deepEqual(turns[0]?.actions.filter((a) => a.kind === "command").map((a) => a.command.text),
+        ["alpha", "beta", "gamma"].map((name) => `node fixture-read.mjs ${name}.txt`));
+      for (const [index, reset] of [false, false, true].entries()) {
+        if (index === 1) await appendFile(tracePath, JSON.stringify({ ...pointer, leafUuid: "serial-duration" }) + "\n");
+        const replay = await runClaudeTrace({ projectRoot, tracePath, final: true, sourceFinal: false, reset });
+        assert.equal(replay.input.withheld_reason, undefined);
+        assert.equal(replay.output.turns_appended, 0);
+        assert.equal(replay.output.evidence_appended, 0);
+        assert.equal(replay.output.conflicted, 0);
+        assert.deepEqual([await readFile(feed, "utf8"), await readFile(evidence, "utf8")], canonical);
+      }
+    });
+  }
+});
+
+test("serialized response bridges preserve disconnected and competing-evidence refusals", async (t) => {
+  const session = "34343434-3434-4434-8434-343434343434";
+  for (const variant of ["human-boundary", "foreign-group", "outside-call-bridge", "mixed-bridge", "malformed-bridge", "malformed-last-result",
+    "wrong-source", "wrong-request", "duplicate-call", "duplicate-result", "missing-result",
+    "disconnected-before", "disconnected-after", "rewind", "cycle", "duplicate-uuid"] as const) {
+    await t.test(variant, async () => {
+      const { projectRoot, tracePath } = await stageScenario("serialized-response", session);
+      const rows = (await rowsOf(tracePath)).map((line) => JSON.parse(line));
+      const first = rows.find((r) => r.uuid === "serial-call-0");
+      const middle = rows.find((r) => r.uuid === "serial-call-1");
+      const result = rows.find((r) => r.uuid === "serial-result-0");
+      if (variant === "human-boundary" || variant === "foreign-group") {
+        const boundary = variant === "human-boundary"
+          ? { ...rows[0], uuid: "serial-boundary", parentUuid: result.uuid }
+          : { ...middle, uuid: "serial-boundary", parentUuid: result.uuid,
+              message: { ...middle.message, id: "foreign-group", content: [{ type: "text", text: "Another response." }] } };
+        rows.splice(rows.indexOf(middle), 0, boundary);
+        middle.parentUuid = boundary.uuid;
+      }
+      if (variant === "outside-call-bridge") {
+        rows.splice(1, 0, { ...first, uuid: "disconnected-call", parentUuid: "unknown-root",
+          message: { ...first.message, content: [{ ...first.message.content[0], id: "outside-call" }] } });
+        result.message.content.push({ type: "tool_result", tool_use_id: "outside-call", content: "foreign result" });
+        delete result.sourceToolAssistantUUID;
+      }
+      if (variant === "mixed-bridge") result.message.content.push({ type: "text", text: "A new human instruction." });
+      if (variant === "malformed-bridge") result.message.content.push(null);
+      if (variant === "malformed-last-result") rows.find((r) => r.uuid === "serial-result-2").message.content.push(null);
+      if (variant === "wrong-source") result.sourceToolAssistantUUID = middle.uuid;
+      if (variant === "wrong-request") middle.requestId = "foreign-request";
+      if (variant === "duplicate-call") middle.message.content.push(first.message.content[0]);
+      if (variant === "duplicate-result") rows.push({ ...result, uuid: "competing-result" });
+      if (variant === "missing-result") {
+        rows.splice(rows.findIndex((r) => r.uuid === "serial-result-1"), 1);
+        rows.find((r) => r.uuid === "serial-inline").parentUuid = middle.uuid;
+      }
+      if (variant === "disconnected-before" || variant === "disconnected-after") {
+        const copy = { ...rows.find((r) => r.uuid === "serial-intro-1"), uuid: "disconnected-text", parentUuid: "unknown-root" };
+        rows.splice(variant === "disconnected-before" ? rows.findIndex((r) => r.type === "last-prompt") : rows.length, 0, copy);
+      }
+      if (variant === "rewind") result.parentUuid = "serial-prompt";
+      if (variant === "cycle") rows.find((r) => r.uuid === "serial-inline").parentUuid = "serial-call-2";
+      if (variant === "duplicate-uuid") rows.push({ ...result });
+      await writeFile(tracePath, rows.map((r) => JSON.stringify(r) + "\n").join(""));
+      for (const sourceFinal of [false, true]) {
+        const refused = await runClaudeTrace({ projectRoot, tracePath, final: true, sourceFinal });
+        assert.ok(refused.input.withheld_reason);
+        if (variant === "missing-result") assert.equal(refused.input.withheld_reason, "unsettled_tool_results");
+        assert.equal(refused.output.turns_appended, 0);
+        assert.equal(refused.output.evidence_appended, 0);
+      }
+    });
+  }
+});
+
+test("anchored response settlement refuses missing, competing and disconnected evidence", async (t) => {
+  for (const variant of ["missing-result", "duplicate-result", "duplicate-call", "wrong-source", "foreign-result", "wrong-request", "disconnected-call", "human-boundary", "foreign-group-boundary", "rewind", "pre-pointer-rewind", "single-wrong-source", "competing-answer", "cycle", "duplicate-uuid"] as const) {
+    await t.test(variant, async () => {
+      const { projectRoot, tracePath } = await stageScenario("pointer-first-result", PARALLEL_GROUP);
+      const rows = (await rowsOf(tracePath)).map((line) => JSON.parse(line));
+      const call = rows.find((r) => r.uuid === "pointer-call-1")!;
+      const result = rows.find((r) => r.uuid === "pointer-result-1")!;
+      const answer = rows.find((r) => r.parentUuid === result.uuid)!;
+      if (variant === "missing-result") { rows.splice(rows.indexOf(result), 1); answer.parentUuid = "pointer-result-0"; }
+      if (variant === "duplicate-result") rows.push({ ...result, uuid: "duplicate-result" });
+      if (variant === "duplicate-call") call.message.content.push(rows.find((r) => r.uuid === "pointer-call-0").message.content[0]);
+      if (variant === "wrong-source") result.sourceToolAssistantUUID = "pointer-call-0";
+      if (variant === "foreign-result") result.message.content[0].tool_use_id = "unknown-call";
+      if (variant === "wrong-request") call.requestId = "another-request";
+      if (variant === "disconnected-call") call.parentUuid = "unknown-root";
+      if (variant === "rewind") result.parentUuid = rows[0].uuid;
+      if (variant === "pre-pointer-rewind") {
+        result.parentUuid = rows[0].uuid;
+        rows.splice(rows.indexOf(result), 1);
+        rows.splice(rows.findIndex((r) => r.type === "last-prompt"), 0, result);
+      }
+      if (variant === "single-wrong-source") {
+        rows.splice(rows.indexOf(call), 1);
+        rows.splice(rows.indexOf(result), 1);
+        rows.find((r) => r.uuid === "pointer-result-0").sourceToolAssistantUUID = "wrong-call";
+        answer.parentUuid = "pointer-result-0";
+      }
+      if (variant === "competing-answer") rows.push({ ...answer, uuid: "competing-answer", parentUuid: "pointer-result-0", message: { ...answer.message, id: "competing-group" } });
+      if (variant === "cycle") call.parentUuid = result.uuid;
+      if (variant === "duplicate-uuid") rows.push(result);
+      if (variant === "human-boundary" || variant === "foreign-group-boundary") {
+        const bridge = variant === "human-boundary" ? { ...rows[3], uuid: "bridge", parentUuid: "pointer-call-0" } : { ...call, uuid: "bridge", parentUuid: "pointer-call-0", message: { ...call.message, id: "foreign-group", content: [{ type: "text", text: "A different response." }] } };
+        call.parentUuid = bridge.uuid;
+        rows.splice(rows.indexOf(call), 0, bridge);
+      }
+      const membership = computeActiveMembership(rows.map((value, index) => ({ value, lineNumber: index + 1 })));
+      if (variant === "disconnected-call") assert.equal(membership.ancestry?.has(call.uuid), false);
+      await writeFile(tracePath, rows.map((r) => JSON.stringify(r) + "\n").join(""));
+      for (const sourceFinal of [false, true]) {
+        const result = await runClaudeTrace({ projectRoot, tracePath, final: true, sourceFinal });
+        assert.ok(result.input.withheld_reason);
+        if (variant === "missing-result") assert.equal(result.input.withheld_reason, "unsettled_tool_results");
+        assert.equal(result.output.turns_appended, 0);
+        assert.equal(result.output.evidence_appended, 0);
+      }
+    });
+  }
+});
+
+test("a stale pointer publishes an attested parallel group at its own Stop and replays identical bytes", async (t) => {
+  for (const variant of ["sibling-results", "sibling-calls", "inline-attachment", "mixed-first-result-parent", "mixed-last-result-parent", "mixed-reversed-results", "mixed-attachment-chains", "mixed-pointer-in-attachments"] as const) {
+    await t.test(variant, async () => {
+      const { projectRoot, tracePath } = await stageScenario("stale-parallel-group", PARALLEL_GROUP);
+      const rows = (await rowsOf(tracePath)).map((line) => JSON.parse(line));
+      if (variant === "sibling-calls") rows[6].parentUuid = rows[4].uuid;
+      if (variant === "inline-attachment") {
+        const result = rows[8];
+        const attachment = { ...result, type: "attachment", uuid: "d1000000-0000-4000-8000-000000000008", attachment: { type: "hook_additional_context", content: "sanitized hook context" } };
+        delete attachment.message;
+        result.parentUuid = attachment.uuid;
+        rows.splice(8, 0, attachment);
+      }
+      if (variant.startsWith("mixed-")) {
+        // Real 2.1.261 topology: chained calls, each result parented to its own
+        // call. The first call's children mix an assistant and a user result.
+        rows[7].parentUuid = rows[5].uuid;
+        rows[9].parentUuid = rows[variant === "mixed-first-result-parent" ? 7 : 8].uuid;
+        if (variant === "mixed-reversed-results") [rows[7], rows[8]] = [rows[8], rows[7]];
+        if (variant === "mixed-attachment-chains" || variant === "mixed-pointer-in-attachments") {
+          const result = rows[8];
+          const chain = Array.from({ length: 3 }, (_, index) => ({
+            type: "attachment", uuid: `mixed-inline-${index}`, parentUuid: index === 0 ? result.uuid : `mixed-inline-${index - 1}`,
+            attachment: { type: "hook_additional_context", content: "sanitized result attachment" },
+          }));
+          rows[9].parentUuid = chain[2]!.uuid;
+          rows.splice(9, 0, ...chain);
+          // An attachment-only sibling must not invent a branch choice.
+          rows.splice(8, 0, { type: "attachment", uuid: "mixed-sidecar", parentUuid: rows[7].uuid, attachment: { type: "hook_additional_context", content: "sanitized sidecar" } });
+          if (variant === "mixed-pointer-in-attachments") {
+            const index = rows.findIndex((row) => row.uuid === "mixed-inline-1");
+            rows.splice(index + 1, 0, { ...rows[3], leafUuid: "mixed-inline-1" });
+          }
+        }
+      }
+      await writeFile(tracePath, rows.map((row) => JSON.stringify(row) + "\n").join(""));
+      await joinClaudeSession(projectRoot, PARALLEL_GROUP);
+      const stopped = await handleClaudeIngestHook({
+        hook_event_name: "Stop", session_id: PARALLEL_GROUP, cwd: projectRoot, transcript_path: tracePath,
+        last_assistant_message: "Config looks right and the tests pass.",
+      }, { trailingTimeoutMs: 100, sleep: async () => assert.fail("the closed group needs no extra provider event") });
+      assert.equal(stopped.ignored, undefined);
+      assert.equal(stopped.ingested?.input.withheld_reason, undefined);
+      assert.equal(stopped.ingested?.output.turns_appended, 2);
+      assert.equal(stopped.ingested?.diagnostics.unpaired_tool_uses, 0);
+      assert.equal(stopped.ingested?.output.conflicted, 0);
+      const feed = join(projectRoot, ".barbaro", "feed", "claude", `${stopped.ingested!.session_id}.jsonl`);
+      const evidence = join(projectRoot, ".barbaro", "evidence", "claude", `${stopped.ingested!.session_id}.jsonl`);
+      const before = [await readFile(feed, "utf8"), await readFile(evidence, "utf8")];
+      const turns = await readJsonl<BarbaroTurnV1>(feed);
+      assert.deepEqual(turns[1]!.actions.map((action) => action.kind === "tool" ? action.tool_name : action.kind), ["Read", "test"]);
+      await appendFile(tracePath, JSON.stringify({ ...rows[3], leafUuid: rows.at(-1).uuid }) + "\n");
+      for (const reset of [false, true]) {
+        const replay = await runClaudeTrace({ projectRoot, tracePath, final: true, sourceFinal: false, reset });
+        assert.equal(replay.input.withheld_reason, undefined);
+        assert.equal(replay.output.turns_appended, 0);
+        assert.equal(replay.output.evidence_appended, 0);
+        assert.equal(replay.output.conflicted, 0);
+        assert.deepEqual([await readFile(feed, "utf8"), await readFile(evidence, "utf8")], before);
+      }
+    });
+  }
+});
+
+test("mixed call/result continuation retains competing-branch and pairing refusals", async (t) => {
+  for (const variant of ["duplicate-result", "duplicate-call", "foreign-result", "wrong-source", "different-call-group", "different-request", "competing-answer", "competing-text-groups", "duplicate-uuid", "human-between-calls", "rewind", "cycle", "missing-result"] as const) {
+    await t.test(variant, async () => {
+      const { projectRoot, tracePath } = await stageScenario("stale-parallel-group", PARALLEL_GROUP);
+      const rows = (await rowsOf(tracePath)).map((line) => JSON.parse(line));
+      rows[7].parentUuid = rows[5].uuid;
+      rows[9].parentUuid = rows[8].uuid;
+      if (variant === "duplicate-result") rows.push({ ...rows[8], uuid: "mixed-duplicate-result" });
+      if (variant === "duplicate-call") rows[6].message.content.push(rows[5].message.content[0]);
+      if (variant === "foreign-result") rows[7].message.content[0].tool_use_id = "unknown-call";
+      if (variant === "wrong-source") rows[7].sourceToolAssistantUUID = rows[6].uuid;
+      if (variant === "different-call-group") rows[6].message.id = "competing-call-response";
+      if (variant === "different-request") rows[6].requestId = "competing-request";
+      if (variant === "competing-answer") rows.push({ ...rows[9], uuid: "mixed-competing-answer", parentUuid: rows[7].uuid, message: { ...rows[9].message, id: "competing-response" } });
+      if (variant === "duplicate-uuid") rows.push(rows[7]);
+      if (variant === "human-between-calls") {
+        const prompt = { ...rows[4], uuid: "mixed-new-human", parentUuid: rows[5].uuid };
+        rows[6].parentUuid = prompt.uuid;
+        rows.splice(6, 0, prompt);
+      }
+      if (variant === "rewind") rows[8].parentUuid = rows[0].uuid;
+      if (variant === "cycle") rows[6].parentUuid = rows[8].uuid;
+      if (variant === "missing-result") {
+        rows[9].parentUuid = rows[7].uuid;
+        rows.splice(8, 1);
+      }
+      if (variant === "competing-text-groups") {
+        rows[5].message = { ...rows[5].message, content: [{ type: "text", text: "First response part." }], stop_reason: "end_turn" };
+        rows[6].message = { ...rows[6].message, content: [{ type: "text", text: "Second response part." }], stop_reason: "end_turn" };
+        rows[9].parentUuid = rows[5].uuid;
+        rows.splice(7, 2);
+      }
+      await writeFile(tracePath, rows.map((row) => JSON.stringify(row) + "\n").join(""));
+      for (const sourceFinal of [false, true]) {
+        const result = await runClaudeTrace({ projectRoot, tracePath, final: true, sourceFinal });
+        assert.equal(result.input.withheld_reason, "ambiguous_pointer_continuation");
+        assert.equal(result.output.turns_appended, 0);
+        assert.equal(result.output.evidence_appended, 0);
+      }
+    });
+  }
+});
+
+test("a stale parallel-looking fork still refuses competing groups and ambiguous call/result evidence", async (t) => {
+  for (const variant of ["duplicate-result", "duplicate-call", "foreign-result", "wrong-source", "different-call-group", "different-request", "competing-answer", "duplicate-uuid"] as const) {
+    await t.test(variant, async () => {
+      const { projectRoot, tracePath } = await stageScenario("stale-parallel-group", PARALLEL_GROUP);
+      const rows = (await rowsOf(tracePath)).map((line) => JSON.parse(line));
+      if (variant === "duplicate-result") rows.push({ ...rows[8], uuid: "d1000000-0000-4000-8000-000000000008" });
+      if (variant === "duplicate-call") rows[6].message.content.push(rows[5].message.content[0]);
+      if (variant === "foreign-result") rows[8].message.content[0].tool_use_id = "unknown-call";
+      if (variant === "wrong-source") rows[8].sourceToolAssistantUUID = rows[5].uuid;
+      if (variant === "different-call-group") rows[6].message.id = "another-response";
+      if (variant === "different-request") {
+        rows[6].parentUuid = rows[4].uuid;
+        rows[6].requestId = "another-request";
+      }
+      if (variant === "competing-answer") rows.push({ ...rows[9], uuid: "d1000000-0000-4000-8000-000000000009", parentUuid: rows[8].uuid, message: { ...rows[9].message, id: "competing-response" } });
+      if (variant === "duplicate-uuid") rows.push(rows[8]);
+      await writeFile(tracePath, rows.map((row) => JSON.stringify(row) + "\n").join(""));
+      for (const sourceFinal of [false, true]) {
+        const result = await runClaudeTrace({ projectRoot, tracePath, final: true, sourceFinal });
+        assert.equal(result.input.withheld_reason, "ambiguous_pointer_continuation");
+        assert.equal(result.output.turns_appended, 0);
+        assert.equal(result.output.evidence_appended, 0);
+      }
+    });
+  }
+});
+
 const STALE_POINTER_LEAF = "b2000000-0000-4000-8000-000000000003";
 const STALE_POINTER_TAIL = "b2000000-0000-4000-8000-000000000011";
 const STALE_POINTER_NEXT_PROMPT = "b2000000-0000-4000-8000-000000000012";
@@ -1862,6 +2219,50 @@ test("a reentrant Stop waits for its suppressed hook-feedback response", async (
   );
 });
 
+test("a blocked Stop followed by mixed parallel reads publishes at its reentrant Stop", async () => {
+  const { projectRoot, tracePath } = await stageScenario("pretool-attachment-fork", PRETOOL_ATTACHMENT_FORK);
+  const rows = (await rowsOf(tracePath)).map((line) => JSON.parse(line));
+  // The fixture already contains the meta feedback user row, attachment and
+  // Stop summary between the original verdict and its automatic continuation.
+  const call = rows[14];
+  const result = rows[15];
+  const secondCall = {
+    ...call, uuid: "reentry-second-call", parentUuid: call.uuid,
+    message: { ...call.message, content: [{ ...call.message.content[0], id: "toolu_context_second" }] },
+  };
+  const secondResult = {
+    ...result, uuid: "reentry-second-result", parentUuid: secondCall.uuid,
+    sourceToolAssistantUUID: secondCall.uuid,
+    message: { ...result.message, content: [{ ...result.message.content[0], tool_use_id: "toolu_context_second" }] },
+  };
+  rows[16].parentUuid = secondResult.uuid;
+  rows.splice(16, 0, secondResult);
+  rows.splice(15, 0, secondCall);
+  await writeFile(tracePath, rows.map((row) => JSON.stringify(row) + "\n").join(""));
+  await joinClaudeSession(projectRoot, PRETOOL_ATTACHMENT_FORK);
+  const stopped = await handleClaudeIngestHook({
+    hook_event_name: "Stop", session_id: PRETOOL_ATTACHMENT_FORK, cwd: projectRoot,
+    transcript_path: tracePath, stop_hook_active: true, last_assistant_message: PRETOOL_VERDICT,
+  }, { trailingTimeoutMs: 100, sleep: async () => assert.fail("closed reentry needs no later provider event") });
+  assert.equal(stopped.ignored, undefined);
+  assert.equal(stopped.ingested?.input.stop_turn_visible, true);
+  assert.equal(stopped.ingested?.input.withheld_reason, undefined);
+  assert.equal(stopped.ingested?.output.turns_appended, 1);
+  assert.equal(stopped.ingested?.diagnostics.unpaired_tool_uses, 0);
+  const feed = join(projectRoot, ".barbaro/feed/claude", `${stopped.ingested!.session_id}.jsonl`);
+  const evidence = join(projectRoot, ".barbaro/evidence/claude", `${stopped.ingested!.session_id}.jsonl`);
+  const before = [await readFile(feed, "utf8"), await readFile(evidence, "utf8")];
+  const turns = await readJsonl<BarbaroTurnV1>(feed);
+  assert.equal(turns.length, 1);
+  assert.ok(turns[0]!.response?.text.endsWith(PRETOOL_VERDICT));
+  assert.equal(turns[0]!.actions.filter((action) => action.kind === "command" && action.command.text === PRETOOL_CONTEXT_COMMAND).length, 2);
+  await appendFile(tracePath, JSON.stringify({ ...rows[1], leafUuid: rows.at(-1).uuid }) + "\n");
+  const replay = await runClaudeTrace({ projectRoot, tracePath, final: true, sourceFinal: false });
+  assert.equal(replay.output.turns_appended, 0);
+  assert.equal(replay.output.conflicted, 0);
+  assert.deepEqual([await readFile(feed, "utf8"), await readFile(evidence, "utf8")], before);
+});
+
 test("an attachment sidecar does not hide a genuine post-pointer message fork", async () => {
   const { projectRoot, tracePath } = await stageScenario(
     "pretool-attachment-fork",
@@ -2249,21 +2650,32 @@ test("Stop may close a terminal turn but not settle a pointerless fork", async (
   assert.ok((onSessionEnd.ingested?.output.turns_appended ?? 0) > 0);
 });
 
-test("Stop still publishes a terminal turn once the pointer exists", async () => {
+test("Stop reports earlier publications even when its trailing close times out", async () => {
   const { handleClaudeIngestHook } = await import("../../src/hooks/claude.js");
   const { projectRoot, tracePath } = await stageScenario("compaction-forks", COMPACTION);
   await joinClaudeSession(projectRoot, COMPACTION);
+  let time = 0;
+  let polls = 0;
   const result = await handleClaudeIngestHook({
     hook_event_name: "Stop",
     session_id: COMPACTION,
     cwd: projectRoot,
     transcript_path: tracePath,
+  }, {
+    now: () => time, trailingTimeoutMs: 30, pollIntervalMs: 10,
+    sleep: async (milliseconds) => { time += milliseconds; polls += 1; },
   });
   assert.equal(result.ingested?.input.withheld_reason, undefined);
   assert.ok((result.ingested?.output.turns_appended ?? 0) > 0, "Stop can still publish");
+  assert.equal(polls, 3);
+  assert.match(result.ignored ?? "", /terminal closing record not visible/u);
+  const feed = await readJsonl<BarbaroTurnV1>(join(projectRoot, ".barbaro", "feed", "claude", `${result.ingested!.session_id}.jsonl`));
+  assert.equal(result.ingested!.output.turns_appended, feed.length);
+  const attempt = await latestClaudeIngestAttempt(projectRoot, result.ingested!.session_id);
+  assert.equal(attempt.publish_blocker, "trailing_turn_close_timeout");
 });
 
-test("Stop never publishes the turn it fired for; SessionEnd does", async () => {
+test("Stop without an authoritative close withholds its trailing turn; SessionEnd can close it", async () => {
   // The turn that just ended can still absorb records — remaining text blocks
   // of its API response, an async continuation, a task notification folding
   // in — so its digest is not canonical at Stop even once its terminal record
@@ -2350,28 +2762,11 @@ test("a turn that never closes returns promptly instead of waiting", async () =>
   );
 });
 
-test("a pointer appended during child normalization is caught before append", async () => {
+test("a pointer appended during child normalization is caught before append", async (t) => {
   // The window that matters is not around the main read — it spans child
-  // normalization, which is unbounded work. A large subagent trace leaves
-  // hundreds of milliseconds in which a replacement pointer can land, and a
-  // check taken before that pass would already be stale by the time anything
-  // is written.
+  // normalization. Rewrite when the child consumes its first row so a busy
+  // CI runner cannot move the mutation before the parent snapshot is read.
   const { projectRoot, tracePath } = await stageScenario("active-fork", ACTIVE_FORK);
-  const childPath = join(
-    dirname(tracePath),
-    ACTIVE_FORK,
-    "subagents",
-    "agent-aaaa111111111111a.jsonl",
-  );
-
-  // Inflate the child with harmless sidecar rows so its pass is slow enough
-  // to hold the window open.
-  const filler =
-    `${JSON.stringify({ type: "mode", mode: "default", sessionId: ACTIVE_FORK })}\n`.repeat(
-      100_000,
-    );
-  await writeFile(childPath, `${await readFile(childPath, "utf8")}${filler}`, "utf8");
-
   const settled = await rowsOf(tracePath);
   const replacement = settled.map((line) =>
     line.includes('"last-prompt"')
@@ -2382,19 +2777,29 @@ test("a pointer appended during child normalization is caught before append", as
       : line,
   );
 
-  const started = Date.now();
-  const inFlight = runClaudeTrace({ tracePath, projectRoot });
-  // Long after the small parent file has been read, well inside the child pass.
-  const timer = setTimeout(() => {
-    void writeFile(tracePath, `${replacement.join("\n")}\n`, "utf8");
-  }, 20);
-  const first = await inFlight;
-  clearTimeout(timer);
-
-  assert.ok(
-    Date.now() - started > 20,
-    "the run must outlast the append for this to exercise the child window",
+  const before = await stat(tracePath);
+  const accept = ClaudeTurnNormalizer.prototype.accept;
+  let rewritten = false;
+  const interception = t.mock.method(
+    ClaudeTurnNormalizer.prototype,
+    "accept",
+    function (this: ClaudeTurnNormalizer, ...args: Parameters<typeof accept>) {
+      if (!rewritten && args[1].traceId === `claude:${ACTIVE_FORK}:agent:aaaa111111111111a`) {
+        writeFileSync(tracePath, `${replacement.join("\n")}\n`, "utf8");
+        // Ensure even a filesystem with coarse timestamp precision exposes
+        // the same-size rewrite; inode and size still match the opening stamp.
+        utimesSync(tracePath, before.atime, new Date(before.mtimeMs + 1_000));
+        rewritten = true;
+      }
+      return accept.apply(this, args);
+    },
   );
+  const first = await runClaudeTrace({ tracePath, projectRoot });
+  interception.mock.restore();
+  assert.equal(rewritten, true, "the pointer must change inside child normalization");
+  const after = await stat(tracePath);
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.size, before.size);
   // The replacement pointer is the SAME length as the one it replaces, so
   // size and identity are both unchanged — only the modification time moves.
   assert.equal(
@@ -2848,57 +3253,73 @@ test("a failed queued background report also settles its named launch", async ()
   assert.equal(attempt.publish_blocker, undefined);
 });
 
-test("queue duplicates and non-authoritative attachments cannot settle a background turn", async () => {
-  const { projectRoot, tracePath } = await stageScenario(
-    "queued-background-completion",
-    QUEUED_BACKGROUND_COMPLETION,
-  );
-  // Strip only the completion payload from the authoritative on-branch row.
-  // The UUID and parent edge remain so branch selection is byte-for-byte the
-  // same; the queue-operation duplicates, off-branch completion, and on-path
-  // Monitor notification are all still present and must remain inert.
-  await rewriteTraceRows(tracePath, (row) =>
-    row.uuid === "af000000-0000-4000-8000-000000000006"
-      ? {
-          ...row,
-          attachment: {
-            type: "total_tokens_reminder",
-            text: "<total_tokens>1000 tokens left</total_tokens>",
-          },
-        }
-      : row,
-  );
-  await joinClaudeSession(projectRoot, QUEUED_BACKGROUND_COMPLETION);
+test("queue duplicates and non-authoritative attachments cannot settle a background turn", async (t) => {
+  for (const branch of ["attachment-only", "rejected-semantic"] as const) {
+    await t.test(branch, async () => {
+      const { projectRoot, tracePath } = await stageScenario(
+        "queued-background-completion",
+        QUEUED_BACKGROUND_COMPLETION,
+      );
+      // Strip only the completion payload from the authoritative on-branch row.
+      // The UUID and parent edge remain so branch selection is byte-for-byte the
+      // same; the queue-operation duplicates, off-branch completion, and on-path
+      // Monitor notification are all still present and must remain inert.
+      await rewriteTraceRows(tracePath, (row) =>
+        row.uuid === "af000000-0000-4000-8000-000000000006"
+          ? {
+              ...row,
+              attachment: {
+                type: "total_tokens_reminder",
+                text: "<total_tokens>1000 tokens left</total_tokens>",
+              },
+            }
+          : row,
+      );
+      if (branch === "rejected-semantic") {
+        const rows = (await rowsOf(tracePath)).map((line) => JSON.parse(line));
+        // A semantic child does not turn an earlier rejected attachment into a
+        // bridge. Only paths connecting accepted response/result rows may do so.
+        rows.splice(rows.findIndex((r) => r.type === "last-prompt"), 0, {
+          ...rows.find((r) => r.uuid === "af000000-0000-4000-8000-000000000008"),
+          uuid: "rejected-semantic-row", parentUuid: "af000000-0000-4000-8000-000000000004",
+          requestId: "rejected-request",
+          message: { id: "rejected-response", role: "assistant", content: [{ type: "text", text: "Rejected branch." }] },
+        });
+        await writeFile(tracePath, rows.map((r) => JSON.stringify(r) + "\n").join(""));
+      }
+      await joinClaudeSession(projectRoot, QUEUED_BACKGROUND_COMPLETION);
 
-  const stopped = await handleClaudeIngestHook(
-    {
-      hook_event_name: "Stop",
-      session_id: QUEUED_BACKGROUND_COMPLETION,
-      cwd: projectRoot,
-      transcript_path: tracePath,
-      last_assistant_message: "CHECKPOINT 1 APPROVED.",
-    },
-    {
-      now: () => 0,
-      sleep: async () =>
-        assert.fail("a non-closable background turn must not poll"),
-    },
-  );
-  assert.ok(stopped.ingested);
-  assert.equal(stopped.ingested.output.turns_appended, 0);
-  assert.equal(stopped.ingested.input.trailing_turn_terminal, true);
-  assert.equal(stopped.ingested.input.trailing_turn_closable, false);
-  assert.deepEqual(stopped.ingested.input.pending_background_ids, [
-    "toolu_QUEUE_BG",
-  ]);
+      const stopped = await handleClaudeIngestHook(
+        {
+          hook_event_name: "Stop",
+          session_id: QUEUED_BACKGROUND_COMPLETION,
+          cwd: projectRoot,
+          transcript_path: tracePath,
+          last_assistant_message: "CHECKPOINT 1 APPROVED.",
+        },
+        {
+          now: () => 0,
+          sleep: async () =>
+            assert.fail("a non-closable background turn must not poll"),
+        },
+      );
+      assert.ok(stopped.ingested);
+      assert.equal(stopped.ingested.output.turns_appended, 0);
+      assert.equal(stopped.ingested.input.trailing_turn_terminal, true);
+      assert.equal(stopped.ingested.input.trailing_turn_closable, false);
+      assert.deepEqual(stopped.ingested.input.pending_background_ids, [
+        "toolu_QUEUE_BG",
+      ]);
 
-  const attempt = await latestClaudeIngestAttempt(
-    projectRoot,
-    stopped.ingested.session_id,
-  );
-  assert.deepEqual(attempt.pending_background_ids, ["toolu_QUEUE_BG"]);
-  assert.equal(attempt.publish_blocker, "pending_background");
-  assert.equal(attempt.outcome, "ok");
+      const attempt = await latestClaudeIngestAttempt(
+        projectRoot,
+        stopped.ingested.session_id,
+      );
+      assert.deepEqual(attempt.pending_background_ids, ["toolu_QUEUE_BG"]);
+      assert.equal(attempt.publish_blocker, "pending_background");
+      assert.equal(attempt.outcome, "ok");
+    });
+  }
 });
 
 test("a queued-command completion clears only its named background launch", async () => {
@@ -2985,6 +3406,8 @@ test("a completed background turn before turn_duration keeps the truthful close 
     row.type === "system" && row.subtype === "turn_duration" ? undefined : row,
   );
   await joinClaudeSession(projectRoot, QUEUED_BACKGROUND_COMPLETION);
+  let time = 0;
+  let polls = 0;
 
   const stopped = await handleClaudeIngestHook(
     {
@@ -2995,9 +3418,8 @@ test("a completed background turn before turn_duration keeps the truthful close 
       last_assistant_message: "CHECKPOINT 1 APPROVED.",
     },
     {
-      now: () => 0,
-      sleep: async () =>
-        assert.fail("the first observed turn_duration is not polled for"),
+      now: () => time, trailingTimeoutMs: 30, pollIntervalMs: 10,
+      sleep: async (milliseconds) => { time += milliseconds; polls += 1; },
     },
   );
   assert.ok(stopped.ingested);
@@ -3005,21 +3427,54 @@ test("a completed background turn before turn_duration keeps the truthful close 
   assert.equal(stopped.ingested.input.trailing_turn_terminal, true);
   assert.equal(stopped.ingested.input.trailing_turn_closable, true);
   assert.deepEqual(stopped.ingested.input.pending_background_ids, []);
+  assert.equal(polls, 3);
+  assert.equal(stopped.ignored, "terminal closing record not visible before the ingest deadline");
 
   const attempt = await latestClaudeIngestAttempt(
     projectRoot,
     stopped.ingested.session_id,
   );
   assert.deepEqual(attempt.pending_background_ids, []);
-  assert.equal(attempt.publish_blocker, "trailing_turn_not_closed");
+  assert.equal(attempt.publish_blocker, "trailing_turn_close_timeout");
   assert.equal(attempt.outcome, "ok");
+});
+
+test("the first Stop waits for its first authoritative closing record and publishes without a later event", async () => {
+  const { projectRoot, tracePath } = await stageScenario("turn-duration-close", TURN_DURATION_CLOSE);
+  await joinClaudeSession(projectRoot, TURN_DURATION_CLOSE);
+  const complete = await rowsOf(tracePath);
+  await writeFile(tracePath, `${complete.slice(0, 2).join("\n")}\n`);
+  let polls = 0;
+  let time = 0;
+  const stopped = await handleClaudeIngestHook({
+    hook_event_name: "Stop", session_id: TURN_DURATION_CLOSE, cwd: projectRoot, transcript_path: tracePath,
+    last_assistant_message: "PLAN APPROVED — the phases are sound.",
+  }, {
+    now: () => time, trailingTimeoutMs: 100, pollIntervalMs: 10,
+    sleep: async (milliseconds) => {
+      polls += 1;
+      time += milliseconds;
+      assert.equal(polls, 1);
+      await appendFile(tracePath, `${complete.slice(2).join("\n")}\n`);
+    },
+  });
+  assert.equal(polls, 1);
+  assert.equal(stopped.ignored, undefined);
+  assert.equal(stopped.ingested?.input.trailing_turn_open, false);
+  assert.equal(stopped.ingested?.output.turns_appended, 1);
+  assert.equal(stopped.ingested?.output.conflicted, 0);
+  const feedPath = join(projectRoot, ".barbaro", "feed", "claude", `${stopped.ingested!.session_id}.jsonl`);
+  const canonical = await readFile(feedPath, "utf8");
+  const replay = await runClaudeTrace({ projectRoot, tracePath, final: true, sourceFinal: false });
+  assert.equal(replay.output.turns_appended, 0);
+  assert.equal(replay.output.conflicted, 0);
+  assert.equal(await readFile(feedPath, "utf8"), canonical);
 });
 
 test("the Stop ingest waits briefly for turn_duration to land", async () => {
   // The synchronous hooks return before Claude writes stop_hook_summary and
-  // turn_duration; the asynchronous ingest polls through that gap — once the
-  // trace has shown that this provider writes the record at all. Turn 1 from
-  // the fixture supplies that evidence; turn 2 is appended live.
+  // turn_duration; the asynchronous ingest polls through that gap. This case
+  // follows a previously closed turn; the first-turn case is covered above.
   const { projectRoot, tracePath } = await stageScenario(
     "turn-duration-close",
     TURN_DURATION_CLOSE,
@@ -3113,7 +3568,7 @@ test("the Stop ingest waits briefly for turn_duration to land", async () => {
     "utf8",
   );
   const result = await ingesting;
-  assert.equal(result.ingested?.output.turns_appended, 1, "turn 2 published by the waiting Stop");
+  assert.equal(result.ingested?.output.turns_appended, 2, "the Stop reports both its first-pass publication and the newly closed turn");
   assert.equal(result.ingested?.input.trailing_turn_open, false);
   const feed = await readJsonl<BarbaroTurnV1>(
     join(projectRoot, ".barbaro", "feed", "claude", `${result.ingested!.session_id}.jsonl`),
@@ -3122,6 +3577,9 @@ test("the Stop ingest waits briefly for turn_duration to land", async () => {
     feed.map((turn) => turn.response?.text),
     ["PLAN APPROVED — the phases are sound.", "CHECKPOINT 1 APPROVED."],
   );
+  const attempt = await latestClaudeIngestAttempt(projectRoot, result.ingested!.session_id);
+  assert.equal(attempt.turns_appended, result.ingested!.output.turns_appended);
+  assert.equal(attempt.publish_blocker, undefined);
 });
 
 test("Stop re-reads until its announced turn lands, then publishes it", async () => {
@@ -3363,7 +3821,7 @@ test("Stop records an honest timeout without publishing or checkpointing", async
   assert.equal(attempt.observations.size_transitions.length, 1);
 });
 
-test("Stop without a message uses structural visibility without polling", async () => {
+test("Stop without a message uses structural visibility without an identity wait", async () => {
   for (const lastAssistantMessage of [undefined, "", " \n "] as const) {
     const { projectRoot, tracePath } = await stageScenario(
       "stop-read-race",
@@ -3385,10 +3843,11 @@ test("Stop without a message uses structural visibility without polling", async 
       },
       {
         now: () => 0,
-        sleep: async () => assert.fail("structural visibility must not poll"),
+        trailingTimeoutMs: 0,
+        sleep: async () => assert.fail("structural visibility must not wait for identity"),
       },
     );
-    assert.equal(stopped.ignored, undefined);
+    assert.match(stopped.ignored ?? "", /terminal closing record not visible/u);
     assert.equal(stopped.ingested?.input.stop_turn_identity_required, false);
     assert.equal(stopped.ingested?.input.stop_turn_visible, true);
     assert.equal(stopped.ingested?.output.turns_appended, 0);
@@ -3486,10 +3945,11 @@ test("non-Stop events ignore last_assistant_message identity", async () => {
       },
       {
         now: () => 0,
+        trailingTimeoutMs: 0,
         sleep: async () => assert.fail("non-Stop identity must not poll"),
       },
     );
-    assert.equal(result.ignored, undefined, event);
+    assert.equal(result.ignored, event === "StopFailure" ? "terminal closing record not visible before the ingest deadline" : undefined, event);
     assert.equal(result.ingested?.input.stop_turn_visible, undefined, event);
   }
 });

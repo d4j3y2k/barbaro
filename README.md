@@ -123,7 +123,8 @@ documents all display sizes, controls, and options.
 | Command | Purpose |
 |---|---|
 | `barbaro tui` | View and explicitly manage workstreams in a bounded terminal dashboard. |
-| `barbaro context` | Read byte-bounded peer turns, status, and advisory claims. |
+| `barbaro read context` / `barbaro read turn show <turn_id>` | Read peer attention in 8192-byte envelopes; matching hooks acknowledge only complete, successfully delivered content. |
+| `barbaro context` | Observe byte-bounded peer turns, status, and advisory claims; use `--all-workstreams` for project-wide claims. |
 | `barbaro turn list` / `barbaro turn show <turn_id>` | Find every canonical turn in scope, then page its exact record, request, response, or actions; raise the exposed file or record limits when needed. |
 | `barbaro evidence show <evidence_id>` | Read referenced canonical evidence as a bounded projection or page its exact fields, with configurable file and record limits. |
 | `barbaro watch` | Stream new turns, joins, incidents, and stale leases. |

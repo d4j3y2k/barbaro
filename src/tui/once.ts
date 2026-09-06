@@ -15,6 +15,7 @@ import {
 } from "./geometry.js";
 import {
   dashboardTurnFact,
+  projectClaimNotice,
   hubProjectionWarning,
   reduceDashboard,
   reduceHub,
@@ -189,6 +190,7 @@ export async function renderOnceSnapshot(
     byteBudget,
     turnsPerSession: options.turnsPerSession ?? COMFORT_TURNS_PER_SESSION,
     workstreamId: options.workstreamId,
+    now: reference,
   });
   const turns: DashboardTurnFact[] =
     context.value.turns.items.map(dashboardTurnFact);
@@ -197,6 +199,7 @@ export async function renderOnceSnapshot(
     kind: "snapshot",
     motionOff: options.motionOff === true,
   });
+  const claimNotice = projectClaimNotice(context.value.project_claims);
   const scopeName =
     item.record.status === "completed"
       ? `${item.record.name} · completed`
@@ -206,7 +209,7 @@ export async function renderOnceSnapshot(
       location: `${scopeName} · snapshot`,
       truth: reduced.truth,
       frame: reduced.frame,
-      bench: onceBench(item, stamp, projectLine),
+      bench: [...(claimNotice === undefined ? [] : [claimNotice]), ...onceBench(item, stamp, projectLine)],
       keyLine: `Snapshot · ${item.record.name} · captured ${stamp}`,
     },
     width,

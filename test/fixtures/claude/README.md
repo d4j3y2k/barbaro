@@ -121,6 +121,16 @@ the response entirely. This is a regression fixture: the bug shipped past all fo
 above and was only caught by running against real traces, where it silently emptied the `response`
 field on the majority of turns. Also asserts the two lines contribute usage exactly once.
 
+## `stale-parallel-group/`
+
+This constructed regression combines the maintained `parallel-group` topology
+and `turn-duration-close` boundary templates. Its pointer still selects a prior
+closed turn while a new prompt, two parallel calls, sibling results, final
+answer and closing record have arrived. The new turn publishes at its own Stop;
+updating the pointer and resetting the runner preserve canonical bytes. Paired
+test mutations reject competing groups, duplicate calls/results, foreign result
+IDs and incorrect source links. See its [provenance note](stale-parallel-group/FINDINGS.md).
+
 ## `pretool-attachment-fork/`
 
 Session `12121212-…` is a sanitized replay of the 2026-08-23 wake-nudge probe. Its stale

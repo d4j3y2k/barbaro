@@ -99,28 +99,28 @@ test("the bounded context preflight states every limit it enforces", () => {
   assert.match(text, /shown is below total/);
   assert.match(text, /truncated\.projection/);
   assert.match(text, /barbaro turn list/);
-  assert.match(text, /barbaro turn show <turn_id> --field response/);
-  assert.match(text, /barbaro turn show <turn_id> --field record/);
+  assert.match(text, /barbaro read turn show <turn_id> --field response/);
+  assert.match(text, /barbaro read turn show <turn_id> --field record/);
   assert.match(text, /barbaro evidence show/);
   assert.match(text, /Never read or print `\.barbaro\/\*\*\/\*\.jsonl` directly/);
-  assert.match(text, /initial `barbaro context` attention view/);
+  assert.match(text, /initial `barbaro read context` attention view/);
   assert.match(text, /exhaustive turn and evidence retrieval remains available/);
   assert.match(text, /every canonical turn byte/);
   assert.match(text, /exposed file and record limits/);
   assert.match(text, /provider-native fields or records omitted during adapter mapping/);
-  assert.match(text, /barbaro context/);
+  assert.match(text, /barbaro read context/);
   assert.match(text, new RegExp(PEER_CONTEXT_AUTOMATION_MILESTONE));
 });
 
 test("published limits match the documented preflight contract", () => {
   const guidance = buildSetupGuidance(HEALTHY);
-  assert.equal(guidance.peer_context_limits.render_budget_bytes, 32 * 1024);
+  assert.equal(guidance.peer_context_limits.render_budget_bytes, 8 * 1024);
   assert.equal(guidance.peer_context_limits.feed_records_per_session, 5);
   assert.deepEqual(
     guidance.peer_context_limits.compact_lease_fields,
     COMPACT_LEASE_FIELDS,
   );
-  assert.equal(guidance.peer_context_automated_by, "barbaro context");
+  assert.equal(guidance.peer_context_automated_by, "barbaro read context");
   assert.equal(
     COMPACT_LEASE_FIELDS.includes("expires_at") &&
       COMPACT_LEASE_FIELDS.includes("claims"),

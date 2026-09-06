@@ -1,4 +1,5 @@
 import type { IncidentKind } from "../hooks/incidents.js";
+import type { ProjectClaimOverlap } from "../active/conflicts.js";
 import type { ReaderProjection, ReaderTurnSummary } from "../reader/types.js";
 
 export const WATCH_EVENT_SCHEMA = "barbaro.watch.event.v1" as const;
@@ -110,10 +111,17 @@ export interface WatchErrorEvent extends WatchEventBase {
   readonly limit: number;
 }
 
+/** A known-path overlap appeared or changed; routine lease renewals are silent. */
+export interface WatchConflictEvent extends WatchEventBase {
+  readonly kind: "conflict";
+  readonly overlap: ProjectClaimOverlap;
+}
+
 export type WatchEvent =
   | WatchArmedEvent
   | WatchTurnEvent
   | WatchJoinEvent
   | WatchIncidentEvent
   | WatchStaleEvent
+  | WatchConflictEvent
   | WatchErrorEvent;

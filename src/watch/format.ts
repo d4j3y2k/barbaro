@@ -153,6 +153,14 @@ export function formatWatchEvent(event: WatchEvent): string {
       return formatIncident(event);
     case "stale":
       return formatStale(event);
+    case "conflict": {
+      const { local, foreign, confidence } = event.overlap;
+      const actor = (claim: typeof local): string =>
+        `${claim.provider}/${short(claim.session_id)}/${excerpt(claim.agent_id, 40)} ws=${claim.workstream_id?.slice(3, 11) ?? "unscoped"}`;
+      return `CONFLICT advisory ${confidence}: [${actor(local)}] ${excerpt(local.path ?? "unknown", 180)} overlaps [${actor(foreign)}] ${excerpt(foreign.path ?? "unknown", 180)}` +
+        (local.unknown_write_scope || foreign.unknown_write_scope ? " (additional write scope unknown)" : "") +
+        " — inspect project_claims in scoped context";
+    }
     case "error":
       return (
         `WATCH-ERROR ${excerpt(event.message, 200)} ` +

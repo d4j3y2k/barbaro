@@ -1,4 +1,5 @@
 import { constants } from "node:fs";
+import { InputLimitError } from "./input-limit.js";
 import {
   lstat,
   mkdir,
@@ -30,15 +31,13 @@ export class UnsafeStorePathError extends Error {
   }
 }
 
-export class StoreFileTooLargeError extends RangeError {
+export class StoreFileTooLargeError extends InputLimitError {
   readonly path: string;
-  readonly maximumBytes: number;
 
   constructor(path: string, maximumBytes: number) {
-    super(`Barbaro store file ${path} exceeds ${maximumBytes} bytes`);
+    super(`Barbaro store file ${path} exceeds ${maximumBytes} bytes`, "file", maximumBytes);
     this.name = "StoreFileTooLargeError";
     this.path = path;
-    this.maximumBytes = maximumBytes;
   }
 }
 

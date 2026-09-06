@@ -9,7 +9,7 @@ const SHIPPED_SKILLS = [
       "barbaro codex status",
       "barbaro await",
       "barbaro turn list",
-      "barbaro turn show",
+      "barbaro read turn show",
       "barbaro evidence show",
     ],
   },
@@ -19,7 +19,7 @@ const SHIPPED_SKILLS = [
       "barbaro claude status",
       "barbaro await",
       "barbaro turn list",
-      "barbaro turn show",
+      "barbaro read turn show",
       "barbaro evidence show",
     ],
   },
@@ -27,9 +27,9 @@ const SHIPPED_SKILLS = [
     path: ".claude/skills/barbaro-watch/SKILL.md",
     commands: [
       "barbaro watch",
-      "barbaro context",
+      "barbaro read context",
       "barbaro turn list",
-      "barbaro turn show",
+      "barbaro read turn show",
       "barbaro evidence show",
     ],
   },
@@ -56,7 +56,7 @@ test("provider skills pin the cursor-based nudge and await lifecycle", async () 
   assert.match(codex, /including a review\s+verdict published from a Monitor wake/u);
   assert.match(
     codex,
-    /When await returns — unread or timeout — run the context\s+command above once to clear the cursor/u,
+    /When await returns — unread or timeout — run the context\s+command above once to inspect delivered content/u,
   );
   assert.match(codex, /If the tool execution yields, do not launch a replacement/u);
   assert.match(codex, /If a Stop hook blocks\s+the response/u);
@@ -65,11 +65,11 @@ test("provider skills pin the cursor-based nudge and await lifecycle", async () 
   assert.match(codex, /block once on a later turn while\s+those turns remain unread/u);
   assert.match(
     codex,
-    /trace-attested fresh goal-turn `PreToolUse`/u,
+    /native success and the later full model output/u,
   );
   assert.match(
     codex,
-    /idle same-turn, stale, or\s+unattested boundary leaves the cursor unchanged/u,
+    /failed, truncated, missing or unsupported model output\s+consumes nothing/u,
   );
   assert.match(codex, /resend\s+the\s+previous\s+response\s+verbatim\s+unless/u);
   assert.match(
@@ -90,7 +90,7 @@ test("provider skills pin the cursor-based nudge and await lifecycle", async () 
   assert.match(claude, /including a review verdict\s+published from a Monitor wake/u);
   assert.match(
     claude,
-    /When it returns — unread or timeout — read\s+`barbaro context --provider claude[\s\S]+once to clear the cursor/u,
+    /When it returns — unread or timeout — read\s+`barbaro read context --provider claude[\s\S]+once to inspect delivered content/u,
   );
   assert.match(claude, /If Stop hook feedback\s+blocks\s+the\s+response/u);
   assert.match(claude, /Within one cursor revision, prompt and tool nudges repeat only\s+when the unread count has grown/u);
@@ -109,7 +109,7 @@ test("the watcher skill distinguishes external wake from cursor nudges", async (
   assert.match(watch, /suppressed from `watch`/u);
   assert.match(watch, /cursor deliberately has no echo filter/u);
   assert.match(watch, /nudge says peer turns are unread/u);
-  assert.match(watch, /Do not read on a\s+cadence/u);
+  assert.match(watch, /Do not read on a cadence/u);
 });
 
 test("README and INSTALL pin the public installation contract", async () => {
@@ -150,13 +150,13 @@ test("README and INSTALL pin the public installation contract", async () => {
   assert.doesNotMatch(install, /barbaro@alpha/u);
   assert.match(
     install,
-    /releases\/download\/v0\.1\.0-alpha\.5\/barbaro-0\.1\.0-alpha\.5\.tgz/u,
+    /releases\/download\/v0\.1\.0-alpha\.6\/barbaro-0\.1\.0-alpha\.6\.tgz/u,
   );
-  assert.match(install, /^npm install --global \.\/barbaro-0\.1\.0-alpha\.5\.tgz$/mu);
-  assert.match(install, /barbaro-0\.1\.0-alpha\.5\.tgz\.sha256/u);
+  assert.match(install, /^npm install --global \.\/barbaro-0\.1\.0-alpha\.6\.tgz$/mu);
+  assert.match(install, /barbaro-0\.1\.0-alpha\.6\.tgz\.sha256/u);
   assert.match(
     install,
-    /github:d4j3y2k\/barbaro#v0\.1\.0-alpha\.5[\s\S]+source tags do\s+not contain/u,
+    /github:d4j3y2k\/barbaro#v0\.1\.0-alpha\.6[\s\S]+source tags do\s+not contain/u,
   );
   assert.match(install, /^command -v barbaro$/mu);
   assert.match(install, /Choose either user scope or project scope/u);
@@ -220,13 +220,13 @@ test("nudge RFC records cursor ownership and the watch-only echo limitation", as
   assert.match(rfc, /^## Barbaro nudges .*implemented.*$/mu);
   assert.match(rfc, /\.barbaro\/state\/nudge\/<provider>\/<ses_id>\.json/u);
   assert.match(rfc, /membership_from/u);
-  assert.match(rfc, /`barbaro\.nudge-cursor\.v2`/u);
-  assert.match(rfc, /Existing `barbaro\.nudge-cursor\.v1` records remain strictly accepted/u);
+  assert.match(rfc, /`barbaro\.nudge-cursor\.v3`/u);
+  assert.match(rfc, /v1 and v2 records remain strictly accepted/u);
   assert.match(rfc, /highest unread\s+count announced by any channel/u);
   assert.match(rfc, /synthetic generation/u);
   assert.match(rfc, /unknown fields/u);
   assert.match(rfc, /markers that do not equal `cursor_revision`/u);
-  assert.match(rfc, /Readers\s+observe v1 or v2 byte-for-byte without migration/u);
+  assert.match(rfc, /Readers observe all three\s+schemas without migration/u);
   assert.match(rfc, /Stop continuation protocol/u);
   assert.match(rfc, /`stop_hook_active !== true`/u);
   assert.match(rfc, /current provider turn has received\s+no delivery/u);

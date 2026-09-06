@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import {
   appendFile,
   mkdtemp,
@@ -10,6 +11,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { ActiveLeaseStore, deriveLeaseId } from "../../src/active/index.js";
 import { AWAIT_LEASE_GRACE_MS } from "../../src/core/barbaro-command.js";
@@ -143,7 +146,7 @@ async function trailingTurnProject(): Promise<{
     session_id: SESSION,
     cwd: root,
     transcript_path: tracePath,
-  });
+  }, { trailingTimeoutMs: 0 });
   assert.equal(stopped.ingested?.output.turns_appended, 0);
   assert.equal(stopped.ingested?.input.trailing_turns_withheld, 1);
   const journal = await readClaudeIngestJournal(root);
@@ -163,7 +166,7 @@ async function trailingTurnProject(): Promise<{
   assert.equal(attempt.runner_input?.trailing_turn_closable, true);
   assert.deepEqual(attempt.pending_background_ids, []);
   assert.deepEqual(attempt.pending_agent_ids, []);
-  assert.equal(attempt.publish_blocker, "trailing_turn_not_closed");
+  assert.equal(attempt.publish_blocker, "trailing_turn_close_timeout");
   return { root, tracePath };
 }
 
@@ -858,6 +861,11 @@ test("Claude retries Stop after a post-claim lease write failure", async () => {
       prompt: "Announce this once.",
     });
     assert.match(first.nudge?.text ?? "", /^Barbaro: 1 new peer turn/u);
+    // This is a later ordinary turn, not input queued while the first turn
+    // remains unfinished. Its first terminal boundary consumes suppression.
+    assert.equal((await handleClaudeHook({
+      hook_event_name: "Stop", session_id: SESSION, cwd: root,
+    })).stop_reason, undefined);
     const quietSecond = await handleClaudeHook({
       hook_event_name: "UserPromptSubmit",
       session_id: SESSION,
@@ -916,7 +924,6 @@ test("Claude retries Stop after a post-claim lease write failure", async () => {
         : undefined,
       {
         highest_unread_count: 1,
-        last_turn: { kind: "claude", generation: 1 },
       },
     );
 
@@ -1056,7 +1063,7 @@ test("Claude hook nudges share one ledger, clear on context, and gate Stop", asy
     stop_hook_active: false,
     last_assistant_message: `${"prior reply ".repeat(300)}\nlast line`,
   });
-  assert.match(blocked.stop_reason ?? "", /run barbaro context/u);
+  assert.match(blocked.stop_reason ?? "", /run barbaro read context/u);
   assert.match(blocked.stop_reason ?? "", /resend your previous response verbatim/u);
   assert.equal((blocked.stop_reason ?? "").includes("\n"), false);
   assert.ok(Buffer.byteLength(blocked.stop_reason ?? "", "utf8") < 2_000);
@@ -1066,7 +1073,7 @@ test("Claude hook nudges share one ledger, clear on context, and gate Stop", asy
   });
   assert.equal((await store.readSnapshot(identity()))?.state, "working");
 
-  const cleared = await handleClaudeHook({
+  const legacy = await handleClaudeHook({
     hook_event_name: "PreToolUse",
     session_id: SESSION,
     cwd: root,
@@ -1076,7 +1083,32 @@ test("Claude hook nudges share one ledger, clear on context, and gate Stop", asy
         "barbaro context --provider claude --session-id a | jq .value",
     },
   });
-  assert.equal(cleared.nudge, undefined);
+  assert.equal(legacy.nudge, undefined);
+  const unread = async () => {
+    const result = await inspectUnreadPeerTurns({ projectRoot: root, provider: "claude", nativeSessionId: SESSION });
+    assert.equal(result.status, "ready");
+    return result.unread_count;
+  };
+  assert.equal(await unread(), 2, "legacy context launch is an observer");
+  const argv = ["read", "context", "--provider", "claude", "--session-id", SESSION, "--project-root", root];
+  const call = {
+    session_id: SESSION, cwd: root, tool_name: "Bash", tool_use_id: "toolu_read_context",
+    tool_input: { command: `barbaro ${argv.map((arg) => `'${arg}'`).join(" ")}`, description: "Read peer delivery" },
+  };
+  await handleClaudeHook({ ...call, hook_event_name: "PreToolUse" });
+  assert.equal(await unread(), 2, "reservation does not acknowledge delivery");
+  const { stdout, stderr } = await promisify(execFile)(process.execPath,
+    [fileURLToPath(new URL("../../src/cli.js", import.meta.url)), ...argv]);
+  assert.equal(stderr, "");
+  assert.equal(JSON.parse(stdout).value.delivery.eligible, true);
+  const modelText = stdout.replace(/\n$/u, "");
+  await handleClaudeHook({ ...call, hook_event_name: "PostToolUse", tool_response: {
+    stdout: modelText, stderr: "", interrupted: false, isImage: false, noOutputExpected: false,
+  } });
+  assert.equal(await unread(), 2, "successful stdout only stages delivery");
+  await handleClaudeHook({ session_id: SESSION, cwd: root, hook_event_name: "PostToolBatch",
+    tool_calls: [{ tool_name: call.tool_name, tool_use_id: call.tool_use_id, tool_input: call.tool_input, tool_response: modelText }],
+  });
   const afterClear = await inspectUnreadPeerTurns({
     projectRoot: root,
     provider: "claude",
@@ -1453,9 +1485,12 @@ test("ingest before the transcript exists is a quiet not-yet, not an error", asy
   }
 });
 
-test("Stop stays conservative and never waits for a successor prompt", async () => {
+test("Stop's closing-record wait expires without inventing a successor prompt", async () => {
   const { root, tracePath } = await trailingTurnProject();
   try {
+    let time = 0;
+    let polls = 0;
+    const before = await readFile(tracePath, "utf8");
     const result = await handleClaudeIngestHook(
       {
         hook_event_name: "Stop",
@@ -1464,12 +1499,17 @@ test("Stop stays conservative and never waits for a successor prompt", async () 
         transcript_path: tracePath,
       },
       {
-        now: () => 0,
-        sleep: async () => assert.fail("a stable Stop must not poll for a prompt"),
+        now: () => time,
+        trailingTimeoutMs: 30,
+        pollIntervalMs: 10,
+        sleep: async (milliseconds) => { time += milliseconds; polls += 1; },
       },
     );
     assert.equal(result.ingested?.output.turns_appended, 0);
     assert.equal(result.ingested?.input.trailing_turns_withheld, 1);
+    assert.equal(polls, 3);
+    assert.match(result.ignored ?? "", /terminal closing record not visible/u);
+    assert.equal(await readFile(tracePath, "utf8"), before);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

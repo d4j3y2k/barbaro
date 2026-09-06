@@ -7,6 +7,7 @@ import type {
 import type {
   ReaderContentSummary,
   ReaderTurnSummary,
+  ReaderProjectClaims,
 } from "../reader/types.js";
 import type { ReaderUnreadSummaryReady } from "../reader/unread.js";
 
@@ -946,4 +947,19 @@ function exposureCountWord(count: number): string {
   if (count === 2) return "Two";
   if (count === 3) return "Three";
   return `${count}`;
+}
+
+/** Claim coverage is independent of the workstream's activity/quiet proof. */
+export function projectClaimNotice(claims: ReaderProjectClaims | undefined): string | undefined {
+  if (claims === undefined) return undefined;
+  if (claims.overlaps.total > 0) {
+    return `Project claims · ${claims.overlaps.total} advisory path overlap${claims.overlaps.total === 1 ? "" : "s"}`;
+  }
+  if (claims.coverage.unknown_scope_actors > 0) {
+    return `Project claims · ${claims.coverage.unknown_scope_actors} unknown write scope${claims.coverage.unknown_scope_actors === 1 ? "" : "s"}`;
+  }
+  if (claims.coverage.state !== "complete") {
+    return `Project claims incomplete · ${claims.claims.shown}/${claims.claims.total} shown`;
+  }
+  return undefined;
 }

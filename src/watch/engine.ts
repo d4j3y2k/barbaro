@@ -2,6 +2,7 @@ import { stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { ActiveLeaseStore } from "../active/store.js";
+import { projectWriteClaims, projectClaimOverlaps, claimOverlapIdentity } from "../active/conflicts.js";
 import type { ActiveLeaseV1 } from "../active/types.js";
 import type { BarbaroTurnV1 } from "../contracts/v1.js";
 import { iterateJsonlForward } from "../core/jsonl-reader.js";
@@ -118,10 +119,10 @@ export function watchErrorEvent(
  * Incremental scanner over the derived Barbaro store. `prime()` swallows all
  * existing history as the baseline; each `poll()` then returns only what
  * changed, reading feed files from a byte cursor so cost tracks new bytes
- * rather than project history. `active/` churn is deliberately never an
+ * rather than project history. Routine `active/` renewal is never an
  * event: a peer publishes a lease revision per tool call, and what earns an
  * interrupt is a completed turn, a join, a fresh incident, or a lease that
- * lapses while still holding work.
+ * lapses while still holding work, or a changed cross-workstream path overlap.
  *
  * Every read goes through the supported stores — the lease store, the
  * participation store, the incident list, and the boundary-verified feed
@@ -148,6 +149,7 @@ export class WatchEngine {
     { readonly updatedAt: string; readonly reported: boolean }
   >();
   #primed = false;
+  #conflicts = new Set<string>();
 
   constructor(options: WatchEngineOptions) {
     if (options.projectRoot.length === 0) {
@@ -398,6 +400,17 @@ export class WatchEngine {
   async #scanLeases(sink: WatchEvent[] | undefined, now: Date): Promise<void> {
     const nowMs = now.getTime();
     const snapshots = await this.#activeStore.listSnapshots();
+    const conflicts = new Set<string>();
+    for (const overlap of projectClaimOverlaps(projectWriteClaims(this.#projectRoot, snapshots, now), this.#workstream)) {
+      const identity = claimOverlapIdentity(overlap);
+      conflicts.add(identity);
+      if (sink !== undefined && !this.#conflicts.has(identity)) {
+        sink.push({ schema: WATCH_EVENT_SCHEMA, kind: "conflict", observed_at: now.toISOString(), overlap });
+      }
+    }
+    // Deletions/expiry remove current conflicts silently. A later reappearance
+    // is new information; timestamps and watcher read activity are not.
+    this.#conflicts = conflicts;
 
     // Sessions whose main actor still holds an unexpired lease. A subagent
     // lease that stops being renewed under a live main has simply finished —

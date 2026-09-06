@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { feedAvailabilityFailure } from "../core/feed-availability.js";
 import { constants } from "node:fs";
 import {
   open,
@@ -110,6 +111,7 @@ export interface ReaderTurnRecordPageV1
   /** Feed files skipped because the exposed file or record limit was exceeded. */
   readonly diagnostics: {
     readonly skipped_oversized_feed_files: number;
+    readonly unavailable_feed_files?: number;
   };
 }
 
@@ -165,16 +167,20 @@ export class ReaderTurnNotFoundError extends Error {
 export class ReaderTurnSearchIncompleteError extends Error {
   readonly turnId: string;
   readonly skippedOversizedFeedFiles: number;
+  readonly unavailableFeedFiles: number;
 
-  constructor(turnId: string, skippedOversizedFeedFiles: number) {
+  constructor(turnId: string, skippedOversizedFeedFiles: number, unavailableFeedFiles = 0) {
     super(
-      `Barbaro turn search incomplete for ${turnId}: ${skippedOversizedFeedFiles} ` +
+      unavailableFeedFiles > 0
+        ? `Barbaro turn search incomplete for ${turnId}: ${unavailableFeedFiles} feed file(s) unavailable and ${skippedOversizedFeedFiles} over input limits; absence is unproven; restore feed access and retry`
+        : `Barbaro turn search incomplete for ${turnId}: ${skippedOversizedFeedFiles} ` +
         "feed file(s) exceeded the reader limits and were skipped, so absence " +
         "is unproven; raise --max-file-bytes or --max-record-bytes to include them",
     );
     this.name = "ReaderTurnSearchIncompleteError";
     this.turnId = turnId;
     this.skippedOversizedFeedFiles = skippedOversizedFeedFiles;
+    this.unavailableFeedFiles = unavailableFeedFiles;
   }
 }
 
@@ -221,11 +227,13 @@ type FoundTurn =
   | {
       readonly turn: undefined;
       readonly skippedOversizedFeedFiles: number;
+      readonly unavailableFeedFiles?: number;
     }
   | {
       readonly turn: BarbaroTurnV1;
       readonly location: RecordLocation;
       readonly skippedOversizedFeedFiles: number;
+      readonly unavailableFeedFiles?: number;
     };
 
 type FoundEvidence =
@@ -253,6 +261,8 @@ interface CursorBody {
   readonly z: number;
   /** Diagnostics pinned with the traversal and repeated on every page. */
   readonly x: number;
+  /** Optional availability count; old cursor shapes remain valid. */
+  readonly u?: number;
 }
 
 interface EncodedCursor {
@@ -273,6 +283,7 @@ interface CursorBinding extends CursorQueryBinding {
   readonly recordSha256: string;
   readonly location: RecordLocation;
   readonly skippedOversizedFeedFiles: number;
+  readonly unavailableFeedFiles?: number;
 }
 
 interface PageSlice {
@@ -292,6 +303,17 @@ export async function readTurnRecordPage(
   projectRoot: string,
   options: ReaderTurnRecordPageOptions,
 ): Promise<ReaderProjection<ReaderTurnRecordPageV1>> {
+  return (await readTurnRecordPageSnapshot(projectRoot, options)).projection;
+}
+
+/** Preserve the exact canonical record used to render a lossless page. */
+export async function readTurnRecordPageSnapshot(
+  projectRoot: string,
+  options: ReaderTurnRecordPageOptions,
+): Promise<{
+  readonly projection: ReaderProjection<ReaderTurnRecordPageV1>;
+  readonly turn: BarbaroTurnV1;
+}> {
   validateProjectRoot(projectRoot);
   assertPattern(options.turnId, TURN_ID_PATTERN, "turnId");
   const field = options.field ?? "record";
@@ -321,10 +343,11 @@ export async function readTurnRecordPage(
     if (options.cursor !== undefined) {
       throw new ReaderRecordCursorError("target record is no longer available");
     }
-    if (found.skippedOversizedFeedFiles > 0) {
+    if (found.skippedOversizedFeedFiles > 0 || (found.unavailableFeedFiles ?? 0) > 0) {
       throw new ReaderTurnSearchIncompleteError(
         options.turnId,
         found.skippedOversizedFeedFiles,
+        found.unavailableFeedFiles,
       );
     }
     throw new ReaderTurnNotFoundError(options.turnId);
@@ -348,8 +371,9 @@ export async function readTurnRecordPage(
     recordSha256,
     location: found.location,
     skippedOversizedFeedFiles: found.skippedOversizedFeedFiles,
+    ...(found.unavailableFeedFiles === undefined ? {} : { unavailableFeedFiles: found.unavailableFeedFiles }),
   };
-  return pageSelectedText(
+  const projection = pageSelectedText<ReaderTurnRecordPageV1>(
     selected,
     binding,
     options.byteBudget,
@@ -364,6 +388,7 @@ export async function readTurnRecordPage(
         : { workstream_id: turn.workstream_id }),
       diagnostics: {
         skipped_oversized_feed_files: found.skippedOversizedFeedFiles,
+        ...(found.unavailableFeedFiles === undefined ? {} : { unavailable_feed_files: found.unavailableFeedFiles }),
       },
       field,
       present: selected.present,
@@ -381,6 +406,7 @@ export async function readTurnRecordPage(
         : { next_cursor: page.nextCursor }),
     }),
   );
+  return { projection, turn };
 }
 
 /**
@@ -493,6 +519,7 @@ async function findTurn(
   let foundCanonical: string | undefined;
   let foundLocation: RecordLocation | undefined;
   let skippedOversizedFeedFiles = 0;
+  let unavailableFeedFiles = 0;
   for (const file of files) {
     let bytes: Buffer | undefined;
     try {
@@ -502,11 +529,13 @@ async function findTurn(
         limits.maxFileBytes,
       );
     } catch (error: unknown) {
-      if (!(error instanceof StoreFileTooLargeError)) throw error;
-      skippedOversizedFeedFiles += 1;
+      const failure = feedAvailabilityFailure(file, error);
+      if (failure === undefined) throw error;
+      if (failure.reason === "file_too_large" || failure.reason === "record_too_large") skippedOversizedFeedFiles += 1;
+      else unavailableFeedFiles += 1;
       continue;
     }
-    if (bytes === undefined) continue;
+    if (bytes === undefined) { unavailableFeedFiles += 1; continue; }
 
     // A feed is either wholly inside the exposed limits or wholly skipped.
     // Do not publish a candidate seen before a later oversized record.
@@ -555,9 +584,9 @@ async function findTurn(
     foundLocation = feedLocation;
   }
   if (found === undefined || foundLocation === undefined) {
-    return { turn: undefined, skippedOversizedFeedFiles };
+    return { turn: undefined, skippedOversizedFeedFiles, ...(unavailableFeedFiles > 0 ? { unavailableFeedFiles } : {}) };
   }
-  return { turn: found, location: foundLocation, skippedOversizedFeedFiles };
+  return { turn: found, location: foundLocation, skippedOversizedFeedFiles, ...(unavailableFeedFiles > 0 ? { unavailableFeedFiles } : {}) };
 }
 
 /** Resume a turn page from the byte range its cursor pinned. */
@@ -587,7 +616,7 @@ async function pinnedTurn(
   if (sha256(stableStringify(value)) !== body.h) {
     throw new ReaderRecordCursorError("cursor target changed since the prior page");
   }
-  return { turn: value, location, skippedOversizedFeedFiles: body.x };
+  return { turn: value, location, skippedOversizedFeedFiles: body.x, ...(body.u === undefined ? {} : { unavailableFeedFiles: body.u }) };
 }
 
 /** Resume an evidence page from the byte range its cursor pinned. */
@@ -793,7 +822,8 @@ async function findEvidence(
   return { evidence: found, location: foundLocation };
 }
 
-function selectTurnText(
+/** The exact field representation shared by page readers and delivery checks. */
+export function selectTurnText(
   turn: BarbaroTurnV1,
   field: ReaderTurnRecordField,
 ): SelectedText {
@@ -972,6 +1002,7 @@ function encodeCursor(binding: CursorBinding & { readonly offset: number }): str
     a: binding.location.start,
     z: binding.location.end,
     x: binding.skippedOversizedFeedFiles,
+    ...(binding.unavailableFeedFiles === undefined ? {} : { u: binding.unavailableFeedFiles }),
   };
   const encoded: EncodedCursor = {
     b: body,
@@ -1099,6 +1130,7 @@ function isCursorBody(value: unknown): value is CursorBody {
       "v",
       "x",
       "z",
+      ...(value.u === undefined ? [] : ["u"]),
     ]) &&
     value.v === CURSOR_VERSION &&
     typeof value.l === "string" &&
@@ -1107,6 +1139,7 @@ function isCursorBody(value: unknown): value is CursorBody {
     isSafePositiveInteger(value.z) &&
     Number(value.z) > Number(value.a) &&
     isSafeNonNegativeInteger(value.x) &&
+    (value.u === undefined || isSafeNonNegativeInteger(value.u)) &&
     typeof value.p === "string" &&
     SHA256_PATTERN.test(value.p) &&
     typeof value.s === "string" &&

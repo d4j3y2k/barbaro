@@ -1,4 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
+import { feedAvailabilityFailure, missingFeedError } from "../core/feed-availability.js";
 import { constants } from "node:fs";
 import {
   open,
@@ -86,6 +87,7 @@ export interface ReaderTurnListV1 {
     readonly malformed_feed_records: number;
     readonly invalid_feed_records: number;
     readonly skipped_oversized_feed_files: number;
+    readonly unavailable_feed_files?: number;
   };
   readonly turns: {
     readonly shown: number;
@@ -139,11 +141,13 @@ interface TurnListCursorState {
   readonly after: TurnOrderingKey;
   readonly total: number;
   readonly skippedOversizedFeedFiles: number;
+  readonly unavailableFeedFiles?: number;
 }
 
 interface CapturedFeedSnapshots {
   readonly snapshots: readonly FeedSnapshot[];
   readonly skippedOversizedFeedFiles: number;
+  readonly unavailableFeedFiles: number;
 }
 
 interface ParsedFeedTurns {
@@ -204,11 +208,13 @@ export async function readProjectTurnList(
   let snapshots: readonly FeedSnapshot[];
   let snapshotBinding: string;
   let skippedOversizedFeedFiles: number;
+  let unavailableFeedFiles: number;
   let cursorState: TurnListCursorState | undefined;
   if (options.cursor === undefined) {
     const captured = await captureFeedSnapshots(boundary, limits);
     snapshots = captured.snapshots;
     skippedOversizedFeedFiles = captured.skippedOversizedFeedFiles;
+    unavailableFeedFiles = captured.unavailableFeedFiles;
     snapshotBinding = bindFeedSnapshots(snapshots);
   } else {
     cursorState = decodeTurnListCursor(options.cursor);
@@ -216,6 +222,7 @@ export async function readProjectTurnList(
     snapshots = cursorState.feeds;
     snapshotBinding = cursorState.snapshotBinding;
     skippedOversizedFeedFiles = cursorState.skippedOversizedFeedFiles;
+    unavailableFeedFiles = cursorState.unavailableFeedFiles ?? 0;
   }
 
   const pinned = await readPinnedTurns(
@@ -261,6 +268,7 @@ export async function readProjectTurnList(
       malformed_feed_records: pinned.malformed,
       invalid_feed_records: pinned.invalid,
       skipped_oversized_feed_files: skippedOversizedFeedFiles,
+      ...(unavailableFeedFiles > 0 ? { unavailable_feed_files: unavailableFeedFiles } : {}),
     },
   );
 }
@@ -300,6 +308,7 @@ function projectTurnListPage(
           total: turns.length,
           skippedOversizedFeedFiles:
             diagnostics.skipped_oversized_feed_files,
+          ...(diagnostics.unavailable_feed_files === undefined ? {} : { unavailableFeedFiles: diagnostics.unavailable_feed_files }),
         });
     return {
       schema: READER_TURN_LIST_SCHEMA,
@@ -372,6 +381,7 @@ async function captureFeedSnapshots(
   const files = await listFeedFiles(boundary);
   const snapshots: FeedSnapshot[] = [];
   let skippedOversizedFeedFiles = 0;
+  let unavailableFeedFiles = 0;
   for (const file of files) {
     try {
       const captured = await readFeedAtEndpoint(boundary, file, limits);
@@ -380,16 +390,13 @@ async function captureFeedSnapshots(
       parseFeedTurns(captured.bytes, captured.path, captured.snapshot, limits);
       snapshots.push(captured.snapshot);
     } catch (error: unknown) {
-      if (
-        !(error instanceof StoreFileTooLargeError) &&
-        !(error instanceof ReaderRecordTooLargeError)
-      ) {
-        throw error;
-      }
-      skippedOversizedFeedFiles += 1;
+      const failure = feedAvailabilityFailure(file, error);
+      if (failure === undefined) throw error;
+      if (failure.reason === "file_too_large" || failure.reason === "record_too_large") skippedOversizedFeedFiles += 1;
+      else unavailableFeedFiles += 1;
     }
   }
-  return { snapshots, skippedOversizedFeedFiles };
+  return { snapshots, skippedOversizedFeedFiles, unavailableFeedFiles };
 }
 
 async function readPinnedTurns(
@@ -496,6 +503,7 @@ async function readFeedAtEndpoint(
 }> {
   const parent = await boundary.verifyDirectory(feed.components.slice(0, -1));
   if (parent === undefined) {
+    if (expected === undefined) throw missingFeedError();
     throw new ReaderTurnListSnapshotError(
       `Pinned feed parent is missing: ${feed.provider}/${feed.sessionId}`,
     );
@@ -509,6 +517,7 @@ async function readFeedAtEndpoint(
       throw new UnsafeStorePathError(path, "final file is a symbolic link");
     }
     if (isErrnoCode(error, "ENOENT")) {
+      if (expected === undefined) throw error;
       throw new ReaderTurnListSnapshotError(`Pinned feed is missing: ${path}`);
     }
     throw error;
@@ -788,6 +797,7 @@ function encodeTurnListCursor(state: TurnListCursorState): string {
     ],
     state.total,
     state.skippedOversizedFeedFiles,
+    ...(state.unavailableFeedFiles === undefined ? [] : [state.unavailableFeedFiles]),
   ];
   const compressed = deflateRawSync(
     Buffer.from(stableStringify(payload), "utf8"),
@@ -839,7 +849,7 @@ function decodeTurnListCursor(cursor: string): TurnListCursorState {
 function parseCursorPayload(value: unknown): TurnListCursorState {
   if (
     !Array.isArray(value) ||
-    (value.length !== 8 && value.length !== 9)
+    (value.length !== 8 && value.length !== 9 && value.length !== 10)
   ) {
     throw new TypeError("Malformed turn-list cursor payload");
   }
@@ -853,6 +863,7 @@ function parseCursorPayload(value: unknown): TurnListCursorState {
     rawAfter,
     total,
     rawSkippedOversizedFeedFiles,
+    unavailableFeedFiles,
   ] = value;
   if (version !== READER_TURN_LIST_CURSOR_VERSION) {
     throw new TypeError("Unsupported turn-list cursor version");
@@ -889,6 +900,9 @@ function parseCursorPayload(value: unknown): TurnListCursorState {
   if (!isSafeNonNegativeInteger(skippedOversizedFeedFiles)) {
     throw new TypeError("Malformed turn-list cursor diagnostics");
   }
+  if (unavailableFeedFiles !== undefined && !isSafeNonNegativeInteger(unavailableFeedFiles)) {
+    throw new TypeError("Malformed turn-list cursor availability diagnostics");
+  }
   return {
     projectBinding,
     scope,
@@ -898,6 +912,7 @@ function parseCursorPayload(value: unknown): TurnListCursorState {
     after,
     total,
     skippedOversizedFeedFiles,
+    ...(unavailableFeedFiles === undefined ? {} : { unavailableFeedFiles }),
   };
 }
 

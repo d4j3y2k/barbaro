@@ -18,17 +18,29 @@ import {
 import {
   NUDGE_CURSOR_SCHEMA,
   NUDGE_CURSOR_SCHEMA_V1,
+  NUDGE_CURSOR_SCHEMA_V2,
   NUDGE_MARKER_KINDS,
   type NudgeCursor,
   type NudgeCursorV1,
   type NudgeCursorV2,
+  type NudgeCursorV3,
   type NudgeDeliveryTurnV2,
   type NudgeFeedCursorV1,
   type NudgeMarkersV1,
   type NudgeMarkersV2,
 } from "./types.js";
+import { parseNudgeReadState } from "./read-state.js";
 
-const MAX_CURSOR_BYTES = 1024 * 1024;
+export const MAX_NUDGE_CURSOR_BYTES = 1024 * 1024;
+const MAX_CURSOR_BYTES = MAX_NUDGE_CURSOR_BYTES;
+
+export function nudgeCursorBytes(state: NudgeCursorV3): number {
+  return Buffer.byteLength(`${stableStringify(state)}\n`, "utf8");
+}
+
+export function nudgeCursorFits(state: NudgeCursorV3): boolean {
+  return nudgeCursorBytes(state) <= MAX_NUDGE_CURSOR_BYTES;
+}
 const PROVIDER_PATTERN = /^[a-z][a-z0-9_-]*$/u;
 const SESSION_ID_PATTERN = /^ses_[0-9a-f]{32}$/u;
 const WORKSTREAM_ID_PATTERN = /^ws_[0-9a-f]{32}$/u;
@@ -56,7 +68,7 @@ export class NudgeCursorTooLargeError extends RangeError {
 
 export interface HookCursorUpdate<T> {
   /** Omit to leave the cursor byte-for-byte untouched. */
-  readonly state?: NudgeCursorV2;
+  readonly state?: NudgeCursorV3;
   readonly result: T;
 }
 
@@ -129,10 +141,7 @@ export class NudgeCursorStateStore {
         const update = await operation(await this.read(provider, sessionId));
         if (update.state !== undefined) {
           assertCursorIdentity(update.state, provider, sessionId);
-          if (
-            Buffer.byteLength(`${stableStringify(update.state)}\n`, "utf8") >
-            MAX_CURSOR_BYTES
-          ) {
+          if (!nudgeCursorFits(update.state)) {
             throw new NudgeCursorTooLargeError();
           }
           await writeJsonFileAtomically(
@@ -185,8 +194,17 @@ function parseCursor(
   if (value.schema === NUDGE_CURSOR_SCHEMA_V1) {
     return parseCursorV1(value, expectedProvider, expectedSessionId);
   }
-  if (value.schema === NUDGE_CURSOR_SCHEMA) {
+  if (value.schema === NUDGE_CURSOR_SCHEMA_V2) {
     return parseCursorV2(value, expectedProvider, expectedSessionId);
+  }
+  if (value.schema === NUDGE_CURSOR_SCHEMA) {
+    const { reads, ...legacy } = value;
+    const base = parseCursorV2(legacy, expectedProvider, expectedSessionId);
+    return {
+      ...base,
+      schema: NUDGE_CURSOR_SCHEMA,
+      reads: parseNudgeReadState(reads, base.provider, base.claude_turn_generation),
+    };
   }
   throw new TypeError("unsupported or invalid nudge cursor schema");
 }
@@ -253,7 +271,7 @@ function parseCursorV2(
       : undefined,
   );
   return {
-    schema: NUDGE_CURSOR_SCHEMA,
+    schema: NUDGE_CURSOR_SCHEMA_V2,
     ...base,
     markers,
     delivery,
@@ -462,7 +480,7 @@ function assertAllowedKeys(
 }
 
 function assertCursorIdentity(
-  cursor: NudgeCursorV2,
+  cursor: NudgeCursorV3,
   provider: string,
   sessionId: string,
 ): void {
@@ -472,7 +490,7 @@ function assertCursorIdentity(
   // Run the same strict validator before serializing hook-owned state.
   const parsed = parseCursor(JSON.stringify(cursor), provider, sessionId);
   if (parsed.schema !== NUDGE_CURSOR_SCHEMA) {
-    throw new TypeError("hook writers may persist only nudge cursor v2");
+    throw new TypeError("hook writers may persist only nudge cursor v3");
   }
 }
 

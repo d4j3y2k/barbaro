@@ -22,6 +22,9 @@ export function isDigestExcludedBarbaroCommand(command: string): boolean {
   if (!scanned.valid || !scanned.consumedAll) return false;
   const { tokens } = scanned;
   if (tokens[0] !== "barbaro") return false;
+  if (tokens[1] === "read") {
+    return tokens[2] === "context" || (tokens[2] === "turn" && tokens[3] === "show");
+  }
   if (tokens[1] === "await" || tokens[1] === "context") return true;
   if (tokens[1] === "turn") {
     return tokens[2] === "list" || tokens[2] === "show";

@@ -730,3 +730,23 @@ test("usage guide documents the comfort TUI, create flow, and snapshot contract"
   assert.match(guide, /Enter confirms\s+and Escape refuses/u);
   assert.match(guide, /Home \u00b7 Open \u00b7 snapshot/u);
 });
+
+test("scoped TUI snapshot captions a foreign advisory overlap without foreign intent", async () => {
+  await withProject(async (project) => {
+    const workstreams = new WorkstreamStore(project);
+    const alpha = await workstreams.create({ name: "claim-alpha", createdBy: { kind: "cli" } });
+    const beta = await workstreams.create({ name: "claim-beta", createdBy: { kind: "cli" } });
+    const active = new ActiveLeaseStore(join(project, ".barbaro/active"));
+    for (const [id, workstream_id] of [["a", alpha.workstream_id], ["b", beta.workstream_id]] as const) {
+      await active.write({
+        lease_id: `lease_${id.repeat(32)}`, provider: "codex", session_id: `ses_${id.repeat(32)}`, agent_id: "main", workstream_id,
+        state: "working", claims: [{ path: "src/shared.ts", mode: "write", confidence: "exact" }],
+        unknown_write_scope: false, intent: intent(id === "b" ? "foreign-private-intent" : "local work"),
+      });
+    }
+    const output = await snapshot(project, ["--workstream", alpha.workstream_id, "--width", "80", "--height", "30"]);
+    assert.match(output, /1 advisory path overlap/u);
+    assert.ok(!output.includes("foreign-private-intent"));
+    assertFrame(output, 80, 30);
+  });
+});

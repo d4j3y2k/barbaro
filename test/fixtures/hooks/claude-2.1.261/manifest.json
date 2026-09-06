@@ -1,0 +1,103 @@
+{
+  "producer": "Claude Code 2.1.261",
+  "mode": "print",
+  "captured_at": "2026-09-05",
+  "sanitization": "Synthetic commands captured in a disposable project. Home paths, encoded usernames, and UUIDs are replaced consistently. Output sizes, event ordering, tool-result correspondence, and transport shape are preserved. Hashes describe these public copies.",
+  "files": [
+    {
+      "file": "000.PreToolUse.json",
+      "utf8_bytes": 679,
+      "sha256": "6b667f35427811a4b410238d83af35d293cba7878884642f17e01e3b79d981a2"
+    },
+    {
+      "file": "001.PostToolUse.json",
+      "utf8_bytes": 816,
+      "sha256": "65dd8873fc8956781268f589da8a265e611268da1828543ca7b9b5600128623b"
+    },
+    {
+      "file": "002.PostToolBatch.json",
+      "utf8_bytes": 734,
+      "sha256": "67f305bb441015405388be0b16a28727774f978720129a5002cb0f0c09787468"
+    },
+    {
+      "file": "003.PreToolUse.json",
+      "utf8_bytes": 685,
+      "sha256": "af768efd484c5ac7131981a3f33eee82e99bdd79f59172bd4f49e54fb2e74576"
+    },
+    {
+      "file": "004.PostToolUse.json",
+      "utf8_bytes": 12806,
+      "sha256": "8984f12cbaf34d3c49f9356dfabb2cb9dd3c23fe7e3a185d1b69e283b527e63e"
+    },
+    {
+      "file": "005.PostToolBatch.json",
+      "utf8_bytes": 12724,
+      "sha256": "ba0268c5911ff51d0cb5d3f2386b079a266ca3ee9fe731d30a8512a4d7ed73d7"
+    },
+    {
+      "file": "006.PreToolUse.json",
+      "utf8_bytes": 685,
+      "sha256": "2e02de2d2bc2237fe7497e70b414657adb50e57f2ccecde1949ade67475323c4"
+    },
+    {
+      "file": "007.PostToolUse.json",
+      "utf8_bytes": 31064,
+      "sha256": "d02ecc09720483bfd7577c3c7a4dc9e240d8bce3b26fc79692c2a3bafa6bc2bc"
+    },
+    {
+      "file": "008.PostToolBatch.json",
+      "utf8_bytes": 3050,
+      "sha256": "9e6db7038e6b2a6c3d1930b65b11ac7bc363114f74445ea16675d77b8e9b2878"
+    },
+    {
+      "file": "009.PreToolUse.json",
+      "utf8_bytes": 714,
+      "sha256": "b18450b0ef582a71000cb5b46951f53cf349dc738a4fc592826652f8d1c3ac9f"
+    },
+    {
+      "file": "010.PostToolUseFailure.json",
+      "utf8_bytes": 803,
+      "sha256": "83c537c11a0b7c6b7ce93746c397dc9f5c61eda73f6f47a8e7cfb7718cb54f58"
+    },
+    {
+      "file": "011.PostToolBatch.json",
+      "utf8_bytes": 785,
+      "sha256": "dc5b413894a05343118ae03942cef87914298fa2cabb1e8543a43a44863424f2"
+    },
+    {
+      "file": "012.PreToolUse.json",
+      "utf8_bytes": 678,
+      "sha256": "67c52938ecebb6105e8ad66046feba8c6c91ef4ecea3e9929b1c326b5fdd01a4"
+    },
+    {
+      "file": "013.PostToolUse.json",
+      "utf8_bytes": 812,
+      "sha256": "96c8821796d5ea43ed1a961951f3764eb53f27a0d738730aec0125db0f8caf33"
+    },
+    {
+      "file": "014.PreToolUse.json",
+      "utf8_bytes": 678,
+      "sha256": "bef3fb376fd4b79cde3857294f036a1f2a13d56bb4b8936a10a980fbf5ffbadb"
+    },
+    {
+      "file": "015.PostToolUse.json",
+      "utf8_bytes": 812,
+      "sha256": "33d10c15508feac109a7794bafc4c7868fa0f5819beff446093bb5184183b29b"
+    },
+    {
+      "file": "016.PostToolBatch.json",
+      "utf8_bytes": 923,
+      "sha256": "1c7fe5b0cf3f98c6cb31a7b6d6ae288b3641bf85914149759146f80fffd9b3c2"
+    },
+    {
+      "file": "FINDINGS.md",
+      "utf8_bytes": 5978,
+      "sha256": "1767f014cd5e02c098d57c356967f0f712dddbe41a1fa9d091117fff9d9a4302"
+    },
+    {
+      "file": "transcript-tool-results.jsonl",
+      "utf8_bytes": 61683,
+      "sha256": "868bc3d25ae189af8ce3cdb4bc845c3b6b32e291313f2ad866f99ad39017d354"
+    }
+  ]
+}

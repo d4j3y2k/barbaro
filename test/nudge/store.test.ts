@@ -13,7 +13,7 @@ import {
   NUDGE_CURSOR_SCHEMA,
   NudgeCursorStateStore,
   NudgeCursorTooLargeError,
-  type NudgeCursorV2,
+  type NudgeCursorV3,
 } from "../../src/nudge/index.js";
 
 const SELF_SESSION = `ses_${"f".repeat(32)}`;
@@ -24,8 +24,9 @@ test("a committed cursor result survives lock cleanup failure", async (t) => {
   const project = await mkdtemp(join(tmpdir(), "barbaro-nudge-store-test-"));
   t.after(() => rm(project, { recursive: true, force: true }));
   const store = new NudgeCursorStateStore(project);
-  const cursor: NudgeCursorV2 = {
+  const cursor: NudgeCursorV3 = {
     schema: NUDGE_CURSOR_SCHEMA,
+    reads: { pending: [], coverage: [], outside_window: false },
     provider: "codex",
     session_id: SELF_SESSION,
     workstream_id: `ws_${"a".repeat(32)}`,
@@ -68,8 +69,9 @@ test("a committed cursor does not wait for its release observer", async (t) => {
   const project = await mkdtemp(join(tmpdir(), "barbaro-nudge-store-test-"));
   t.after(() => rm(project, { recursive: true, force: true }));
   const store = new NudgeCursorStateStore(project);
-  const cursor: NudgeCursorV2 = {
+  const cursor: NudgeCursorV3 = {
     schema: NUDGE_CURSOR_SCHEMA,
+    reads: { pending: [], coverage: [], outside_window: false },
     provider: "codex",
     session_id: SELF_SESSION,
     workstream_id: `ws_${"a".repeat(32)}`,
@@ -152,7 +154,7 @@ test("a hook writer cannot persist a cursor larger than its own read bound", asy
   const project = await mkdtemp(join(tmpdir(), "barbaro-nudge-store-test-"));
   t.after(() => rm(project, { recursive: true, force: true }));
   const store = new NudgeCursorStateStore(project);
-  const feedCursors: NudgeCursorV2["feed_cursors"] = Array.from(
+  const feedCursors: NudgeCursorV3["feed_cursors"] = Array.from(
     { length: 4_000 },
     (_, index) => ({
     provider: "claude",
@@ -171,8 +173,9 @@ test("a hook writer cannot persist a cursor larger than its own read bound", asy
     },
     }),
   );
-  const oversized: NudgeCursorV2 = {
+  const oversized: NudgeCursorV3 = {
     schema: NUDGE_CURSOR_SCHEMA,
+    reads: { pending: [], coverage: [], outside_window: false },
     provider: "codex",
     session_id: SELF_SESSION,
     workstream_id: `ws_${"a".repeat(32)}`,

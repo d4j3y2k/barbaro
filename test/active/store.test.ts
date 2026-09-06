@@ -29,6 +29,29 @@ import {
 
 const execFileAsync = promisify(execFile);
 
+test("active afterCommit observes persistence under lock and never compensates a committed write", async () => {
+  await withActiveDirectory(async (directory) => {
+    const store = new ActiveLeaseStore(directory);
+    let compensated = false;
+    await assert.rejects(store.update(IDENTITY, () => ({ write: workingUpdate() }), {
+      afterCommit: async (lease) => {
+        assert.deepEqual(await store.readSnapshot(IDENTITY), lease);
+        throw new Error("dependent cursor failed");
+      },
+      onWriteFailure: () => { compensated = true; },
+    }), /dependent cursor failed/u);
+    assert.equal((await store.readSnapshot(IDENTITY))?.revision, 1);
+    assert.equal(compensated, false);
+    let called = false;
+    await assert.rejects(store.update(IDENTITY, () => ({ write: workingUpdate() }), {
+      now: Number.NaN, afterCommit: () => { called = true; },
+    }));
+    assert.equal(called, false);
+    await store.update(IDENTITY, () => ({ ignore: "no write" }), { afterCommit: () => { called = true; } });
+    assert.equal(called, false);
+  });
+});
+
 const IDENTITY: ActiveLeaseIdentity = {
   lease_id: "lease_0123456789abcdef0123456789abcdef",
   provider: "codex",

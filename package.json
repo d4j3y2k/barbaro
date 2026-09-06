@@ -1,6 +1,6 @@
 {
   "name": "barbaro",
-  "version": "0.1.0-alpha.5",
+  "version": "0.1.0-alpha.6",
   "description": "Local coordination for Codex and Claude Code sessions",
   "keywords": [
     "ai",
@@ -52,19 +52,22 @@
     "build:package": "npm run clean:dist && tsc -p tsconfig.package.json",
     "docs:assets": "npm run build && node scripts/generate-readme-assets.mjs",
     "docs:assets:check": "npm run build && node scripts/generate-readme-assets.mjs --check",
-    "postbuild:package": "node -e \"require('node:fs').chmodSync('dist/src/cli.js', 0o755)\"",
+    "postbuild:package": "node scripts/write-build-identity.mjs",
     "fixtures:regenerate": "npm run build && node scripts/regenerate-claude-expected.mjs && node scripts/regenerate-codex-expected.mjs",
     "study:horse": "node dist/src/tui/horse-preview.js",
     "prepack": "npm run check:release && node scripts/prepare-package.mjs && npm run build:package && node scripts/generate-readme-assets.mjs --check",
     "test": "npm run build && find dist/test -type f -name '*.test.js' -print0 | xargs -0 node --test",
     "test:package": "node scripts/verify-packed-install.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "postbuild": "node -e \"require('node:fs').chmodSync('dist/src/cli.js', 0o755)\""
+    "postbuild": "node scripts/write-build-identity.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.17.0",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "smol-toml": "1.8.0"
   }
 }

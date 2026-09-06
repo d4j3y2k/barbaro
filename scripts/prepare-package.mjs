@@ -24,6 +24,7 @@ const packagedInputs = [
   "scripts/check-release-version.mjs",
   "scripts/generate-readme-assets.mjs",
   "scripts/prepare-package.mjs",
+  "scripts/write-build-identity.mjs",
   "test/tui/fixtures/dashboard-once-still-64x28.txt",
   "tsconfig.package.json",
   "tsconfig.json",

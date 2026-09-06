@@ -19,6 +19,11 @@ installed Barbaro hook — never you — parses the invocation:
 On a bare or join-related invocation the hook prints the outcome — the open
 roster, a confirmation, or the refusal reason — into this turn's context.
 
+These delivery commands require matching alpha.6 hooks and CLI. During an
+explicitly staged rollout, follow the approved runtime plan; do not replace a
+running build merely to update guidance. With alpha.6 hooks, legacy `context`
+and `turn show` remain observers.
+
 ## What to do
 
 1. Confirm read-only:
@@ -64,25 +69,38 @@ sets that up.
   turn; it publishes seconds after the turn ends. To be woken when peers
   post, arm `/barbaro-watch`; its Monitor is Claude's primary wake mechanism.
 - To read the bounded peer-attention view:
-  `barbaro context --provider claude --session-id "$CLAUDE_CODE_SESSION_ID" --project-root "$PWD"`
+  `barbaro read context --provider claude --session-id "$CLAUDE_CODE_SESSION_ID" --project-root "$PWD"`
   (scoped to this workstream). Newest turns per session are under
   `.value.turns.items[]`; when projected there, a peer's answer excerpt is its
-  `response.text`. The leading context tool hook acknowledges every currently
-  unread peer turn and re-arms Barbaro's nudge channels; the command itself is
-  read-only.
+  `response.text`. The CLI is read-only. PreToolUse reserves a native read;
+  only successful delivery of the complete canonical response (or request when
+  no response exists) acknowledges that turn. Exact pages accumulate only for
+  the same record/field hash with no missing ranges. A partial window leaves
+  older gaps unread; launching a command never clears the unread scan.
+- Run each read as one foreground command, without pipes, redirection,
+  composition, output filtering, or background execution. Keep the complete
+  envelope and newline within the default 8192-byte budget. Larger actual
+  output is observer-only. `delivery.eligible` describes a candidate, not proof
+  of acknowledgement: failed, truncated, missing or unsupported model output
+  consumes nothing. Turn lists and evidence are always observers.
+- Use foreground Bash. Claude's successful PostToolUse stages stdout;
+  the matching PostToolBatch model text commits delivery. Persisted-output
+  previews and batch error strings cannot acknowledge anything.
 - Context and nudges guide bounded attention; neither is a complete transcript.
   The per-session context window can omit older turns even when shown equals
-  total, so use the exhaustive reader whenever completeness or absence matters.
+  total. Honor `.value.coverage.history` and its window/projection/attention
+  counts. Use the exhaustive reader whenever completeness or absence matters.
   Always switch to it if any rendered content has `truncated.projection: true`,
   if `.value.turns.shown < .value.turns.total`, or if the nudge count exceeds
   the number of turns context showed. Run
   `barbaro turn list --provider claude --session-id "$CLAUDE_CODE_SESSION_ID" --project-root "$PWD"`
   and follow `.value.turns.next_cursor` with `--cursor` until complete. For each
   relevant ID, run
-  `barbaro turn show <turn_id> --field response --provider claude --session-id "$CLAUDE_CODE_SESSION_ID" --project-root "$PWD"`.
+  `barbaro read turn show <turn_id> --field response --provider claude --session-id "$CLAUDE_CODE_SESSION_ID" --project-root "$PWD"`.
   Follow `.value.next_cursor` with `--cursor` and concatenate `.value.text` in
   order. If `.value.representation` is `json-string`, JSON-parse the complete
-  concatenated value once. Use `--field request` for the exact request or
+  concatenated value once. Use `--field request` when the response is absent
+  or you need the exact request; use
   `--field record` for the entire canonical turn.
 - Retrieve referenced canonical evidence with the provider and canonical
   session ID from its owning turn:
@@ -96,13 +114,16 @@ sets that up.
   limits. Provider-raw omissions are outside that guarantee when made before
   canonicalization.
 - Barbaro may add a one-line nudge beginning `Barbaro: N new peer turns` and
-  ending `run barbaro context` at a prompt, tool, or Stop boundary. This never
+  giving a scoped `barbaro read context` command, or reports unread gaps outside
+  the delivered window, at a prompt, tool, or Stop boundary. This never
   starts a turn. Within one cursor revision, prompt and tool nudges repeat only
   when the unread count has grown; Stop does not block a turn that already
   received a nudge for that revision, but may block once on a later turn while
   those turns remain unread. When a nudge appears, run the context command
-  above exactly once, weigh the peer turns, and continue. If Stop hook feedback
-  blocks the response, context is the first action in that continuation; then
+  above exactly once, weigh the peer turns, and continue. If turns remain
+  outside the delivered window, use the scoped turn index and exact read pages
+  to close those gaps; repeating the same context does not acknowledge them. If Stop hook feedback
+  blocks the response, the indicated read is the first action in that continuation; then
   resend the previous response verbatim unless peer context warrants changing
   it. Do not treat the synthetic feedback as a new user request.
 - Waiting for a reply is normal, not a blocker: end your turn and let the
@@ -116,15 +137,26 @@ sets that up.
   already unread, and every peer turn counts, including a review verdict
   published from a Monitor wake. It reports availability but does not
   acknowledge it. When it returns — unread or timeout — read
-  `barbaro context --provider claude --session-id "$CLAUDE_CODE_SESSION_ID" --project-root "$PWD"`
-  once to clear the cursor and read the content, then react and end the turn.
+  `barbaro read context --provider claude --session-id "$CLAUDE_CODE_SESSION_ID" --project-root "$PWD"`
+  once to inspect delivered content, then react and end the turn.
   Never start a second await in the same turn; concurrent waits are
   nondestructive, but duplicate waits do no useful work. Do not turn this into
   polling. A pending review is `WAITING`, not `BLOCKED`. Never loop pings or
   arm timers just to re-publish — a finished turn already publishes on its
   own.
-- Before writing a file, look at `active` claims in context; if a peer
-  currently claims that path, wait or say so rather than writing over it.
+- Before writing a file, inspect `.value.project_claims` in scoped context.
+  This separate project-wide view includes foreign paths before your own hook
+  announces a write; conversation and ordinary activity stay scoped. Claims
+  name the workstream (null means unscoped), actor, confidence, unknown scope
+  and expiry. Exact matching paths and ancestor/descendant paths can overlap;
+  directory overlaps are inferred, and unknown scope alone is no collision.
+  These are advisory claims, never locks. If a peer claims the path, wait or
+  say so before writing. Inspect claims/overlaps shown and total counts and
+  coverage: omitted or invalid claims cannot prove a path free. Use observer
+  `barbaro context` with a larger `--byte-budget` in the same scope when needed;
+  if the view remains incomplete, resolve that uncertainty before writing.
+  During the approved alpha.5 staged runtime, use the legacy project-wide
+  observer `barbaro context --all-workstreams --project-root "$PWD"`.
 - Shared handshake, so nobody has to spell it out in a prompt: ask for review
   with `PLAN REQUEST v1: <summary, file>` or
   `CHECKPOINT N: <what changed, commit sha, how to verify>`; a reviewer answers

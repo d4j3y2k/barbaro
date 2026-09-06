@@ -310,6 +310,39 @@ interface ParticipationFacts {
   >;
 }
 
+/** A targeted health read, independent of catalogue directory/projection caps. */
+export async function readSessionRecentTurnFacts(
+  projectRoot: string, provider: "codex" | "claude", sessionId: string,
+  membership: SessionWorkstreamMembership,
+) {
+  if (!/^ses_[0-9a-f]{32}$/u.test(sessionId)) throw new TypeError("Invalid session identity");
+  const boundary = SafeStoreBoundary.forBarbaroProject(resolve(projectRoot));
+  const components = ["feed", provider, `${sessionId}.jsonl`];
+  const empty = (state: "missing" | "refused", reason?: string) => ({ state,
+    turns: [] as ReturnType<typeof publishTurnFact>[],
+    latest: undefined as (ReaderCatalogueTurnFact & { readonly workstream_id: string }) | undefined,
+    coverage: reason === undefined ? { state: "complete" as const } : { state: "limited" as const, reason },
+    recent_coverage: reason === undefined ? { state: "complete" as const } : { state: "limited" as const, reason },
+  });
+  try {
+    if (await boundary.verifyDirectory(components.slice(0, -1)) === undefined) return empty("missing");
+    const scan = await scanFeed(boundary, components, provider, sessionId,
+      catalogueLimits({ byteBudget: 16384, turnsPerSession: 3, maxScanBytesPerFile: 1024 * 1024 }));
+    await boundary.verifyDirectory(components.slice(0, -1));
+    const scoped = scan.turns.filter((turn) => turn.workstream_id === membership.workstream_id &&
+      Date.parse(turn.started_at) >= Date.parse(membership.from));
+    const latest = scoped.sort((a, b) => Date.parse(b.ended_at) - Date.parse(a.ended_at) || b.sequence - a.sequence)[0];
+    return { state: "present" as const, turns: scan.recent.turns.map(publishTurnFact),
+      latest: latest === undefined ? undefined : { ...turnFact(latest), workstream_id: membership.workstream_id },
+      coverage: scan.clean ? { state: "complete" as const } : { state: "limited" as const, reason: feedIssueReason(scan) },
+      recent_coverage: scan.recent.coverage,
+    };
+  } catch (error: unknown) {
+    if (error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT") return empty("missing");
+    return empty("refused", "session_feed_refused");
+  }
+}
+
 interface WorkstreamFacts {
   readonly files: number;
   readonly invalid: number;

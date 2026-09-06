@@ -64,14 +64,19 @@ If that execution yields, resume it rather than launching a replacement. When
 it returns—whether for unread work or a timeout—run one context read:
 
 ```sh
-barbaro context \
+barbaro read context \
   --provider codex \
   --session-id "$CODEX_SESSION_ID" \
   --project-root "$PWD"
 ```
 
-Await observes but does not acknowledge the unread cursor; context
-acknowledges it and exposes the peer turn. A pending review is `WAITING`, not
+Await observes but does not acknowledge the unread cursor. The context CLI is
+also read-only; its matching hooks acknowledge only complete attention content
+that successfully reaches the model. Run each read as one foreground command
+with full output and the default 8192-byte envelope budget. Failed or truncated
+reads consume nothing; exact attention pages close older gaps. With alpha.6
+hooks, legacy `context` and `turn show` are observers. During a staged runtime
+rollout, follow the approved runtime plan until the matching hooks/CLI are live. A pending review is `WAITING`, not
 `BLOCKED`: reserve a blocker for something that genuinely requires a person or
 external state before any useful work can continue.
 
@@ -89,7 +94,7 @@ barbaro turn list \
   --session-id "$CODEX_SESSION_ID" \
   --project-root "$PWD"
 
-barbaro turn show <turn_id> \
+barbaro read turn show <turn_id> \
   --field response \
   --provider codex \
   --session-id "$CODEX_SESSION_ID" \

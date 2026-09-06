@@ -75,6 +75,7 @@ try {
     "SECURITY.md",
     "LICENSE",
     "dist/src/cli.js",
+    "dist/src/build-identity.json",
     "dist/src/core/index.js",
     "dist/src/core/index.d.ts",
     ".agents/skills/barbaro/SKILL.md",
@@ -108,6 +109,7 @@ try {
 
   for (const packedPath of packedFiles) {
     if (!packedPath.startsWith("dist/src/")) continue;
+    if (packedPath === "dist/src/build-identity.json") continue; // Verified by the installed doctor below.
     const sourcePath = sourcePathForCompiled(packedPath);
     assert.notEqual(
       sourcePath,
@@ -222,6 +224,25 @@ async function verifyCleanInstall(options) {
   const version = run(bin, ["--version"], environment.HOME, commandEnvironment);
   assert.equal(version.stdout, `${packageManifest.version}\n`);
   assert.equal(version.stderr, "");
+
+  const doctor = spawnSync(bin, ["doctor", "--json", "--project-root", environment.HOME], {
+    cwd: environment.HOME, encoding: "utf8", env: commandEnvironment,
+    maxBuffer: 1024 * 1024, timeout: commandTimeoutMs,
+  });
+  if (doctor.error !== undefined) throw doctor.error;
+  assert.equal(doctor.status, 1, "an unconfigured install needs live setup evidence");
+  assert.equal(doctor.stderr, "");
+  const report = JSON.parse(doctor.stdout);
+  assert.equal(report.schema, "barbaro.doctor.v1");
+  assert.equal(report.runtimes[0].state, "verified");
+  assert.equal(report.runtimes[0].build_version, packageManifest.version);
+  assert.match(report.runtimes[0].build_identity_sha256, /^[a-f0-9]{64}$/u);
+  assert.equal(report.store_health.presence, "absent", "doctor must not initialize a store");
+  await assert.rejects(access(join(environment.HOME, ".barbaro")));
+  const doctorUsage = spawnSync(bin, ["doctor", "--unexpected"], {
+    cwd: environment.HOME, encoding: "utf8", env: commandEnvironment, timeout: commandTimeoutMs,
+  });
+  assert.equal(doctorUsage.status, 2);
 
   const horse = run(
     npmCommand,

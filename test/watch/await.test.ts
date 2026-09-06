@@ -33,6 +33,7 @@ import {
   WATCH_WAKE_MARKER,
   awaitUnreadPeerTurns,
   formatAwaitTimeout,
+  formatAwaitIncomplete,
   formatAwaitUnread,
   isEchoTurn,
   type AwaitCursorOptions,
@@ -208,7 +209,9 @@ test("a v1 cursor returns pre-existing task-notification unread without repair",
     unread_count: 1,
   });
   if (result.kind === "unread") {
-    assert.equal(formatAwaitUnread(result), "1 unread — run barbaro context");
+    assert.match(formatAwaitUnread(result), /^1 unread — run barbaro read context --provider codex /u);
+    assert.ok(formatAwaitUnread(result).includes(`--session-id ${SELF_SESSION}`));
+    assert.ok(formatAwaitUnread(result).includes(`--workstream ${options.workstreamId}`));
   }
   assert.deepEqual(await readFile(options.cursorPath), cursorBefore);
   assert.deepEqual(await readFile(feedPath), feedBefore);
@@ -372,6 +375,40 @@ test("failures at the deadline cannot masquerade as a successful timeout", async
   );
   assert.deepEqual(sleeps, [10]);
   assert.equal(scans, 5);
+});
+
+test("incomplete feed coverage returns healthy news but cannot report a quiet timeout", async (t) => {
+  const options = await cursorFixture(t);
+  const coverage = { state: "incomplete" as const, scanned_feed_files: 1,
+    unavailable: { items: [{ provider: "claude", session_id: PEER_SESSION, reason: "permission_denied" as const, code: "EACCES" }], shown: 1, total: 1 } };
+  for (const count of [0, 2]) {
+    let clock = 0;
+    const result = await awaitUnreadPeerTurns({ ...options, timeoutMs: 25, intervalMs: 10,
+      now: () => clock, sleep: async (ms) => { clock += ms; },
+      inspect: async () => ({ ...ready(options, count), coverage }),
+    });
+    if (count === 0) {
+      assert.equal(result.kind, "incomplete");
+      assert.equal(clock, 25);
+      if (result.kind === "incomplete") {
+        assert.deepEqual(result.coverage, coverage);
+        assert.match(formatAwaitIncomplete(result), /quiet is unproven.*permission_denied/u);
+      }
+    } else {
+      assert.equal(result.kind, "unread");
+      assert.equal(clock, 0);
+      if (result.kind === "unread") {
+        assert.deepEqual(result.coverage, coverage);
+        assert.match(formatAwaitUnread(result), /^at least 2 unread.*coverage incomplete/u);
+      }
+    }
+  }
+  let clock = 0;
+  const recovered = await awaitUnreadPeerTurns({ ...options, timeoutMs: 10, intervalMs: 10,
+    now: () => clock, sleep: async (ms) => { clock += ms; },
+    inspect: async () => ({ ...ready(options, 0), ...(clock === 0 ? { coverage } : {}) }),
+  });
+  assert.equal(recovered.kind, "timeout", "a final fully available scan can establish quiet");
 });
 
 test("foreign cursor epochs and unavailable identities fail immediately", async (t) => {

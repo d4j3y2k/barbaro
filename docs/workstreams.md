@@ -1,3 +1,9 @@
+> Alpha.6 delivery update: the implemented reader protocol below supersedes
+> earlier phase descriptions of acknowledgement at command launch. Use matching
+> hooks/CLI and the delivery guidance in [usage](usage.md); legacy reads are
+> observers under alpha.6 hooks. Conversation scope and project-wide claims
+> remain separate checks.
+
 # Workstreams — design RFC
 
 Status: **phase 1 implemented; phase 2 partly implemented (scoped reader and
@@ -484,7 +490,7 @@ when a reviewer answers from a Monitor wake.
 
 Each joined provider session has one cursor at
 `.barbaro/state/nudge/<provider>/<ses_id>.json`. Its
-`barbaro.nudge-cursor.v2` record contains the stable provider/session identity,
+`barbaro.nudge-cursor.v3` record contains the stable provider/session identity,
 current `workstream_id`, the current membership's `from` timestamp,
 `cursor_revision`, a byte checkpoint for each peer feed, one revision-bound
 `stop` latch, and a delivery ledger. The ledger records the highest unread
@@ -492,14 +498,17 @@ count announced by any channel and, when known, the exact provider turn that
 received the last delivery. Codex supplies its stable derived `turn_id`;
 because Claude does not expose a turn id to hooks, its cursor carries a strictly positive
 synthetic generation that advances on each admitted main `UserPromptSubmit`
-and remains monotonic across context acknowledgements.
+and remains monotonic across context acknowledgements. V3 also holds bounded
+native-call reservations, sparse delivered fields and exact page ranges, plus
+the current turn's successful partial delivery marker.
 
-Existing `barbaro.nudge-cursor.v1` records remain strictly accepted. Readers
-observe v1 or v2 byte-for-byte without migration. The next hook-writer
-transaction upgrades a valid v1 record conservatively: any legacy delivery
+Existing v1 and v2 records remain strictly accepted. Readers observe all three
+schemas without migration. A valid v2 hook-writer migration preserves its exact
+frontier, revision, high-water, last-turn marker, Stop latch and Claude generation
+while adding empty read state. A valid v1 migration is conservative: any legacy delivery
 marker seeds the current unread count as already announced, a legacy `stop`
 marker preserves the Stop latch, and only a definite new prompt is treated as
-a new turn. Both schemas reject unknown fields, malformed identities, and
+a new turn. All schemas reject unknown fields, malformed identities, and
 markers that do not equal `cursor_revision`; corrupt bytes are left untouched
 and surface through the provider hook's existing fail-open incident path.
 
@@ -510,15 +519,19 @@ never initializes, advances, repairs, claims, or clears cursor state.
 `barbaro context` and the TUI's catalogue/refresh paths likewise leave the
 cursor read-only; the TUI's only writes are the explicit public-CLI lifecycle
 actions described above. In particular, two concurrent awaits read the same
-state and cannot consume news from one another. A leading `barbaro context`
-tool call is separately acknowledged by that session's main-agent
-`PreToolUse` hook after the event passes its provider turn fence. For Codex,
-that means either the current active lease turn or a trace-attested fresh goal
-turn. On admission the hook pins the scan endpoints, increments
-`cursor_revision`, clears the Stop latch and delivery high-water, and preserves
-Claude's synthetic turn generation before the command runs. This fully re-arms
-all channels. A stale or unattested Codex boundary leaves both lease and cursor
-untouched.
+state and cannot consume news from one another. Alpha.6 uses `barbaro read
+context` and `barbaro read turn show` for delivery-capable reads. PreToolUse
+reserves the native invocation without advancing unread state. Claude commits
+only after successful PostToolUse stdout matches PostToolBatch model text;
+Codex commits after its trace proves native success and full forwarded model
+output, before the next admitted natural boundary's nudge/Stop decision. The
+complete envelope and newline must fit 8192 bytes. Legacy reads, failed commands,
+unknown wrappers, previews and truncated output are observers. Exact page
+coverage binds record/field hashes and byte ranges, preserving every missing
+gap. A newly covered interval advances the announcement revision once; duplicate
+coverage and old reads do not rearm anything. A partial context read records
+the current turn as informed, so same-turn Stop stays suppressed while a fresh
+informational nudge explains remaining gaps outside the delivered window.
 
 The membership epoch is part of the cursor identity. Every scan rechecks the
 current participation record around the cursor operation and retries a bounded
@@ -560,7 +573,7 @@ high-water and Stop latch; an event rejected by the turn fence advances
 neither cursor state nor delivery state.
 
 The line reports the unread count, a bounded one-line preview of the newest
-peer response, and `run barbaro context`. Claude `UserPromptSubmit` keeps its
+peer response, and `run barbaro read context` with provider/session/workstream/project flags. Claude `UserPromptSubmit` keeps its
 stdout wholly plain text; Claude tool boundaries use the event's
 `additionalContext`; Stop uses the provider's blocking decision shape. Codex
 uses only hook output channels verified against its pinned schema.
@@ -584,7 +597,7 @@ the latch to the continuation that emits the block: newer activity either wins
 before the continuation and no latch is claimed, or follows a successfully
 reopened Stop. The hook returns
 `decision:block` with the nudge, a bounded preview of
-`last_assistant_message`, and instructions to run `barbaro context` and then
+`last_assistant_message`, and instructions to run the scoped `barbaro read context` and then
 resend the actual previous response verbatim unless peer context changes it.
 
 The Stop caused by that continuation arrives with `stop_hook_active:true`.
@@ -677,20 +690,21 @@ not a nudge scheduler.
   remains unchanged.
 - **Unread, not events.** Await repeatedly calls the observer-only unread
   projection. It returns immediately when `unread_count > 0`, printing
-  `<n> unread — run barbaro context` (or the corresponding
+  `<n> unread — run barbaro read context <scope flags>` (or the corresponding
   `barbaro.await.v1` JSON record with `kind:"unread"`, provider, stable
   session ID, workstream ID, cursor revision, and unread count), without
   consuming the cursor. Otherwise it blocks until unread appears or the
   deadline passes. A peer turn that landed before await started and a
   Monitor-wake echo turn are both visible.
 - **Acknowledge, then react.** Await reports availability, not content. After
-  it returns, run `barbaro context` once; the main-session hook advances the
-  cursor, and the command shows what changed. Then react and end the turn.
-  One await per later turn or goal iteration keeps the workflow legible.
-  Provider execution may yield while the child command continues, but
-  correctness no longer depends on preserving one privileged waiter:
-  concurrent waits are nondestructive observers. Do not start polling loops,
-  replacement waits, pings, or timers.
+  it returns, run `barbaro read context` once with the same identity/project
+  flags. Its hooks acknowledge only complete attention that successfully reaches
+  the model. Older gaps require exact `barbaro read turn show` pages; duplicate
+  reads do not clear them. Await and its output remain pure observers.
+  Run one await per later turn or goal iteration, resume its existing execution
+  if it yields, and end the turn after reacting. Do not start replacement waits,
+  polling loops, pings, or timers.
+
 - **Timeout is not failure.** On timeout print
   `AWAIT timeout after <n> ms — no peer event` (JSON:
   `{"schema":"barbaro.await.v1","kind":"timeout","timeout_ms":n}`) and exit
@@ -704,7 +718,7 @@ not a nudge scheduler.
   wait plus grace. The next provider boundary restores `working` with the
   default lifetime.
 - **Not an action.** Whole-simple-command `barbaro await` and
-  `barbaro context` invocations are excluded from both provider digests.
+  `barbaro context`, `barbaro read context`, and `barbaro read turn show` invocations are excluded from both provider digests.
   Shell composition, redirection, a newline, or command substitution remains
   a recorded action.
 

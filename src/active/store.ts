@@ -334,6 +334,12 @@ export class ActiveLeaseStore {
       throw new TypeError("onWriteFailure must be a function");
     }
     if (
+      options.afterCommit !== undefined &&
+      typeof options.afterCommit !== "function"
+    ) {
+      throw new TypeError("afterCommit must be a function");
+    }
+    if (
       options.onLockReleaseFailure !== undefined &&
       typeof options.onLockReleaseFailure !== "function"
     ) {
@@ -358,6 +364,7 @@ export class ActiveLeaseStore {
           if ("ignore" in decision) {
             return { ignored: decision.ignore };
           }
+          let committed: ActiveLeaseV1;
           try {
             assertUpdateDoesNotSetGeneratedFields(decision.write);
             const template = this.buildLease(decision.write, 1, 0, 1);
@@ -388,7 +395,7 @@ export class ActiveLeaseStore {
             };
             validateActiveLease(lease);
             await this.atomicReplace(path, lease);
-            return { lease };
+            committed = lease;
           } catch (error: unknown) {
             if (options.onWriteFailure !== undefined) {
               try {
@@ -402,6 +409,8 @@ export class ActiveLeaseStore {
             }
             throw error;
           }
+          await options.afterCommit?.(cloneLease(committed));
+          return { lease: committed };
         }),
       );
     } catch (error: unknown) {

@@ -29,7 +29,7 @@ test("peer skills distinguish bounded attention from lossless retrieval", async 
     assert.match(skill, /barbaro turn list/u, path);
     assert.match(
       skill,
-      /barbaro turn show <turn_id> --field response/u,
+      /barbaro read turn show <turn_id> --field response/u,
       path,
     );
     assert.match(skill, /--field request/u, path);

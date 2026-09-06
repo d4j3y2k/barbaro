@@ -1,0 +1,128 @@
+{
+  "producer": "Codex CLI 0.153.2",
+  "mode": "exec with desktop code-mode host, paginated history",
+  "captured_at": "2026-09-05",
+  "sanitization": "Home and capture-root paths replaced with literal markers; session_meta instruction bodies omitted. Only synthetic command calls/results, native CommandExecution completion events and turn boundaries retained. At-hook trace prefixes reconstructed from the final append-only trace at each logger-observed byte size; original hook payloads are captured directly.",
+  "files": [
+    {
+      "file": "000.SessionStart.json",
+      "utf8_bytes": 319,
+      "sha256": "468c870c470cc00f9e869a61128c5ef745ecade16ef15836be59a0f21e9808f2"
+    },
+    {
+      "file": "000.SessionStart.trace.jsonl",
+      "utf8_bytes": 745,
+      "sha256": "095d4989f9858dc2afb8532f50d5dca1bc2ef971212ae2506ecb98c8ae66d0c3"
+    },
+    {
+      "file": "001.UserPromptSubmit.json",
+      "utf8_bytes": 1125,
+      "sha256": "e6102c7c5cb9b0d1366d1b1ea92596767743b4a7540009154e8a57a74762d61f"
+    },
+    {
+      "file": "001.UserPromptSubmit.trace.jsonl",
+      "utf8_bytes": 745,
+      "sha256": "095d4989f9858dc2afb8532f50d5dca1bc2ef971212ae2506ecb98c8ae66d0c3"
+    },
+    {
+      "file": "002.PreToolUse.json",
+      "utf8_bytes": 483,
+      "sha256": "515c6539ca1917bb179e84aadef542e0ddce444d695bcdb09a0f6a0793ab58a3"
+    },
+    {
+      "file": "002.PreToolUse.trace.jsonl",
+      "utf8_bytes": 1240,
+      "sha256": "fe60f850ee975088b4a6a6cfb55a2d32863b4a48cc06cd671a542573b5fee4c7"
+    },
+    {
+      "file": "003.PostToolUse.json",
+      "utf8_bytes": 524,
+      "sha256": "8dce492597ec5d79b12efbc9065c0fb46e9e7bdd3b45cf6a36718f231fa63777"
+    },
+    {
+      "file": "003.PostToolUse.trace.jsonl",
+      "utf8_bytes": 2024,
+      "sha256": "39dacb468b0f6c01cd9aac651744280a5d474de2c4e147670618d9b03a27efe2"
+    },
+    {
+      "file": "004.PreToolUse.json",
+      "utf8_bytes": 520,
+      "sha256": "40b7dff71ad07f88cbe5652c6be98b955ba88084c6923f5705592f7f161974fb"
+    },
+    {
+      "file": "004.PreToolUse.trace.jsonl",
+      "utf8_bytes": 3162,
+      "sha256": "337c7b555c34eb439622eec3d375dbeb27a10c5aaa289914cb783e059aa0590a"
+    },
+    {
+      "file": "005.PostToolUse.json",
+      "utf8_bytes": 9540,
+      "sha256": "7e893215fa6561aac2f5b098eabaa5bbb18000d8e839bde67daf67fabd71b875"
+    },
+    {
+      "file": "005.PostToolUse.trace.jsonl",
+      "utf8_bytes": 30957,
+      "sha256": "d949bc19e7502d3427efd7da30cadb29d39bfe245fb247b8b28df092c67a465f"
+    },
+    {
+      "file": "006.PreToolUse.json",
+      "utf8_bytes": 524,
+      "sha256": "1fae9a8581d0d9a9bd867d959ea650b4164933d582c4f61ea457fe16d0ae168c"
+    },
+    {
+      "file": "006.PreToolUse.trace.jsonl",
+      "utf8_bytes": 41079,
+      "sha256": "e3f55d09637e7cbebf830c668e31a01f5d5a653754e6bc22ed4ceafdfab59011"
+    },
+    {
+      "file": "007.PostToolUse.json",
+      "utf8_bytes": 908,
+      "sha256": "064809b280b9031a940a15a00116ea28ea6d7011988b5b1ba01d138c57d50b3d"
+    },
+    {
+      "file": "007.PostToolUse.trace.jsonl",
+      "utf8_bytes": 56882,
+      "sha256": "30f0f3d147a3573585392f5f1f05dc7ccc14cd51cd45c0a5f40c10e592ff2f95"
+    },
+    {
+      "file": "008.PreToolUse.json",
+      "utf8_bytes": 496,
+      "sha256": "22985bdfa8f15555df651a6c41a94db2aa2e5e107677d626096eec5435846374"
+    },
+    {
+      "file": "008.PreToolUse.trace.jsonl",
+      "utf8_bytes": 58348,
+      "sha256": "e2437955c3c6a7ecfadd0e0924dc6dbef3b6727bf22f004c488591f72e88e4f2"
+    },
+    {
+      "file": "009.PostToolUse.json",
+      "utf8_bytes": 537,
+      "sha256": "04d96e65fe647e3bd25b470b240e9691009552e9bb8df839bafd750961f5adf4"
+    },
+    {
+      "file": "009.PostToolUse.trace.jsonl",
+      "utf8_bytes": 59155,
+      "sha256": "98997c3162ed9eb7eca4de5356232496d07f9242977594cf8ff9196ae03baf62"
+    },
+    {
+      "file": "010.Stop.json",
+      "utf8_bytes": 444,
+      "sha256": "1a5582ca7773be9a40bcca1cfc4b17519b756706a40cb3c46ea918eb4475c93c"
+    },
+    {
+      "file": "010.Stop.trace.jsonl",
+      "utf8_bytes": 59760,
+      "sha256": "7840910439e29082a44e9ef3ffd865a4c445b3228e49ae42217cedc6a52dbbbe"
+    },
+    {
+      "file": "final.trace.jsonl",
+      "utf8_bytes": 60091,
+      "sha256": "d868e702ad1edd0346de1d94044b918e44215f1efdb58870cf362ab76d3c4beb"
+    },
+    {
+      "file": "FINDINGS.md",
+      "utf8_bytes": 4053,
+      "sha256": "6e884150f7114aec818291ff2ee25d9922747fd3a4f3ac41b0a65b1d3c396939"
+    }
+  ]
+}

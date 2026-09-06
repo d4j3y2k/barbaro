@@ -676,3 +676,77 @@ test("a scoped watcher hears its own workstream only; unscoped sessions are outs
     assert.deepEqual(wideLabels, [beta, "unscoped"].sort());
   });
 });
+
+test("scoped conflicts appear/change once, expire, and never echo watcher replies", async () => {
+  await withProject(async (project) => {
+    let nowMs = START_MS;
+    const alpha = `ws_${"a".repeat(32)}`;
+    const beta = `ws_${"b".repeat(32)}`;
+    const store = new ActiveLeaseStore(join(project, ".barbaro", "active"));
+    const a = workingUpdate(SES_A, { workstream_id: alpha });
+    let b = workingUpdate(SES_B, { workstream_id: beta, claims: [{ path: "src/b.ts", mode: "write", confidence: "exact" }] });
+    await store.write(a, { now: nowMs, ttlMs: 600_000 });
+    await store.write(b, { now: nowMs, ttlMs: 60_000 });
+    const watcherA = new WatchEngine({ projectRoot: project, selfSessionId: SES_A, workstreamId: alpha, clock: () => new Date(nowMs) });
+    const watcherB = new WatchEngine({ projectRoot: project, selfSessionId: SES_B, workstreamId: beta, clock: () => new Date(nowMs) });
+    await watcherA.prime(); await watcherB.prime();
+    assert.deepEqual(await watcherA.poll(), []);
+    assert.deepEqual(await watcherB.poll(), []);
+
+    b = { ...b, claims: a.claims };
+    await store.write(b, { now: nowMs, ttlMs: 60_000 });
+    for (const [watcher, local] of [[watcherA, alpha], [watcherB, beta]] as const) {
+      const events = await watcher.poll();
+      assert.equal(events.length, 1);
+      assert.ok(events[0]?.kind === "conflict");
+      assert.equal(events[0].overlap.local.workstream_id, local);
+      assert.equal(events[0].overlap.confidence, "exact");
+      assert.deepEqual(await watcher.poll(), []);
+    }
+    // Tool activity and expiry extensions carry no material path change.
+    for (let round = 1; round <= 3; round += 1) {
+      nowMs += 1_000;
+      await store.write({ ...b, current_action: { kind: "tool", tool_name: "Read" } }, { now: nowMs, ttlMs: 60_000 });
+      for (const [sessionId, workstream_id] of [[SES_A, alpha], [SES_B, beta]]) {
+        await appendTurn(project, { ...turnRecord({ sessionId: sessionId!, sequence: round, request: wakeRequest() }), workstream_id: workstream_id! });
+      }
+      assert.deepEqual(await watcherA.poll(), []);
+      assert.deepEqual(await watcherB.poll(), []);
+    }
+    // Confidence and unknown scope are material; unknown alone is not overlap.
+    b = { ...b, claims: [{ path: "src/a.ts", mode: "write", confidence: "inferred" }], unknown_write_scope: true };
+    await store.write(b, { now: nowMs, ttlMs: 60_000 });
+    const changed = await watcherA.poll();
+    assert.equal(changed.length, 1);
+    assert.ok(changed[0]?.kind === "conflict");
+    assert.equal(changed[0].overlap.confidence, "inferred");
+    nowMs += 60_000;
+    assert.deepEqual(await watcherA.poll(), [], "foreign expiry silently removes conflict at the exact deadline");
+    await store.write(b, { now: nowMs, ttlMs: 60_000 });
+    assert.equal((await watcherA.poll())[0]?.kind, "conflict", "renewal after lapse reappears");
+    await store.write({ ...b, claims: [] }, { now: nowMs });
+    assert.deepEqual(await watcherA.poll(), []);
+    await store.write({ ...b, claims: [{ path: "src/disjoint.ts", mode: "write", confidence: "exact" }] }, { now: nowMs });
+    assert.deepEqual(await watcherA.poll(), []);
+    await appendTurn(project, { ...turnRecord({ sessionId: SES_B, sequence: 4, request: "foreign human conversation" }), workstream_id: beta });
+    assert.deepEqual(await watcherA.poll(), [], "ordinary foreign conversation stays scoped");
+  });
+});
+
+test("priming absorbs current conflicts and local claim appearance can reveal a foreign overlap", async () => {
+  await withProject(async (project) => {
+    const now = START_MS;
+    const alpha = `ws_${"a".repeat(32)}`;
+    const beta = `ws_${"b".repeat(32)}`;
+    const store = new ActiveLeaseStore(join(project, ".barbaro", "active"));
+    await store.write(workingUpdate(SES_B, { workstream_id: beta }), { now });
+    const engine = new WatchEngine({ projectRoot: project, selfSessionId: SES_A, workstreamId: alpha, clock: () => new Date(now) });
+    await engine.prime();
+    assert.deepEqual(await engine.poll(), []);
+    await store.write(workingUpdate(SES_A, { workstream_id: alpha }), { now });
+    assert.equal((await engine.poll())[0]?.kind, "conflict");
+    const restarted = new WatchEngine({ projectRoot: project, workstreamId: alpha, clock: () => new Date(now) });
+    await restarted.prime();
+    assert.deepEqual(await restarted.poll(), []);
+  });
+});

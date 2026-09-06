@@ -542,6 +542,8 @@ export interface ActiveMembership {
    * that arrived after the leaf it still names.
    */
   readonly ambiguousPointerContinuation: boolean;
+  /** A connected anchored response still has a call without a unique result. */
+  readonly unsettledResponseGroup?: boolean;
   /** tool_use_ids whose result row lies on the active ancestry. */
   readonly onPathResultIds?: ReadonlySet<string>;
   /**
@@ -675,6 +677,8 @@ export function computeActiveMembership(
   const childrenByParent = new Map<string, Set<string>>();
   const lineByUuid = new Map<string, number>();
   const typeByUuid = new Map<string, string | undefined>();
+  const rowByUuid = new Map<string, Record<string, unknown>>();
+  const duplicateUuids = new Set<string>();
   let leafUuid: string | undefined;
   let pointerLineNumber: number | undefined;
 
@@ -694,6 +698,8 @@ export function computeActiveMembership(
       continue;
     }
     if (typeof record.uuid !== "string") continue;
+    if (rowByUuid.has(record.uuid)) duplicateUuids.add(record.uuid);
+    rowByUuid.set(record.uuid, value as Record<string, unknown>);
     lineByUuid.set(record.uuid, lineNumber);
     typeByUuid.set(
       record.uuid,
@@ -734,52 +740,273 @@ export function computeActiveMembership(
 
   // `last-prompt` is rewritten in place, after timeline rows are appended.
   // A UserPromptSubmit ingest can therefore see rows appended after the
-  // pointer while it still names the preceding response. Following a unique
-  // post-pointer child chain is evidence, not a guess: every possible branch
-  // includes it. Earlier descendants remain excluded because the later
+  // pointer while it still names the preceding response. Follow only a
+  // post-pointer continuation proved by edges and response/call identity.
+  // Earlier descendants remain excluded because the later
   // pointer already rejected them. Use the same effective parent edge as the
   // reverse walk so a compact boundary (`parentUuid: null`,
   // `logicalParentUuid: leaf`) remains connected.
   //
-  // More than one semantic child, or a cycle, is different. The stale pointer
-  // has not selected a live branch, so the caller must withhold rather than
-  // letting append order decide which descendant survives. Claude hook output
+  // Parallel response rows and uniquely paired sibling results can continue
+  // together. Other semantic forks, or cycles, remain ambiguous; append order
+  // cannot decide which descendant survives. Claude hook output
   // can fork an attachment-only side branch from a tool_use while the real
   // tool_result continues beside it. That subtree is metadata, not a branch
   // choice. An inline attachment that leads to a message/system descendant is
   // still followed as part of the one semantic continuation.
-  let ambiguousPointerContinuation = false;
-  let continuationCursor: string = leafUuid;
-  while (true) {
-    const children: string[] = [
-      ...(childrenByParent.get(continuationCursor) ?? []),
-    ].filter(
+  let ambiguousPointerContinuation =
+    cursor !== undefined ||
+    [...duplicateUuids].some(
+      (uuid) => (lineByUuid.get(uuid) ?? 0) > pointerLineNumber!,
+    );
+  let frontier = [leafUuid];
+  const groupOf = (uuid: string): string | undefined =>
+    typeByUuid.get(uuid) === "assistant" ? messageIdByUuid.get(uuid) : undefined;
+  let currentGroup: string | undefined;
+  let currentRequest: unknown;
+  let groupAnchor: string | undefined;
+  // An older call group cannot lend authority across a newer human prompt.
+  for (const uuid of ancestry) {
+    currentGroup = groupOf(uuid);
+    if (currentGroup !== undefined) {
+      groupAnchor = uuid;
+      currentRequest = rowByUuid.get(uuid)?.requestId;
+      break;
+    }
+    const record = rowByUuid.get(uuid);
+    const decoded = decodeClaudeEnvelope(record);
+    if (
+      decoded.ok &&
+      classifyUserRecord(decoded.envelope, decodeClaudeMessage(record)).kind === "human"
+    ) break;
+  }
+  // A pointer can land halfway through a response's settlement: on its last
+  // chained call, or on one result while sibling calls/results are off-path.
+  // Close only that anchored response, using edges plus response/request identity.
+  // Merely sharing a message id somewhere else in the file grants no authority.
+  let seededSettlement = false;
+  let unsettledResponseGroup = false;
+  if (groupAnchor !== undefined && currentGroup !== undefined) {
+    const group = new Set<string>();
+    const component = new Set<string>();
+    const sameResponse = (uuid: string): boolean => groupOf(uuid) === currentGroup &&
+      rowByUuid.get(uuid)?.requestId === currentRequest;
+    // Candidate IDs permit discovery only. Every result must later pair to a
+    // unique call inside the connected component before any ancestry is added.
+    const candidateCallIds = new Set([...rowByUuid].filter(([uuid]) => sameResponse(uuid))
+      .flatMap(([, record]) => decodeClaudeMessage(record)?.content.flatMap(
+        (block) => block.type === "tool_use" ? [block.id] : [],
+      ) ?? []));
+    const candidateResult = (uuid: string): boolean => {
+      if (typeByUuid.get(uuid) !== "user") return false;
+      const content = decodeClaudeMessage(rowByUuid.get(uuid))?.content;
+      const rawContent = (rowByUuid.get(uuid)?.message as { content?: unknown } | undefined)?.content;
+      return Array.isArray(rawContent) && content !== undefined &&
+        content.length > 0 && content.length === rawContent.length && content.every(
+        (block) => block.type === "tool_result" && candidateCallIds.has(block.toolUseId),
+      );
+    };
+    const pending = [groupAnchor];
+    while (pending.length > 0) {
+      const uuid = pending.pop()!;
+      if (component.has(uuid)) continue;
+      const responseRow = sameResponse(uuid);
+      if (!responseRow && typeByUuid.get(uuid) !== "attachment" && !candidateResult(uuid)) continue;
+      // A metadata-only side branch is not a bridge. Admitting its payload
+      // could falsely settle background work despite the pointer rejecting it.
+      if (!ancestry.has(uuid) && isAttachmentOnlySubtree(uuid, childrenByParent, typeByUuid)) continue;
+      component.add(uuid);
+      if (responseRow) group.add(uuid);
+      const parent = parents.get(uuid);
+      if (parent !== undefined) {
+        pending.push(parent);
+        // Sibling rows may share the response's entry parent. This does not
+        // walk through that parent into an older prompt or another response.
+        if (responseRow) pending.push(...(childrenByParent.get(parent) ?? []));
+      }
+      pending.push(...(childrenByParent.get(uuid) ?? []));
+    }
+    const callRoots = [...group].filter((uuid) =>
+      decodeClaudeMessage(rowByUuid.get(uuid))?.content.some((b) => b.type === "tool_use"));
+    if (callRoots.length > 0) {
+      const accepted = new Set([...ancestry, ...group]);
+      const callIds = new Set<string>();
+      for (const uuid of component) {
+        const seen = new Set<string>();
+        for (let cursor: string | undefined = uuid; cursor !== undefined && component.has(cursor); cursor = parents.get(cursor)) {
+          if (seen.has(cursor) || duplicateUuids.has(cursor)) ambiguousPointerContinuation = true;
+          if (seen.has(cursor)) break;
+          seen.add(cursor);
+        }
+        if (!group.has(uuid)) continue;
+        for (const block of decodeClaudeMessage(rowByUuid.get(uuid))?.content ?? []) {
+          if (block.type !== "tool_use") continue;
+          if (callIds.has(block.id)) ambiguousPointerContinuation = true;
+          callIds.add(block.id);
+        }
+      }
+      // The normalizer treats an active API response as a whole. Refuse a
+      // disconnected or differently requested row instead of letting that
+      // response-level rule silently admit it through the message id alone.
+      if ([...rowByUuid.keys()].some((uuid) => groupOf(uuid) === currentGroup && !group.has(uuid))) {
+        ambiguousPointerContinuation = true;
+      }
+      const results = [...rowByUuid].filter(([, record]) => record.type === "user" &&
+        decodeClaudeMessage(record)?.content.some((b) => b.type === "tool_result" && callIds.has(b.toolUseId)))
+        .map(([uuid]) => uuid);
+      const resultSet = new Set(results);
+      if (results.some((uuid) => !candidateResult(uuid))) ambiguousPointerContinuation = true;
+      // A discovered bridge cannot borrow a call from a disconnected candidate.
+      if ([...component].some((uuid) => typeByUuid.get(uuid) === "user" && !resultSet.has(uuid))) {
+        ambiguousPointerContinuation = true;
+      }
+      const bridges = new Set<string>();
+      // Discovery may visit metadata on rejected side branches. Only paths
+      // leading into a response member or its paired result are real bridges;
+      // a branch ending at another semantic row cannot lend its payload.
+      for (const member of group) {
+        const seen = new Set<string>();
+        for (let cursor = parents.get(member); cursor !== undefined &&
+          component.has(cursor) && !group.has(cursor) && !seen.has(cursor); cursor = parents.get(cursor)) {
+          seen.add(cursor);
+          bridges.add(cursor);
+        }
+      }
+      for (const result of results) {
+        const seen = new Set<string>();
+        let cursor: string | undefined = result;
+        while (cursor !== undefined && !group.has(cursor)) {
+          if (seen.has(cursor) || duplicateUuids.has(cursor) ||
+            (!resultSet.has(cursor) && typeByUuid.get(cursor) !== "attachment")) {
+            ambiguousPointerContinuation = true;
+            break;
+          }
+          seen.add(cursor);
+          bridges.add(cursor);
+          cursor = parents.get(cursor);
+        }
+        if (cursor === undefined) ambiguousPointerContinuation = true;
+      }
+      const paired = results.length === 0 ||
+        isParallelContinuation(results, currentGroup, accepted, rowByUuid, currentRequest);
+      if (!paired) ambiguousPointerContinuation = true;
+      if (!ambiguousPointerContinuation && !isSettledResponseGroup(currentGroup, accepted, rowByUuid)) {
+        unsettledResponseGroup = true;
+      }
+      if (!ambiguousPointerContinuation && !unsettledResponseGroup) {
+        for (const uuid of [...group, ...bridges]) ancestry.add(uuid);
+        frontier = [...new Set([leafUuid, ...group, ...bridges])];
+        seededSettlement = true;
+      }
+    }
+  }
+  while (!ambiguousPointerContinuation && !unsettledResponseGroup) {
+    const children = [...new Set(
+      frontier.flatMap((uuid) => [...(childrenByParent.get(uuid) ?? [])]),
+    )].filter(
       (child) =>
         pointerLineNumber !== undefined &&
         (lineByUuid.get(child) ?? Number.NEGATIVE_INFINITY) > pointerLineNumber &&
+        !(seededSettlement && ancestry.has(child)) &&
         !isAttachmentOnlySubtree(child, childrenByParent, typeByUuid),
     );
+    seededSettlement = false;
     if (children.length === 0) break;
-    if (children.length !== 1) {
+    // Inline attachments do not choose a semantic branch. Also finish walking
+    // the current response's chained rows before comparing its result branches:
+    // a call row can have the next call and its own result as children. Advancing
+    // one graph level at a time mistakes that mixed frontier for a real fork.
+    const semantic: string[] = [];
+    const pending = [...children];
+    let extendedResponse = false;
+    while (!ambiguousPointerContinuation) {
+      // First flatten attachments, keeping semantic siblings together. Validate
+      // that frontier before consuming another row of the current response; an
+      // unrelated assistant sibling must not disappear behind group closure.
+      while (pending.length > 0 && !ambiguousPointerContinuation) {
+        const child = pending.shift()!;
+        if (ancestry.has(child)) {
+          ambiguousPointerContinuation = true;
+          break;
+        }
+        if (typeByUuid.get(child) !== "attachment") {
+          semantic.push(child);
+          continue;
+        }
+        ancestry.add(child);
+        pending.push(...[...(childrenByParent.get(child) ?? [])].filter(
+          (uuid) => (lineByUuid.get(uuid) ?? 0) > pointerLineNumber! &&
+            !isAttachmentOnlySubtree(uuid, childrenByParent, typeByUuid),
+        ));
+      }
+      if (ambiguousPointerContinuation) break;
+      const responseRows = semantic.filter((uuid) =>
+        currentGroup !== undefined && groupOf(uuid) === currentGroup);
+      if (responseRows.length === 0) break;
+      if (
+        responseRows.some((uuid) => rowByUuid.get(uuid)!.requestId !== currentRequest) ||
+        (semantic.length > 1 && !isParallelContinuation(
+          semantic, currentGroup, ancestry, rowByUuid, currentRequest,
+        ))
+      ) {
+        ambiguousPointerContinuation = true;
+        break;
+      }
+      extendedResponse = true;
+      const responseSet = new Set(responseRows);
+      for (const uuid of responseRows) {
+        ancestry.add(uuid);
+        pending.push(...[...(childrenByParent.get(uuid) ?? [])].filter(
+          (child) => (lineByUuid.get(child) ?? 0) > pointerLineNumber! &&
+            !isAttachmentOnlySubtree(child, childrenByParent, typeByUuid),
+        ));
+      }
+      semantic.splice(0, semantic.length, ...semantic.filter((uuid) => !responseSet.has(uuid)));
+    }
+    if (
+      extendedResponse && currentGroup !== undefined &&
+      !isSettledResponseGroup(currentGroup, ancestry, rowByUuid)
+    ) {
       ambiguousPointerContinuation = true;
       break;
     }
-    const child = children[0]!;
-    if (ancestry.has(child)) {
+    if (
+      (semantic.length > 1 ||
+        (extendedResponse && semantic.some((uuid) =>
+          decodeClaudeMessage(rowByUuid.get(uuid))?.content.some((block) => block.type === "tool_result")))) &&
+      !isParallelContinuation(semantic, currentGroup, ancestry, rowByUuid, currentRequest)
+    ) {
       ambiguousPointerContinuation = true;
       break;
     }
-    ancestry.add(child);
-    continuationCursor = child;
+    for (const child of semantic) ancestry.add(child);
+    if (semantic.length === 0) break;
+    const first = semantic[0]!;
+    if (groupOf(first) !== undefined) {
+      currentGroup = groupOf(first);
+      currentRequest = rowByUuid.get(first)?.requestId;
+    }
+    else {
+      const record = rowByUuid.get(first);
+      const decoded = decodeClaudeEnvelope(record);
+      if (
+        decoded.ok &&
+        classifyUserRecord(decoded.envelope, decodeClaudeMessage(record)).kind === "human"
+      ) {
+        currentGroup = undefined;
+        currentRequest = undefined;
+      }
+    }
+    frontier = semantic;
   }
-  // Every post-pointer semantic timeline row must belong to that one chain. A
+  // Every post-pointer semantic timeline row must belong to that continuation. A
   // child from an earlier ancestor is a rewind; a disconnected uuid is an
   // unknown semantic tail. Neither can be reconciled from this stale pointer.
   // UUID-less sidecars and off-chain attachment rows are transparent because
   // they cannot choose a branch; an attachment that leads to semantic rows was
   // retained by the walk above, and any disconnected semantic descendant is
   // still caught here.
-  if (!ambiguousPointerContinuation) {
+  if (!ambiguousPointerContinuation && !unsettledResponseGroup) {
     ambiguousPointerContinuation = [...lineByUuid].some(
       ([uuid, lineNumber]) =>
         pointerLineNumber !== undefined &&
@@ -831,9 +1058,103 @@ export function computeActiveMembership(
     hasFork,
     hasPointer: true,
     ambiguousPointerContinuation,
+    unsettledResponseGroup,
     onPathResultIds,
     ambiguousResultIds,
   };
+}
+
+/** Do not admit a chained response while any of its accepted calls is unsettled. */
+function isSettledResponseGroup(
+  group: string,
+  ancestry: ReadonlySet<string>,
+  rows: ReadonlyMap<string, Record<string, unknown>>,
+): boolean {
+  const calls = new Set<string>();
+  for (const uuid of ancestry) {
+    const record = rows.get(uuid);
+    const message = decodeClaudeMessage(record);
+    if (record?.type !== "assistant" || message?.id !== group) continue;
+    for (const block of message.content) {
+      if (block.type !== "tool_use") continue;
+      if (calls.has(block.id)) return false;
+      calls.add(block.id);
+    }
+  }
+  const results = new Set<string>();
+  const resultRows: string[] = [];
+  for (const [uuid, record] of rows) {
+    if (record.type !== "user") continue;
+    const matching = decodeClaudeMessage(record)?.content.filter(
+      (block) => block.type === "tool_result" && calls.has(block.toolUseId),
+    ) ?? [];
+    if (matching.length === 0) continue;
+    resultRows.push(uuid);
+    for (const block of matching) if (block.type === "tool_result") results.add(block.toolUseId);
+  }
+  // A terminal text cannot hide an outstanding call. Pair validation still
+  // checks the entire pinned graph for duplicate or foreign call/result rows;
+  // the continuation walk independently refuses any result on a rejected path.
+  return results.size === calls.size && (resultRows.length === 0 ||
+    isParallelContinuation(resultRows, group, ancestry, rows));
+}
+
+/** A fork is parallel only when response identity or unique call/result pairs prove it. */
+function isParallelContinuation(
+  children: readonly string[],
+  currentGroup: string | undefined,
+  ancestry: ReadonlySet<string>,
+  rows: ReadonlyMap<string, Record<string, unknown>>,
+  currentRequest?: unknown,
+): boolean {
+  const records = children.map((uuid) => rows.get(uuid)!);
+  const messages = records.map(decodeClaudeMessage);
+  if (records.every((record) => record.type === "assistant")) {
+    const first = messages[0];
+    return first?.id !== undefined && messages.every(
+      (message, index) => message?.id === first.id &&
+        records[index]!.requestId === records[0]!.requestId,
+    );
+  }
+  if (currentGroup === undefined || records.some((record) =>
+    record.type !== "user" && record.type !== "assistant")) return false;
+  const acceptedCalls = new Set(ancestry);
+  for (const [index, record] of records.entries()) {
+    if (record.type !== "assistant") continue;
+    if (messages[index]?.id !== currentGroup || record.requestId !== currentRequest) return false;
+    acceptedCalls.add(children[index]!);
+  }
+  const seenResults = new Set<string>();
+  for (const [index, message] of messages.entries()) {
+    if (records[index]!.type === "assistant") continue;
+    if (message === undefined || message.content.length === 0) return false;
+    for (const block of message.content) {
+      if (block.type !== "tool_result" || seenResults.has(block.toolUseId)) return false;
+      seenResults.add(block.toolUseId);
+      const calls: string[] = [];
+      let results = 0;
+      for (const [uuid, record] of rows) {
+        const candidate = decodeClaudeMessage(record);
+        for (const content of candidate?.content ?? []) {
+          if (
+            record.type === "assistant" && content.type === "tool_use" &&
+            content.id === block.toolUseId
+          ) {
+            if (candidate?.id !== currentGroup || !acceptedCalls.has(uuid)) return false;
+            calls.push(uuid);
+          }
+          if (
+            record.type === "user" && content.type === "tool_result" &&
+            content.toolUseId === block.toolUseId
+          ) results += 1;
+        }
+      }
+      if (calls.length !== 1 || results !== 1) return false;
+      const source = records[index]!.sourceToolAssistantUUID;
+      if (source !== undefined && source !== calls[0]) return false;
+    }
+  }
+  return true;
 }
 
 /**
@@ -867,10 +1188,11 @@ export function describeUnstableSnapshot(input: {
   if (input.live && input.membership.hasFork && !input.membership.hasPointer) {
     return "fork_without_pointer";
   }
-  // A pointer that trails one unique chain is still decisive. Once that
-  // continuation forks, however, the pointer names only their common ancestor.
+  // A pointer that trails one proved semantic continuation is still decisive.
+  // With competing groups, however, it names only their common ancestor.
   // Even SessionEnd cannot prove which child Claude kept, so no snapshot may
   // publish under either branch.
+  if (input.membership.unsettledResponseGroup) return "unsettled_tool_results";
   if (input.membership.ambiguousPointerContinuation) {
     return "ambiguous_pointer_continuation";
   }
@@ -889,7 +1211,7 @@ export function describeUnstableSnapshot(input: {
  * in place. `last-prompt.leafUuid` names the leaf the user actually kept, and
  * walking parents from it — following `logicalParentUuid` across a compaction
  * boundary, which severs `parentUuid` — yields the path that survived. When
- * timeline rows have been appended after a stale pointer, the same unique
+ * timeline rows have been appended after a stale pointer, the same semantic
  * forward-continuation rule as the publishing runner is applied.
  *
  * Returns undefined when the trace carries no `last-prompt`, in which case
