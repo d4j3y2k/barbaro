@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { utimesSync, writeFileSync } from "node:fs";
 import {
   appendFile,
   mkdtemp,
@@ -18,6 +19,7 @@ import type {
   BarbaroEvidenceV1,
   BarbaroTurnV1,
 } from "../../src/contracts/v1.js";
+import { ClaudeTurnNormalizer } from "../../src/providers/claude/normalizer.js";
 import { handleClaudeIngestHook } from "../../src/hooks/claude.js";
 import type { BarbaroIngestAttemptJournalV2 } from "../../src/hooks/ingest-attempt.js";
 import { admitHookSession } from "../../src/hooks/participation.js";
@@ -2760,28 +2762,11 @@ test("a turn that never closes returns promptly instead of waiting", async () =>
   );
 });
 
-test("a pointer appended during child normalization is caught before append", async () => {
+test("a pointer appended during child normalization is caught before append", async (t) => {
   // The window that matters is not around the main read — it spans child
-  // normalization, which is unbounded work. A large subagent trace leaves
-  // hundreds of milliseconds in which a replacement pointer can land, and a
-  // check taken before that pass would already be stale by the time anything
-  // is written.
+  // normalization. Rewrite when the child consumes its first row so a busy
+  // CI runner cannot move the mutation before the parent snapshot is read.
   const { projectRoot, tracePath } = await stageScenario("active-fork", ACTIVE_FORK);
-  const childPath = join(
-    dirname(tracePath),
-    ACTIVE_FORK,
-    "subagents",
-    "agent-aaaa111111111111a.jsonl",
-  );
-
-  // Inflate the child with harmless sidecar rows so its pass is slow enough
-  // to hold the window open.
-  const filler =
-    `${JSON.stringify({ type: "mode", mode: "default", sessionId: ACTIVE_FORK })}\n`.repeat(
-      100_000,
-    );
-  await writeFile(childPath, `${await readFile(childPath, "utf8")}${filler}`, "utf8");
-
   const settled = await rowsOf(tracePath);
   const replacement = settled.map((line) =>
     line.includes('"last-prompt"')
@@ -2792,19 +2777,29 @@ test("a pointer appended during child normalization is caught before append", as
       : line,
   );
 
-  const started = Date.now();
-  const inFlight = runClaudeTrace({ tracePath, projectRoot });
-  // Long after the small parent file has been read, well inside the child pass.
-  const timer = setTimeout(() => {
-    void writeFile(tracePath, `${replacement.join("\n")}\n`, "utf8");
-  }, 20);
-  const first = await inFlight;
-  clearTimeout(timer);
-
-  assert.ok(
-    Date.now() - started > 20,
-    "the run must outlast the append for this to exercise the child window",
+  const before = await stat(tracePath);
+  const accept = ClaudeTurnNormalizer.prototype.accept;
+  let rewritten = false;
+  const interception = t.mock.method(
+    ClaudeTurnNormalizer.prototype,
+    "accept",
+    function (this: ClaudeTurnNormalizer, ...args: Parameters<typeof accept>) {
+      if (!rewritten && args[1].traceId === `claude:${ACTIVE_FORK}:agent:aaaa111111111111a`) {
+        writeFileSync(tracePath, `${replacement.join("\n")}\n`, "utf8");
+        // Ensure even a filesystem with coarse timestamp precision exposes
+        // the same-size rewrite; inode and size still match the opening stamp.
+        utimesSync(tracePath, before.atime, new Date(before.mtimeMs + 1_000));
+        rewritten = true;
+      }
+      return accept.apply(this, args);
+    },
   );
+  const first = await runClaudeTrace({ tracePath, projectRoot });
+  interception.mock.restore();
+  assert.equal(rewritten, true, "the pointer must change inside child normalization");
+  const after = await stat(tracePath);
+  assert.equal(after.ino, before.ino);
+  assert.equal(after.size, before.size);
   // The replacement pointer is the SAME length as the one it replaces, so
   // size and identity are both unchanged — only the modification time moves.
   assert.equal(
