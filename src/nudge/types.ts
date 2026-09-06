@@ -1,11 +1,14 @@
 import type { JsonlCheckpoint } from "../core/checkpoint.js";
+import type { FeedReadCoverage } from "../core/feed-availability.js";
+import type { NudgeReadState } from "./read-state.js";
 import type {
   ReaderProjection,
   ReaderTurnSummary,
 } from "../reader/types.js";
 
 export const NUDGE_CURSOR_SCHEMA_V1 = "barbaro.nudge-cursor.v1" as const;
-export const NUDGE_CURSOR_SCHEMA = "barbaro.nudge-cursor.v2" as const;
+export const NUDGE_CURSOR_SCHEMA_V2 = "barbaro.nudge-cursor.v2" as const;
+export const NUDGE_CURSOR_SCHEMA = "barbaro.nudge-cursor.v3" as const;
 
 /** Model-visible delivery channels sharing one revision-wide announcement ledger. */
 export const NUDGE_MARKER_KINDS = [
@@ -18,7 +21,7 @@ export type NudgeMarkerKind = (typeof NUDGE_MARKER_KINDS)[number];
 export interface NudgeFeedCursorV1 {
   readonly provider: string;
   readonly session_id: string;
-  /** First physical byte not acknowledged by `barbaro context`. */
+  /** First byte beyond the acknowledged contiguous prefix of this feed. */
   readonly checkpoint: JsonlCheckpoint;
 }
 
@@ -86,7 +89,7 @@ export interface HookStopClaimRollback {
  * truth for informational delivery; `markers.stop` is only the Stop latch.
  */
 export interface NudgeCursorV2 {
-  readonly schema: typeof NUDGE_CURSOR_SCHEMA;
+  readonly schema: typeof NUDGE_CURSOR_SCHEMA_V2;
   readonly provider: string;
   readonly session_id: string;
   readonly workstream_id: string;
@@ -103,7 +106,12 @@ export interface NudgeCursorV2 {
   readonly updated_at: string;
 }
 
-export type NudgeCursor = NudgeCursorV1 | NudgeCursorV2;
+export interface NudgeCursorV3 extends Omit<NudgeCursorV2, "schema"> {
+  readonly schema: typeof NUDGE_CURSOR_SCHEMA;
+  readonly reads: NudgeReadState;
+}
+
+export type NudgeCursor = NudgeCursorV1 | NudgeCursorV2 | NudgeCursorV3;
 
 /** Provider turn evidence supplied by the admitted main-agent hook. */
 export type HookNudgeTurn =
@@ -113,8 +121,14 @@ export type HookNudgeTurn =
     }
   | {
       readonly kind: "claude";
-      /** UserPromptSubmit begins a turn; every later boundary uses current. */
       readonly phase: "begin" | "current";
+    }
+  | {
+      readonly kind: "claude";
+      /** Actor-locked evidence; valid only in this exact membership epoch. */
+      readonly phase: "queued";
+      readonly workstream_id: string;
+      readonly membership_from: string;
     };
 
 export interface UnreadPeerTurn {
@@ -131,6 +145,10 @@ export interface UnreadPeerTurnsReady {
   readonly membership_from: string;
   readonly cursor_revision: number;
   readonly unread_count: number;
+  /** Present when the count is only a lower bound because feeds are unavailable. */
+  readonly coverage?: FeedReadCoverage;
+  /** Remaining gaps after a delivered context/page window; absent when false. */
+  readonly outside_delivered_window?: true;
   readonly latest?: UnreadPeerTurn;
 }
 
@@ -164,14 +182,4 @@ export interface HookNudgeAlreadyClaimed {
 export type HookNudgeClaim =
   | HookNudgeClaimReady
   | HookNudgeAlreadyClaimed
-  | UnreadPeerTurnsUnavailable;
-
-export interface HookCursorAdvanceReady extends UnreadPeerTurnsReady {
-  readonly advanced: true;
-  /** Revision after the acknowledged endpoints were committed. */
-  readonly next_cursor_revision: number;
-}
-
-export type HookCursorAdvance =
-  | HookCursorAdvanceReady
   | UnreadPeerTurnsUnavailable;

@@ -4,11 +4,13 @@ import type {
   BarbaroRedaction,
   BarbaroTurnOutcome,
 } from "../contracts/v1.js";
+import type { FeedReadCoverage } from "../core/feed-availability.js";
+import type { ProjectWriteClaim, ProjectClaimOverlap } from "../active/conflicts.js";
 
 export const READER_CONTEXT_SCHEMA = "barbaro.reader.context.v1" as const;
 export const READER_EVIDENCE_SCHEMA = "barbaro.reader.evidence.v1" as const;
 export const READER_CONTEXT_TURN_RETRIEVAL_HINT =
-  "Run `barbaro turn list`, then `barbaro turn show <turn_id>`." as const;
+  "Run `barbaro turn list` in the same project and workstream, then `barbaro read turn show <turn_id> --field response`; follow every next_cursor." as const;
 
 /** Read quality for one reader-owned source or derived collection. */
 export type ReaderReadState = "ok" | "degraded" | "refused";
@@ -143,6 +145,8 @@ export interface ReaderActiveSummary {
 }
 
 export interface ReaderDiagnostics {
+  /** Present when feed availability prevents an exhaustive scan. */
+  readonly feed_coverage?: FeedReadCoverage;
   readonly feed_files: number;
   readonly malformed_feed_records: number;
   readonly invalid_feed_records: number;
@@ -194,12 +198,54 @@ export interface ReaderStoreHealth {
   readonly diagnostics: ReaderStoreDiagnostics;
 }
 
+export interface ReaderContextHistoryCoverage {
+  readonly state: "complete" | "limited" | "unknown";
+  readonly reasons: readonly (
+    | "history_window"
+    | "scan_limit"
+    | "partial_feed"
+    | "invalid_records"
+    | "unavailable_feed"
+    | "history_not_supplied"
+  )[];
+}
+
+export interface ReaderContextCoverage {
+  /** A rendered window never establishes exhaustive canonical history. */
+  readonly history: ReaderContextHistoryCoverage;
+  readonly selection?: {
+    readonly policy: "newest_within_scope_per_session";
+    readonly turns_per_session: number;
+  };
+  /** Feeds with at least one eligible record older than the selected window. */
+  readonly window_limited_feed_files: number;
+  readonly projection_omitted_turns: number;
+  /** Shortened response, or request when the canonical turn has no response. */
+  readonly attention_truncated_turns: number;
+}
+
+export interface ReaderProjectClaims {
+  readonly scope: "project";
+  readonly advisory: true;
+  readonly claims: ReaderBoundedItems<ProjectWriteClaim>;
+  /** Compared against live claims in the requested workstream, when scoped. */
+  readonly overlaps: ReaderBoundedItems<ProjectClaimOverlap>;
+  readonly coverage: {
+    readonly state: "complete" | "limited";
+    readonly invalid_active_records: number;
+    readonly unknown_scope_actors: number;
+  };
+}
+
 export interface ReaderContextV1 {
   readonly schema: typeof READER_CONTEXT_SCHEMA;
   /** Present when the projection was scoped to one workstream. */
   readonly workstream_id?: string;
   readonly active: ReaderBoundedItems<ReaderActiveSummary>;
+  /** Separate project-wide paths, never foreign intent, commands or conversation. */
+  readonly project_claims?: ReaderProjectClaims;
   readonly turns: ReaderBoundedItems<ReaderTurnSummary>;
+  readonly coverage: ReaderContextCoverage;
   /** Additive route to lossless retrieval when this bounded view omits turns. */
   readonly turn_retrieval_hint?: typeof READER_CONTEXT_TURN_RETRIEVAL_HINT;
   readonly diagnostics: ReaderDiagnostics;
@@ -252,6 +298,14 @@ export interface ReaderProjectionOptions {
 }
 
 export interface ReaderContextOptions extends ReaderProjectionOptions {
+  /** Delivery views allocate peer turns before optional active-lease details. */
+  readonly preferTurns?: boolean;
+  /** Scoped delivery views allocate current-epoch peer attention before own/history turns. */
+  readonly attentionRecipient?: {
+    readonly provider: string;
+    readonly sessionId: string;
+    readonly membershipFrom: string;
+  };
   readonly now?: Date | number | string;
   /**
    * Scope to one workstream: only leases and turns stamped with this id are

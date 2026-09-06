@@ -1,4 +1,5 @@
 import { constants, type PathLike } from "node:fs";
+import { InputLimitError } from "./input-limit.js";
 import { open } from "node:fs/promises";
 import { Readable } from "node:stream";
 
@@ -142,7 +143,7 @@ export async function* iterateJsonlForward<T = unknown>(
       options.maxFileBytes !== undefined &&
       initialSnapshot.size > options.maxFileBytes
     ) {
-      throw new RangeError(`JSONL path exceeds ${options.maxFileBytes} bytes`);
+      throw new InputLimitError(`JSONL path exceeds ${options.maxFileBytes} bytes`, "file", options.maxFileBytes, initialSnapshot.size);
     }
     if (startOffset > initialSnapshot.size) {
       throw new RangeError("startOffset is beyond the current end of the file");
@@ -297,7 +298,7 @@ export async function* iterateJsonlForward<T = unknown>(
       options.maxFileBytes !== undefined &&
       finalSnapshot.size > options.maxFileBytes
     ) {
-      throw new RangeError(`JSONL path exceeds ${options.maxFileBytes} bytes`);
+      throw new InputLimitError(`JSONL path exceeds ${options.maxFileBytes} bytes`, "file", options.maxFileBytes, finalSnapshot.size);
     }
     if (finalSnapshot.size < checkpointOffset) {
       throw new RangeError("JSONL file was truncated while it was being read");
@@ -348,7 +349,7 @@ function assertLineWithinLimit(
   maximumBytes: number | undefined,
 ): void {
   if (maximumBytes !== undefined && byteLength > maximumBytes) {
-    throw new RangeError(`JSONL line exceeds ${maximumBytes} bytes`);
+    throw new InputLimitError(`JSONL line exceeds ${maximumBytes} bytes`, "record", maximumBytes, byteLength);
   }
 }
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   appendFile,
+  chmod,
   mkdir,
   mkdtemp,
   rm,
@@ -112,6 +113,33 @@ async function withProject(
     await rm(project, { recursive: true, force: true });
   }
 }
+
+test("exact pages preserve availability diagnostics across pinned continuations", { skip: process.getuid?.() === 0 }, async () => {
+  await withProject(async (project) => {
+    const healthy = join(project, ".barbaro", "feed", "codex", `${SESSION_ID}.jsonl`);
+    const unavailable = join(project, ".barbaro", "feed", "claude", `ses_${"9".repeat(32)}.jsonl`);
+    await writeLine(healthy, stableJsonLine(turn()));
+    await writeLine(unavailable, "{}\n");
+    await chmod(unavailable, 0);
+    try {
+      const options = { turnId: TURN_ID, field: "response" as const, byteBudget: 1800 };
+      let page = await readTurnRecordPage(project, options);
+      assert.equal(page.value.diagnostics.unavailable_feed_files, 1);
+      assert.equal(page.value.diagnostics.skipped_oversized_feed_files, 0);
+      assert.ok(page.value.next_cursor);
+      await assert.rejects(readTurnRecordPage(project, { ...options, turnId: `turn_${"e".repeat(32)}` }),
+        (error: unknown) => error instanceof ReaderTurnSearchIncompleteError && error.unavailableFeedFiles === 1);
+      await chmod(unavailable, 0o600);
+      let text = page.value.text;
+      while (page.value.next_cursor !== undefined) {
+        page = await readTurnRecordPage(project, { ...options, cursor: page.value.next_cursor });
+        assert.equal(page.value.diagnostics.unavailable_feed_files, 1, "continuations retain their original search coverage");
+        text += page.value.text;
+      }
+      assert.equal(text, RESPONSE);
+    } finally { await chmod(unavailable, 0o600); }
+  });
+});
 
 async function writeLine(path: string, line: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });

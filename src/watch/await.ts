@@ -1,10 +1,12 @@
 import { setTimeout as delay } from "node:timers/promises";
+import type { FeedReadCoverage } from "../core/feed-availability.js";
 
 import {
   DEFAULT_AWAIT_TIMEOUT_MS,
   MAX_AWAIT_TIMEOUT_MS,
 } from "../core/barbaro-command.js";
 import type { ParticipatingProvider } from "../hooks/participation.js";
+import { readContextGuidance, readGapGuidance } from "../nudge/read-guidance.js";
 import {
   NudgeCursorStateStore,
   inspectUnreadPeerTurns,
@@ -37,9 +39,18 @@ export interface AwaitUnreadEvent {
   readonly workstream_id: string;
   readonly cursor_revision: number;
   readonly unread_count: number;
+  readonly coverage?: FeedReadCoverage;
+  readonly outside_delivered_window?: true;
 }
 
-export type AwaitResult = AwaitUnreadEvent | AwaitTimeoutEvent;
+export interface AwaitIncompleteEvent {
+  readonly schema: typeof AWAIT_TIMEOUT_SCHEMA;
+  readonly kind: "incomplete";
+  readonly timeout_ms: number;
+  readonly coverage: FeedReadCoverage;
+}
+
+export type AwaitResult = AwaitUnreadEvent | AwaitTimeoutEvent | AwaitIncompleteEvent;
 
 /** A real await failure after the cursor/feed stores could not be scanned repeatedly. */
 export class AwaitScanFailureLimitError extends Error {
@@ -122,6 +133,7 @@ export async function awaitUnreadPeerTurns(
 
   while (true) {
     let scannedReady = false;
+    let coverage: FeedReadCoverage | undefined;
     try {
       const unread = await inspect();
       if (unread.status !== "ready") {
@@ -130,6 +142,7 @@ export async function awaitUnreadPeerTurns(
       assertExpectedEpoch(unread, options);
       consecutiveErrors = 0;
       scannedReady = true;
+      coverage = unread.coverage;
       if (unread.unread_count > 0) return unreadEvent(unread, options.provider);
     } catch (error: unknown) {
       if (
@@ -149,6 +162,9 @@ export async function awaitUnreadPeerTurns(
       // A timeout is evidence that a ready cursor was scanned and had no
       // unread turns. Never turn repeated corruption/IO failures into exit 0.
       if (!scannedReady) continue;
+      if (coverage?.state === "incomplete") return {
+        schema: AWAIT_TIMEOUT_SCHEMA, kind: "incomplete", timeout_ms: timeoutMs, coverage,
+      };
       return {
         schema: AWAIT_TIMEOUT_SCHEMA,
         kind: "timeout",
@@ -204,12 +220,25 @@ function unreadEvent(
     workstream_id: unread.workstream_id,
     cursor_revision: unread.cursor_revision,
     unread_count: unread.unread_count,
+    ...(unread.coverage === undefined ? {} : { coverage: unread.coverage }),
+    ...(unread.outside_delivered_window ? { outside_delivered_window: true as const } : {}),
   };
 }
 
 /** The exact plain-text unread notice emitted by `barbaro await`. */
 export function formatAwaitUnread(event: AwaitUnreadEvent): string {
-  return `${event.unread_count} unread — run barbaro context`;
+  const outside = event.outside_delivered_window === true;
+  const guidance = outside ? readGapGuidance(event.provider, event.session_id, event.workstream_id)
+    : readContextGuidance(event.provider, event.session_id, event.workstream_id);
+  const incomplete = event.coverage?.state === "incomplete";
+  return `${incomplete ? "at least " : ""}${event.unread_count} unread${outside ? " outside the delivered window" : ""}${incomplete ? ` (coverage incomplete: ${event.coverage!.unavailable.total} feeds unavailable)` : ""} — ${guidance}`;
+}
+
+export function formatAwaitIncomplete(event: AwaitIncompleteEvent): string {
+  const details = event.coverage.unavailable.items
+    .map((feed) => `${feed.provider}/${feed.session_id}: ${feed.reason}`)
+    .join(", ");
+  return `AWAIT incomplete after ${event.timeout_ms} ms — ${event.coverage.unavailable.total} feeds unavailable; quiet is unproven${details ? ` (${details})` : ""}`;
 }
 
 /** The exact plain-text timeout record emitted by `barbaro await`. */

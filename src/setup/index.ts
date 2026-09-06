@@ -1,11 +1,12 @@
 /**
  * Read-only setup diagnostics for dogfooding Barbaro in a project.
  *
- * The library observes; it never installs, edits, or repairs. It reads only
- * project-local configuration, plus metadata for the interpreter and CLI a
- * project hook config names, and it inspects `.barbaro/` through metadata
- * alone so canonical coordination records are never copied into a report.
+ * The public doctor inspects effective user/project configuration and bounded
+ * supported health readers. The legacy setup doctor remains project-local.
+ * Neither installs, edits, repairs, or copies canonical turn bodies into reports.
  */
+
+export { DOCTOR_SCHEMA, runDoctor, formatDoctorReport, type DoctorOptions, type DoctorReport } from "./public-doctor.js";
 
 export {
   BUILD_DIAGNOSTIC_ID,

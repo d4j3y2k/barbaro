@@ -18,35 +18,38 @@ command -v barbaro
 If the registry is unavailable, download the built prerelease tarball and its
 separate SHA-256 checksum asset:
 
+The examples below use alpha.6. Download the tarball and checksum from the
+same published release.
+
 ```sh
 curl --fail --location --remote-name \
-  https://github.com/d4j3y2k/barbaro/releases/download/v0.1.0-alpha.5/barbaro-0.1.0-alpha.5.tgz
+  https://github.com/d4j3y2k/barbaro/releases/download/v0.1.0-alpha.6/barbaro-0.1.0-alpha.6.tgz
 curl --fail --location --remote-name \
-  https://github.com/d4j3y2k/barbaro/releases/download/v0.1.0-alpha.5/barbaro-0.1.0-alpha.5.tgz.sha256
+  https://github.com/d4j3y2k/barbaro/releases/download/v0.1.0-alpha.6/barbaro-0.1.0-alpha.6.tgz.sha256
 ```
 
 Run the checksum command for your platform:
 
 ```sh
-sha256sum --check barbaro-0.1.0-alpha.5.tgz.sha256
+sha256sum --check barbaro-0.1.0-alpha.6.tgz.sha256
 ```
 
 On macOS, use:
 
 ```sh
-shasum -a 256 --check barbaro-0.1.0-alpha.5.tgz.sha256
+shasum -a 256 --check barbaro-0.1.0-alpha.6.tgz.sha256
 ```
 
 Then install the verified local archive:
 
 ```sh
-npm install --global ./barbaro-0.1.0-alpha.5.tgz
+npm install --global ./barbaro-0.1.0-alpha.6.tgz
 barbaro --version
 ```
 
 The `github:d4j3y2k/barbaro#<tag>` source-install form is intentionally
 unsupported. In particular, do not use
-`npm install --global github:d4j3y2k/barbaro#v0.1.0-alpha.5`: Git source tags do
+`npm install --global github:d4j3y2k/barbaro#v0.1.0-alpha.6`: Git source tags do
 not contain the ignored `dist/` output, and rebuilding development sources at
 install time is not part of Barbaro's release contract. Use the registry or the
 built release tarball instead.
@@ -74,6 +77,22 @@ For a project-local installation, use `.agents/skills/` and `.claude/skills/`
 under the target project instead and skip the user-scoped copies above.
 Installing skills and hooks does not enroll a session: every Codex or Claude
 Code session stays dormant until the user invokes the shipped Barbaro skill.
+
+## Check the installation
+
+With alpha.6 installed, run `barbaro doctor --project-root /path/to/project`
+(add `--json` for source paths and build hashes). Doctor reads effective user
+and project settings and does not require duplicate project-local hooks.
+It honors `CODEX_HOME` and `CLAUDE_CONFIG_DIR` for user configuration; if you
+set `CLAUDE_CONFIG_DIR`, install Claude skills under its `skills/` directory.
+The commands above use the default roots.
+
+A fresh installation normally has unverified publication and delivery until
+both providers complete a real exchange. Follow the diagnostic remediation
+and [live preflight](docs/dogfood.md#the-public-doctor). Doctor makes no changes.
+For a development checkout whose CLI points into `dist/`, build/runtime
+identity and source freshness are separate; use an agreed idle/drain rollout
+before replacing a build used by running hooks.
 
 ## Install hooks
 

@@ -4,7 +4,8 @@ import {
   resolveJsonlCheckpoint,
   type JsonlCheckpoint,
 } from "../core/checkpoint.js";
-import { iterateJsonlForward } from "../core/jsonl-reader.js";
+import { iterateJsonlForward, readJsonlForward } from "../core/jsonl-reader.js";
+import { FeedCoverageTracker, missingFeedError } from "../core/feed-availability.js";
 import {
   compareUtf16CodeUnits,
   stableStringify,
@@ -23,16 +24,18 @@ import {
 import type { BarbaroTurnV1 } from "../contracts/v1.js";
 
 import { NudgeCursorStateStore } from "./store.js";
+import { emptyNudgeReadState, isReadRecordAcknowledged, readRecordHash, type NudgeReadState } from "./read-state.js";
 import {
   NUDGE_CURSOR_SCHEMA,
+  NUDGE_CURSOR_SCHEMA_V1,
+  NUDGE_CURSOR_SCHEMA_V2,
   NUDGE_MARKER_KINDS,
-  type HookCursorAdvance,
   type HookNudgeClaim,
   type HookStopClaimRollback,
   type HookNudgeTurn,
   type NudgeCursor,
   type NudgeCursorV1,
-  type NudgeCursorV2,
+  type NudgeCursorV3,
   type NudgeDeliveryTurnV2,
   type NudgeFeedCursorV1,
   type NudgeMarkerKind,
@@ -71,6 +74,8 @@ type AnyUnreadPeerTurnOptions =
 export interface HookNudgeClaimOptions extends UnreadPeerTurnOptions {
   readonly marker: NudgeMarkerKind;
   readonly turn: HookNudgeTurn;
+  /** Claude's reentrant Stop settles suppression but must never block again. */
+  readonly stopContinuation?: true;
   readonly now?: Date;
   /** Best-effort observability for a committed cursor lock cleanup failure. */
   readonly onLockReleaseFailure?: (
@@ -78,13 +83,6 @@ export interface HookNudgeClaimOptions extends UnreadPeerTurnOptions {
   ) => void | Promise<void>;
 }
 
-export interface HookCursorAdvanceOptions extends UnreadPeerTurnOptions {
-  readonly now?: Date;
-  /** Best-effort observability for a committed cursor lock cleanup failure. */
-  readonly onLockReleaseFailure?: (
-    error: unknown,
-  ) => void | Promise<void>;
-}
 
 interface MembershipEpoch {
   readonly status: "ready";
@@ -101,7 +99,7 @@ type HookCursorTransactionResult<T> =
   | { readonly kind: "done"; readonly value: T | UnreadPeerTurnsUnavailable };
 
 interface VirtualCursor {
-  readonly state: NudgeCursorV2;
+  readonly state: NudgeCursorV3;
   readonly reset: boolean;
   readonly existed: boolean;
   /** Valid v1 state being conservatively upgraded by a hook transaction. */
@@ -112,6 +110,11 @@ interface ScopedScan {
   readonly public: UnreadPeerTurnsReady;
   readonly cursor: VirtualCursor;
   readonly candidateFeedCursors: readonly NudgeFeedCursorV1[];
+  readonly coveredFeedCursors: readonly NudgeFeedCursorV1[];
+  readonly collapsedRecordKeys: ReadonlySet<string>;
+  readonly firstUnread?: BarbaroTurnV1;
+  readonly unreadRecordKeys: ReadonlySet<string>;
+  readonly unavailableFeedKeys: ReadonlySet<string>;
 }
 
 /**
@@ -160,6 +163,10 @@ export async function claimHookNudge(
   if (!NUDGE_MARKER_KINDS.includes(options.marker)) {
     throw new TypeError(`Invalid nudge marker: ${JSON.stringify(options.marker)}`);
   }
+  if (options.stopContinuation !== undefined &&
+      (options.stopContinuation !== true || options.provider !== "claude" || options.marker !== "stop")) {
+    throw new TypeError("Stop continuation requires a Claude Stop boundary");
+  }
   const timestamp = checkedTimestamp(options.now ?? new Date());
   return withHookCursor<HookNudgeClaim>(options, async (scan) => {
     const revision = scan.cursor.state.cursor_revision;
@@ -187,6 +194,17 @@ export async function claimHookNudge(
       };
     }
     const deliveryBeforeClaim = next.delivery;
+    const sameTurnDelivery = deliveryTurnsEqual(next.delivery.last_turn, currentTurn) ||
+      deliveryTurnsEqual(next.reads.informed_turn, currentTurn);
+    if (options.marker === "stop" && options.turn.kind === "claude" && sameTurnDelivery) {
+      // Claude can submit queued input before the unfinished turn's Stop.
+      // Suppression ends at this terminal boundary, including when no second
+      // prompt hook will fire for that input. Keep the revision-wide high-water
+      // and Stop latch; no content is acknowledged by retiring these markers.
+      const { informed_turn: _informed, ...reads } = next.reads;
+      const { last_turn: _delivered, ...delivery } = next.delivery;
+      next = { ...next, reads, delivery };
+    }
 
     if (
       options.marker === "stop" &&
@@ -211,22 +229,22 @@ export async function claimHookNudge(
     }
 
     const isInformational = options.marker !== "stop";
-    const sameTurnDelivery = deliveryTurnsEqual(
-      next.delivery.last_turn,
-      currentTurn,
-    );
     const claimed = scan.public.unread_count > 0 &&
       (isInformational
         ? scan.public.unread_count > next.delivery.highest_unread_count
-        : !sameTurnDelivery);
+        : !sameTurnDelivery && options.stopContinuation !== true);
 
-    if (scan.public.unread_count === 0) {
+    next = collapseReadCursor(next, scan);
+    if (scan.public.unread_count === 0 && scan.public.coverage?.state !== "incomplete") {
       // Moving over history, foreign turns, or malformed complete lines does
       // not consume peer news. Persisting those endpoints avoids rescanning
       // an old project on every hook while keeping a post-snapshot append new.
       next = {
         ...next,
-        feed_cursors: scan.candidateFeedCursors,
+        reads: {
+          ...next.reads,
+          outside_window: false,
+        },
       };
     } else if (claimed) {
       next = {
@@ -342,40 +360,8 @@ export async function rollbackHookStopClaim(
   );
 }
 
-/**
- * Advance through the pinned scan and re-arm every delivery marker. Called
- * only by a hook that recognized a leading `barbaro context` invocation.
- */
-export async function advanceHookReadCursor(
-  options: HookCursorAdvanceOptions,
-): Promise<HookCursorAdvance> {
-  validateOptions(options);
-  const timestamp = checkedTimestamp(options.now ?? new Date());
-  return withHookCursor(options, async (scan) => {
-    const nextRevision = scan.cursor.state.cursor_revision + 1;
-    if (!Number.isSafeInteger(nextRevision)) {
-      throw new RangeError("nudge cursor revision overflow");
-    }
-    const next: NudgeCursorV2 = {
-      ...scan.cursor.state,
-      cursor_revision: nextRevision,
-      feed_cursors: scan.candidateFeedCursors,
-      markers: {},
-      delivery: { highest_unread_count: 0 },
-      updated_at: timestamp,
-    };
-    return {
-      state: next,
-      result: {
-        ...scan.public,
-        advanced: true,
-        next_cursor_revision: nextRevision,
-      },
-    };
-  });
-}
-
-async function withHookCursor<T>(
+/** Hook-only transaction shared by nudge claims and attested read delivery. */
+export async function withHookCursor<T>(
   options: UnreadPeerTurnOptions & {
     readonly onLockReleaseFailure?: (
       error: unknown,
@@ -383,7 +369,7 @@ async function withHookCursor<T>(
   },
   operation: (
     scan: ScopedScan,
-  ) => Promise<{ readonly state?: NudgeCursorV2; readonly result: T }>,
+  ) => Promise<{ readonly state?: NudgeCursorV3; readonly result: T }>,
 ): Promise<T | UnreadPeerTurnsUnavailable> {
   const participationStore = new SessionParticipationStore(options.projectRoot);
   const cursorStore = new NudgeCursorStateStore(options.projectRoot);
@@ -405,6 +391,9 @@ async function withHookCursor<T>(
           return { result: { kind: "retry" } as const };
         }
         const update = await operation(scan);
+        if (!sameEpoch(before, await currentEpoch(participationStore, options))) {
+          return { result: { kind: "retry" } as const };
+        }
         return {
           ...(update.state === undefined ? {} : { state: update.state }),
           result: { kind: "done", value: update.result } as const,
@@ -425,34 +414,61 @@ async function scanUnread(
   options: AnyUnreadPeerTurnOptions,
   epoch: MembershipEpoch,
   current: NudgeCursor | undefined,
+  targets?: ReadonlySet<string>,
 ): Promise<ScopedScan> {
   const cursor = virtualCursor(epoch, current);
   const saved = new Map(
     cursor.state.feed_cursors.map((feed) => [feedKey(feed), feed] as const),
   );
-  // Only live canonical feeds belong in the next acknowledged cursor. A feed
-  // that vanished can replay conservatively if it later returns; retaining
-  // dead entries forever would let session churn grow state without bound.
-  const candidate = new Map<string, NudgeFeedCursorV1>();
+  // Unavailable feeds retain their exact acknowledged position. Disappearance
+  // is not proof of delivery or absence; a later recovery must retain its gaps.
+  const candidate = new Map(saved);
+  const covered = new Map(saved);
+  const availability = new FeedCoverageTracker();
+  const unavailableFeedKeys = new Set<string>();
+  const files = await listFeedFiles(options.projectRoot);
+  const present = new Set(files.map(feedKey));
+  for (const [key, prior] of saved) {
+    if (!present.has(key)) {
+      unavailableFeedKeys.add(key);
+      availability.unavailable({ provider: prior.provider, sessionId: prior.session_id }, missingFeedError());
+    }
+  }
+  const collapsedRecordKeys = new Set<string>();
+  let firstUnread: BarbaroTurnV1 | undefined;
   let unreadCount = 0;
   let latest: BarbaroTurnV1 | undefined;
+  const unreadRecordKeys = new Set<string>();
 
-  for (const file of await listFeedFiles(options.projectRoot)) {
+  for (const file of files) {
     if (file.sessionId === epoch.sessionId) continue;
     const prior = saved.get(feedKey(file));
     let scanned: Awaited<ReturnType<typeof scanFeed>>;
     try {
-      scanned = await scanFeed(file, prior?.checkpoint, epoch);
+      scanned = await scanFeed(file, prior?.checkpoint, epoch, cursor.state.reads, targets);
     } catch (error: unknown) {
-      if (isErrnoCode(error, "ENOENT")) continue;
+      if (availability.unavailable(file, error)) {
+        unavailableFeedKeys.add(feedKey(file));
+        continue;
+      }
       throw error;
     }
+    availability.scanned();
     candidate.set(feedKey(file), {
       provider: file.provider,
       session_id: file.sessionId,
       checkpoint: scanned.checkpoint,
     });
+    covered.delete(feedKey(file));
+    if (scanned.coveredCheckpoint.byte_offset > 0 || prior?.checkpoint.byte_offset === 0) {
+      covered.set(feedKey(file), { provider: file.provider, session_id: file.sessionId, checkpoint: scanned.coveredCheckpoint });
+    }
+    for (const key of scanned.collapsedRecordKeys) collapsedRecordKeys.add(key);
+    if (scanned.firstUnread !== undefined && (firstUnread === undefined || compareTurnRecency(scanned.firstUnread, firstUnread) < 0)) {
+      firstUnread = scanned.firstUnread;
+    }
     unreadCount += scanned.unreadCount;
+    for (const key of scanned.unreadRecordKeys) unreadRecordKeys.add(key);
     if (
       scanned.latest !== undefined &&
       (latest === undefined || compareTurnRecency(scanned.latest, latest) > 0)
@@ -462,6 +478,7 @@ async function scanUnread(
   }
 
   const candidateFeedCursors = [...candidate.values()].sort(compareFeedCursors);
+  const coverage = availability.value();
   return {
     public: {
       status: "ready",
@@ -471,23 +488,56 @@ async function scanUnread(
       membership_from: epoch.from,
       cursor_revision: cursor.state.cursor_revision,
       unread_count: unreadCount,
+      ...(coverage.state === "incomplete" ? { coverage } : {}),
+      ...(unreadCount > 0 && cursor.state.reads.outside_window ? { outside_delivered_window: true as const } : {}),
       ...(latest === undefined
         ? {}
         : { latest: projectUnreadTurn(latest, options.turnByteBudget) }),
     },
     cursor,
     candidateFeedCursors,
+    unavailableFeedKeys,
+    coveredFeedCursors: [...covered.values()].sort(compareFeedCursors),
+    collapsedRecordKeys,
+    ...(firstUnread === undefined ? {} : { firstUnread }),
+    unreadRecordKeys,
   };
+}
+
+/** Move only past a proved contiguous prefix; sparse coverage beyond gaps remains. */
+export function collapseReadCursor(state: NudgeCursorV3, scan: ScopedScan): NudgeCursorV3 {
+  const coverage = state.reads.coverage.filter((entry) => !scan.collapsedRecordKeys.has(
+    `${entry.provider}/${entry.session_id}/${entry.turn_id}/${entry.record_sha256}`,
+  ));
+  return { ...state, feed_cursors: scan.coveredFeedCursors, reads: { ...state.reads, coverage } };
+}
+
+/** Recount a proposed hook-owned coverage state while the actor lock is held. */
+export function rescanHookReadCursor(
+  options: UnreadPeerTurnOptions | StableUnreadPeerTurnOptions,
+  state: NudgeCursorV3,
+  targets?: ReadonlySet<string>,
+): Promise<ScopedScan> {
+  return scanUnread(options, {
+    status: "ready", provider: options.provider, sessionId: state.session_id,
+    workstreamId: state.workstream_id, from: state.membership_from,
+  }, state, targets);
 }
 
 async function scanFeed(
   file: BarbaroFeedFile,
   checkpoint: JsonlCheckpoint | undefined,
   epoch: MembershipEpoch,
+  reads: NudgeReadState,
+  targets?: ReadonlySet<string>,
 ): Promise<{
   readonly checkpoint: JsonlCheckpoint;
+  readonly coveredCheckpoint: JsonlCheckpoint;
+  readonly collapsedRecordKeys: ReadonlySet<string>;
+  readonly firstUnread?: BarbaroTurnV1;
   readonly unreadCount: number;
   readonly latest?: BarbaroTurnV1;
+  readonly unreadRecordKeys: ReadonlySet<string>;
 }> {
   const safeReadOptions = {
     noFollow: true,
@@ -500,9 +550,7 @@ async function scanFeed(
     safeReadOptions,
   );
   if (resolution.status === "missing" || resolution.snapshot === undefined) {
-    const error = new Error(`Barbaro feed disappeared: ${file.path}`);
-    Object.assign(error, { code: "ENOENT" });
-    throw error;
+    throw missingFeedError();
   }
   const iterator = iterateJsonlForward<unknown>(file.path, {
     startOffset: resolution.startOffset,
@@ -513,19 +561,53 @@ async function scanFeed(
   });
   let unreadCount = 0;
   let latest: BarbaroTurnV1 | undefined;
+  const unreadRecordKeys = new Set<string>();
+  const collapsedRecordKeys = new Set<string>();
+  let prefixOpen = true;
+  let prefixOffset = resolution.startOffset;
+  let prefixLine = resolution.nextLineNumber;
+  let firstUnread: BarbaroTurnV1 | undefined;
   while (true) {
     const result = await iterator.next();
     if (result.done) {
       if (!fileIdentityEquals(result.value.fileIdentity, resolution.snapshot.identity)) {
         throw new Error(`Barbaro feed identity changed during scan: ${file.path}`);
       }
+      // This zero-byte bounded read obtains the native anchor at the selected
+      // line boundary. It cannot advance through the first unread record.
+      const prefix = prefixOpen ? result.value : await readJsonlForward(file.path, () => {}, {
+        ...safeReadOptions, startOffset: prefixOffset, endOffset: prefixOffset, nextLineNumber: prefixLine,
+      });
+      if (!fileIdentityEquals(prefix.fileIdentity, result.value.fileIdentity)) {
+        throw new Error(`Barbaro feed identity changed during prefix collapse: ${file.path}`);
+      }
       return {
         checkpoint: createJsonlCheckpoint(result.value),
+        coveredCheckpoint: createJsonlCheckpoint(prefix),
+        collapsedRecordKeys,
+        ...(firstUnread === undefined ? {} : { firstUnread }),
         unreadCount,
+        unreadRecordKeys,
         ...(latest === undefined ? {} : { latest }),
       };
     }
     const line = result.value;
+    const eligible = line.kind === "record" && isTurnV1(line.value) &&
+      line.value.provider === file.provider && line.value.session_id === file.sessionId &&
+      line.value.workstream_id === epoch.workstreamId && Date.parse(line.value.ended_at) > Date.parse(epoch.from);
+    const acknowledged = eligible && isReadRecordAcknowledged(reads, line.value as BarbaroTurnV1);
+    if (eligible && !acknowledged) {
+      if (prefixOpen) firstUnread = line.value as BarbaroTurnV1;
+      prefixOpen = false;
+    }
+    if (prefixOpen) {
+      prefixOffset = line.nextOffset;
+      prefixLine = line.lineNumber + 1;
+      if (acknowledged) {
+        const turn = line.value as BarbaroTurnV1;
+        collapsedRecordKeys.add(`${turn.provider}/${turn.session_id}/${turn.turn_id}/${readRecordHash(turn)}`);
+      }
+    }
     if (line.kind !== "record" || !isTurnV1(line.value)) continue;
     const turn = line.value;
     if (turn.provider !== file.provider || turn.session_id !== file.sessionId) {
@@ -539,6 +621,11 @@ async function scanFeed(
       Date.parse(turn.ended_at) <= Date.parse(epoch.from)
     ) {
       continue;
+    }
+    if (acknowledged) continue;
+    if (targets !== undefined) {
+      const key = `${turn.provider}/${turn.session_id}/${turn.turn_id}/${readRecordHash(turn)}`;
+      if (targets.has(key)) unreadRecordKeys.add(key);
     }
     unreadCount += 1;
     if (latest === undefined || compareTurnRecency(turn, latest) > 0) {
@@ -558,11 +645,14 @@ function virtualCursor(
   if (same && current.schema === NUDGE_CURSOR_SCHEMA) {
     return { state: current, reset: false, existed: true };
   }
-  if (
-    same &&
-    current !== undefined &&
-    current.schema !== NUDGE_CURSOR_SCHEMA
-  ) {
+  if (same && current.schema === NUDGE_CURSOR_SCHEMA_V2) {
+    return {
+      state: { ...current, schema: NUDGE_CURSOR_SCHEMA, reads: emptyNudgeReadState() },
+      reset: true,
+      existed: true,
+    };
+  }
+  if (same && current.schema === NUDGE_CURSOR_SCHEMA_V1) {
     return {
       state: migratedCursor(epoch, current),
       reset: true,
@@ -585,10 +675,11 @@ function virtualCursor(
       feed_cursors: [],
       markers: {},
       delivery: { highest_unread_count: 0 },
+      reads: emptyNudgeReadState(),
       ...(epoch.provider === "claude"
         ? {
             claude_turn_generation:
-              current?.schema === NUDGE_CURSOR_SCHEMA
+              current !== undefined && current.schema !== NUDGE_CURSOR_SCHEMA_V1
                 ? current.claude_turn_generation
                 : 1,
           }
@@ -605,7 +696,7 @@ function virtualCursor(
 function migratedCursor(
   epoch: MembershipEpoch,
   current: NudgeCursorV1,
-): NudgeCursorV2 {
+): NudgeCursorV3 {
   return {
     schema: NUDGE_CURSOR_SCHEMA,
     provider: current.provider,
@@ -618,6 +709,7 @@ function migratedCursor(
       ? { stop: current.cursor_revision }
       : {},
     delivery: { highest_unread_count: 0 },
+    reads: emptyNudgeReadState(),
     ...(epoch.provider === "claude" ? { claude_turn_generation: 1 } : {}),
     updated_at: current.updated_at,
   };
@@ -655,7 +747,7 @@ function sameEpoch(
   );
 }
 
-function sameCursorPayload(left: NudgeCursorV2, right: NudgeCursorV2): boolean {
+function sameCursorPayload(left: NudgeCursorV3, right: NudgeCursorV3): boolean {
   return stableStringify({
     ...left,
     updated_at: undefined,
@@ -678,6 +770,7 @@ function sameLogicalCursor(
     membership_from: left.membership_from,
     cursor_revision: left.cursor_revision,
     feed_cursors: left.feed_cursors,
+    coverage: left.schema === NUDGE_CURSOR_SCHEMA ? left.reads.coverage : [],
   }) === stableStringify({
     provider: right.provider,
     session_id: right.session_id,
@@ -685,29 +778,42 @@ function sameLogicalCursor(
     membership_from: right.membership_from,
     cursor_revision: right.cursor_revision,
     feed_cursors: right.feed_cursors,
+    coverage: right.schema === NUDGE_CURSOR_SCHEMA ? right.reads.coverage : [],
   });
 }
 
 function establishClaimTurn(
   cursor: VirtualCursor,
   turn: HookNudgeTurn,
-): NudgeCursorV2 {
+): NudgeCursorV3 {
   const state = cursor.state;
   if (turn.kind === "codex") return state;
   const generation = state.claude_turn_generation;
   if (generation === undefined) {
     throw new TypeError("Claude nudge cursor generation is missing");
   }
-  if (turn.phase !== "begin" || !cursor.existed) return state;
+  if (turn.phase === "current" || !cursor.existed) return state;
   const nextGeneration = generation + 1;
   if (!Number.isSafeInteger(nextGeneration)) {
     throw new RangeError("Claude nudge cursor generation overflow");
   }
-  return { ...state, claude_turn_generation: nextGeneration };
+  const currentTurn = { kind: "claude", generation } as const;
+  const nextTurn = { kind: "claude", generation: nextGeneration } as const;
+  // A newly fenced membership may never inherit suppression from its predecessor.
+  const carry = turn.phase === "queued" && !cursor.reset &&
+    turn.workstream_id === state.workstream_id && turn.membership_from === state.membership_from;
+  return {
+    ...state,
+    claude_turn_generation: nextGeneration,
+    ...(carry && deliveryTurnsEqual(state.reads.informed_turn, currentTurn)
+      ? { reads: { ...state.reads, informed_turn: nextTurn } } : {}),
+    ...(carry && deliveryTurnsEqual(state.delivery.last_turn, currentTurn)
+      ? { delivery: { ...state.delivery, last_turn: nextTurn } } : {}),
+  };
 }
 
-function currentDeliveryTurn(
-  state: NudgeCursorV2,
+export function currentDeliveryTurn(
+  state: NudgeCursorV3,
   turn: HookNudgeTurn,
 ): NudgeDeliveryTurnV2 {
   if (turn.kind === "codex") {
@@ -733,7 +839,7 @@ function deliveryTurnsEqual(
     left.generation === right.generation;
 }
 
-function withUpdatedAt(state: NudgeCursorV2, updatedAt: string): NudgeCursorV2 {
+function withUpdatedAt(state: NudgeCursorV3, updatedAt: string): NudgeCursorV3 {
   return { ...state, updated_at: updatedAt };
 }
 
@@ -819,9 +925,15 @@ function validateHookTurn(
   if (
     turn.kind === "claude" &&
     turn.phase !== "begin" &&
+    turn.phase !== "queued" &&
     turn.phase !== "current"
   ) {
     throw new TypeError("Claude nudge turn phase is invalid");
+  }
+  if (turn.kind === "claude" && turn.phase === "queued" &&
+      (!/^ws_[0-9a-f]{32}$/u.test(turn.workstream_id) ||
+       !Number.isFinite(Date.parse(turn.membership_from)))) {
+    throw new TypeError("Claude queued input membership is invalid");
   }
 }
 

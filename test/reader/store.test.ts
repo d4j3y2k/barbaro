@@ -185,6 +185,73 @@ test("context reads live leases and newest completed turns without rewriting", a
   }
 });
 
+test("a five-of-eight context window reports incomplete history even when all selected turns fit", async (t) => {
+  const { project, feedPath } = await createFeedProject();
+  t.after(() => rm(project, { recursive: true, force: true }));
+  const workstreamId = `ws_${"a".repeat(32)}`;
+  const records = Array.from({ length: 8 }, (_, i) => ({
+    ...turn(i + 1, `2026-08-16T20:0${i + 1}:00.000Z`),
+    workstream_id: workstreamId,
+  }));
+  await writeFile(feedPath, records.map(stableJsonLine).join(""));
+  const context = await readProjectContext(project, {
+    byteBudget: 16_384, turnsPerSession: 5, workstreamId,
+  });
+  assert.deepEqual(context.value.turns.items.map((item) => item.sequence), [8, 7, 6, 5, 4]);
+  assert.equal(context.value.turns.shown, 5);
+  assert.equal(context.value.turns.total, 5);
+  assert.deepEqual(context.value.coverage, {
+    history: { state: "limited", reasons: ["history_window"] },
+    selection: { policy: "newest_within_scope_per_session", turns_per_session: 5 },
+    window_limited_feed_files: 1,
+    projection_omitted_turns: 0,
+    attention_truncated_turns: 0,
+  });
+  assert.match(context.value.turn_retrieval_hint ?? "", /same project and workstream/u);
+});
+
+test("scope selection finds newest turns in the old workstream after a session moves", async (t) => {
+  const { project, feedPath } = await createFeedProject();
+  t.after(() => rm(project, { recursive: true, force: true }));
+  const workstreamId = `ws_${"a".repeat(32)}`;
+  const otherWorkstreamId = `ws_${"b".repeat(32)}`;
+  const records = Array.from({ length: 12 }, (_, i) => ({
+    ...turn(i + 1, new Date(Date.UTC(2026, 7, 16, 20, i + 1)).toISOString()),
+    workstream_id: i < 5 ? workstreamId : otherWorkstreamId,
+  }));
+  await writeFile(feedPath, records.map(stableJsonLine).join(""));
+  const context = await readProjectContext(project, {
+    byteBudget: 16_384, turnsPerSession: 5, workstreamId,
+  });
+  assert.deepEqual(context.value.turns.items.map((item) => item.sequence), [5, 4, 3, 2, 1]);
+  assert.deepEqual(context.value.coverage.history, { state: "complete", reasons: [] });
+  assert.equal(context.value.coverage.window_limited_feed_files, 0);
+  assert.equal(context.value.turn_retrieval_hint, undefined);
+
+  const bounded = await readProjectContext(project, {
+    byteBudget: 16_384, turnsPerSession: 5, workstreamId,
+    maxScanBytesPerFile: Buffer.byteLength(records.slice(-3).map(stableJsonLine).join("")),
+  });
+  assert.equal(bounded.value.turns.shown, 0);
+  assert.equal(bounded.value.turns.total, 0);
+  assert.deepEqual(bounded.value.coverage.history, { state: "limited", reasons: ["scan_limit"] });
+  assert.ok(bounded.value.turn_retrieval_hint);
+});
+
+test("projection omissions are distinct from a fully scanned context history", async (t) => {
+  const { project, feedPath } = await createFeedProject();
+  t.after(() => rm(project, { recursive: true, force: true }));
+  await writeFile(feedPath, Array.from({ length: 4 }, (_, i) => (
+    stableJsonLine(turn(i + 1, `2026-08-16T20:0${i + 1}:00.000Z`))
+  )).join(""));
+  const context = await readProjectContext(project, { byteBudget: 2000 });
+  assert.equal(context.value.coverage.history.state, "complete");
+  assert.ok(context.value.coverage.projection_omitted_turns > 0);
+  assert.equal(context.value.coverage.projection_omitted_turns, 4 - context.value.turns.shown);
+  assert.ok(context.utf8_bytes <= 2000);
+  assert.ok(context.value.turn_retrieval_hint);
+});
+
 test("evidence is loaded only by an exact evidence_ref and remains canonical", async () => {
   const project = await mkdtemp(join(tmpdir(), "barbaro-reader-evidence-"));
   const directory = join(project, ".barbaro", "evidence", "codex");
@@ -333,13 +400,13 @@ test("canonical readers reject symlinks, hard links, and oversized files", async
     const { project, feedPath } = await createFeedProject();
     try {
       await writeFile(feedPath, "x".repeat(1024));
-      await assert.rejects(
-        readProjectContext(project, {
+      const result = await readProjectContext(project, {
           byteBudget: 4096,
           maxFileBytes: 128,
-        }),
-        (error: unknown) => error instanceof StoreFileTooLargeError,
-      );
+        });
+      assert.equal(result.value.coverage.history.state, "limited");
+      assert.deepEqual(result.value.coverage.history.reasons, ["unavailable_feed"]);
+      assert.equal(result.value.diagnostics.feed_coverage?.unavailable.items[0]?.reason, "file_too_large");
     } finally {
       await rm(project, { recursive: true, force: true });
     }
@@ -354,13 +421,12 @@ test("canonical readers reject symlinks, hard links, and oversized files", async
         response: content("x".repeat(1024)),
       };
       await writeFile(feedPath, stableJsonLine(record));
-      await assert.rejects(
-        readProjectContext(project, {
+      const result = await readProjectContext(project, {
           byteBudget: 4096,
           maxRecordBytes: 256,
-        }),
-        (error: unknown) => error instanceof ReaderRecordTooLargeError,
-      );
+        });
+      assert.equal(result.value.coverage.history.state, "limited");
+      assert.equal(result.value.diagnostics.feed_coverage?.unavailable.items[0]?.reason, "record_too_large");
     } finally {
       await rm(project, { recursive: true, force: true });
     }

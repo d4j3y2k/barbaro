@@ -6,6 +6,7 @@ import type {
   BarbaroSubagentTurnEvidenceV1,
   BarbaroTurnV1,
 } from "../contracts/v1.js";
+import { projectClaimOverlaps, type ProjectWriteClaim } from "../active/conflicts.js";
 import {
   compareUtf16CodeUnits,
   stableStringify,
@@ -30,6 +31,7 @@ import {
   type ReaderContentSummary,
   type ReaderCollection,
   type ReaderContextV1,
+  type ReaderContextHistoryCoverage,
   type ReaderCoverage,
   type ReaderDiagnostics,
   type ReaderEvidenceV1,
@@ -466,11 +468,31 @@ export function projectContext(
   active: readonly BarbaroActiveLeaseV1[],
   turns: readonly BarbaroTurnV1[],
   diagnostics: ReaderDiagnostics,
-  options: ReaderProjectionOptions & { readonly workstreamId?: string },
+  options: ReaderProjectionOptions & {
+    readonly workstreamId?: string;
+    readonly turnsPerSession?: number;
+    readonly windowLimitedFeedFiles?: number;
+    readonly historyCoverage?: ReaderContextHistoryCoverage;
+    readonly preferTurns?: boolean;
+    readonly projectClaims?: readonly ProjectWriteClaim[];
+  },
 ): ReaderProjection<ReaderContextV1> {
   const limits = projectionLimits(options);
   let activeItems: ReaderActiveSummary[] = [];
   let turnItems: ReaderTurnSummary[] = [];
+  let unavailableShown = 0;
+  const claims = options.projectClaims ?? [];
+  const overlaps = projectClaimOverlaps(claims, options.workstreamId);
+  let claimsShown = 0;
+  let overlapsShown = 0;
+  const unknownActors = new Set(claims.filter((claim) => claim.unknown_write_scope).map((claim) => claim.lease_id)).size;
+  const history = options.historyCoverage ?? {
+    state: "unknown",
+    reasons: ["history_not_supplied"],
+  } as const;
+  const attentionTruncatedCount = (): number => turnItems.filter(
+    (turn) => (turn.response ?? turn.request).truncated.projection,
+  ).length;
   const build = (): ReaderContextV1 => ({
     schema: READER_CONTEXT_SCHEMA,
     ...(options.workstreamId === undefined
@@ -481,33 +503,93 @@ export function projectContext(
       total: active.length,
       items: activeItems,
     },
+    ...(options.projectClaims === undefined ? {} : {
+      project_claims: {
+        scope: "project" as const,
+        advisory: true as const,
+        claims: boundedItems(claims, claimsShown),
+        overlaps: boundedItems(overlaps, overlapsShown),
+        coverage: {
+          state: diagnostics.invalid_active_records > 0 || claimsShown < claims.length || overlapsShown < overlaps.length ? "limited" as const : "complete" as const,
+          invalid_active_records: diagnostics.invalid_active_records,
+          unknown_scope_actors: unknownActors,
+        },
+      },
+    }),
     turns: {
       shown: turnItems.length,
       total: turns.length,
       items: turnItems,
     },
-    ...(turnItems.length < turns.length
+    coverage: {
+      history,
+      ...(options.turnsPerSession === undefined ? {} : {
+        selection: {
+          policy: "newest_within_scope_per_session",
+          turns_per_session: options.turnsPerSession,
+        },
+      }),
+      window_limited_feed_files: options.windowLimitedFeedFiles ?? 0,
+      projection_omitted_turns: turns.length - turnItems.length,
+      attention_truncated_turns: attentionTruncatedCount(),
+    },
+    ...(history.state !== "complete" || turnItems.length < turns.length || attentionTruncatedCount() > 0
       ? { turn_retrieval_hint: READER_CONTEXT_TURN_RETRIEVAL_HINT }
       : {}),
-    diagnostics,
+    diagnostics: diagnostics.feed_coverage === undefined ? diagnostics : {
+      ...diagnostics,
+      feed_coverage: {
+        ...diagnostics.feed_coverage,
+        unavailable: {
+          ...diagnostics.feed_coverage.unavailable,
+          shown: unavailableShown,
+          items: diagnostics.feed_coverage.unavailable.items.slice(0, unavailableShown),
+        },
+      },
+    },
   });
 
   wrapReaderProjection(build(), limits.byteBudget);
-  for (const lease of active) {
-    const item = largestNestedProjection(
-      limits.byteBudget,
-      (byteBudget) => projectActiveLease(lease, { ...options, byteBudget }).value,
-      (candidate) => {
-        const previous = activeItems;
-        activeItems = [...activeItems, candidate];
-        const fits = readerProjectionFits(build(), limits.byteBudget);
-        activeItems = previous;
-        return fits;
-      },
-    );
-    if (item === undefined) break;
-    activeItems = [...activeItems, item];
+  // Reserve a compact path view before rich activity/turn excerpts. Its quota
+  // prevents project-wide churn from crowding out scoped attention content.
+  const claimsStartBytes = wrapReaderProjection(build(), limits.byteBudget).utf8_bytes;
+  const addClaims = (quota: number): void => {
+    const fits = (): boolean => readerProjectionFits(build(), limits.byteBudget) &&
+      utf8Bytes(stableStringify(build())) - claimsStartBytes <= quota;
+    while (overlapsShown < overlaps.length) {
+      overlapsShown += 1;
+      if (!fits()) { overlapsShown -= 1; break; }
+    }
+    while (claimsShown < claims.length) {
+      claimsShown += 1;
+      if (!fits()) { claimsShown -= 1; break; }
+    }
+  };
+  addClaims(Math.min(4096, Math.floor(limits.byteBudget / 3)));
+  // Preserve a useful failure identity before optional activity details; the
+  // total remains visible even when the byte budget omits every detail.
+  if ((diagnostics.feed_coverage?.unavailable.items.length ?? 0) > 0) {
+    unavailableShown = 1;
+    if (!readerProjectionFits(build(), limits.byteBudget)) unavailableShown = 0;
   }
+  const addActive = (): void => {
+    for (const lease of active) {
+      const item = largestNestedProjection(
+        limits.byteBudget,
+        (byteBudget) => projectActiveLease(lease, { ...options, byteBudget }).value,
+        (candidate) => {
+          const previous = activeItems;
+          activeItems = [...activeItems, candidate];
+          const fits = readerProjectionFits(build(), limits.byteBudget);
+          activeItems = previous;
+          return fits;
+        },
+      );
+      if (item === undefined) break;
+      activeItems = [...activeItems, item];
+    }
+  };
+  if (options.preferTurns !== true) addActive();
 
   for (const turn of turns) {
     const item = largestNestedProjection(
@@ -523,6 +605,12 @@ export function projectContext(
     );
     if (item === undefined) break;
     turnItems = [...turnItems, item];
+  }
+  if (options.preferTurns === true) addActive();
+  addClaims(limits.byteBudget);
+  while (unavailableShown < (diagnostics.feed_coverage?.unavailable.items.length ?? 0)) {
+    unavailableShown += 1;
+    if (!readerProjectionFits(build(), limits.byteBudget)) { unavailableShown -= 1; break; }
   }
   return wrapReaderProjection(build(), limits.byteBudget);
 }

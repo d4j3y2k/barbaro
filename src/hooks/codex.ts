@@ -21,13 +21,11 @@ import { createSessionId, createTurnId } from "../core/id.js";
 import {
   classifyAwaitCommand,
   isDigestExcludedBarbaroCommand,
-  isLeadingBarbaroContextCommand,
   type AwaitCommandClassification,
 } from "../core/barbaro-command.js";
 import { safeStoreFileLocation } from "../core/safe-store.js";
 import { stableStringify } from "../core/stable-json.js";
 import {
-  advanceHookReadCursor,
   claimHookNudgeDelivery,
   rollbackHookStopClaim,
   stopReasonForNudge,
@@ -46,6 +44,7 @@ import {
   type RunCodexTraceResult,
 } from "../runner/codex.js";
 import { beginIngestAttempt } from "./ingest-attempt.js";
+import { handleCodexReadDelivery } from "./codex-read.js";
 import {
   admitHookSession,
   parseBarbaroInvocation,
@@ -198,6 +197,15 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
     ...(turnId ? { turn_id: turnId } : {}),
   } as const;
   const store = new ActiveLeaseStore(join(projectRoot, ".barbaro", "active"));
+  const readBoundary = async (): Promise<void> => {
+    if (agentId !== "main" || turnId === undefined || nativeTurnId === undefined) return;
+    await handleCodexReadDelivery({
+      projectRoot, provider: "codex", nativeSessionId, nativeTurnId,
+      ...(tracePath === undefined ? {} : { tracePath }),
+      turn: { kind: "codex", turn_id: turnId },
+      onLockReleaseFailure: (error) => observeCommittedLockRelease("nudge cursor", error),
+    }, event, input);
+  };
 
   // Opportunistic hygiene, once per session: long-dead tombstones only
   // accumulate. The join event is the trigger that actually fires — sessions
@@ -278,6 +286,7 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
       };
     });
     const result = codexUpdateResult(event, settled);
+    if (result.active_revision !== undefined) await readBoundary();
     const nudge =
       agentId === "main" &&
       result.active_revision !== undefined &&
@@ -337,17 +346,8 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
     if (agentId !== "main" || result.active_revision === undefined) {
       return result;
     }
-    if (activity.contextCommand === true) {
-      await advanceHookReadCursor({
-        projectRoot,
-        provider: "codex",
-        nativeSessionId,
-        onLockReleaseFailure: (error) =>
-          observeCommittedLockRelease("nudge cursor", error),
-      });
-      return result;
-    }
     if (turnId === undefined) return result;
+    await readBoundary();
     const nudge = await claimHookNudgeDelivery({
       projectRoot,
       provider: "codex",
@@ -411,7 +411,9 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
         ? {}
         : { ttlMs: requestedActivity.awaitCommand.leaseTtlMs },
     );
-    return codexUpdateResult(event, settled);
+    const result = codexUpdateResult(event, settled);
+    if (result.active_revision !== undefined) await readBoundary();
+    return result;
   }
 
   if (event === "PostToolUse") {
@@ -440,6 +442,7 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
       };
     });
     const result = codexUpdateResult(event, settled);
+    if (result.active_revision !== undefined) await readBoundary();
     const nudge =
       agentId === "main" &&
       result.active_revision !== undefined &&
@@ -487,7 +490,9 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
         },
       };
     });
-    return codexUpdateResult(event, settled);
+    const result = codexUpdateResult(event, settled);
+    if (result.active_revision !== undefined) await readBoundary();
+    return result;
   }
 
   if (event === "PostCompact") {
@@ -515,7 +520,9 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
         },
       };
     });
-    return codexUpdateResult(event, settled);
+    const result = codexUpdateResult(event, settled);
+    if (result.active_revision !== undefined) await readBoundary();
+    return result;
   }
 
   if (event === "Stop") {
@@ -541,6 +548,7 @@ async function runCodexHook(input: unknown): Promise<CodexHookResult> {
       return { write: idleLeaseUpdate(leaseIdentity) };
     });
     const stoppedResult = codexUpdateResult(event, stopped);
+    if (stopped.lease !== undefined) await readBoundary();
     if (
       stopped.lease === undefined ||
       agentId !== "main" ||
@@ -1304,7 +1312,6 @@ interface ToolActivity {
   readonly claims: readonly ActiveWriteClaim[];
   readonly unknownWriteScope: boolean;
   readonly awaitCommand?: AwaitCommandClassification;
-  readonly contextCommand?: boolean;
 }
 
 function classifyToolActivity(
@@ -1342,9 +1349,6 @@ function classifyToolActivity(
     const digestExcludedCommand = command
       ? isDigestExcludedBarbaroCommand(command)
       : false;
-    const contextCommand = command
-      ? isLeadingBarbaroContextCommand(command)
-      : false;
     return {
       currentAction: {
         kind: "command",
@@ -1356,7 +1360,6 @@ function classifyToolActivity(
       unknownWriteScope:
         awaitCommand === undefined && !digestExcludedCommand,
       ...(awaitCommand === undefined ? {} : { awaitCommand }),
-      ...(contextCommand ? { contextCommand: true } : {}),
     };
   }
 

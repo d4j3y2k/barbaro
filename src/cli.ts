@@ -6,6 +6,9 @@ import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { stableStringify } from "./core/stable-json.js";
+import { runDoctor, formatDoctorReport } from "./setup/public-doctor.js";
+import { createReadOutput } from "./nudge/read-output.js";
+import { ReadUsageError, resolveReadQuery } from "./nudge/read-query.js";
 import {
   readEvidenceRecordPage,
   readProjectContext,
@@ -38,6 +41,7 @@ import {
   awaitUnreadPeerTurns,
   formatAwaitUnread,
   formatAwaitTimeout,
+  formatAwaitIncomplete,
   formatWatchEvent,
   watchErrorEvent,
   type AwaitResult,
@@ -82,7 +86,7 @@ import { renderOnceSnapshot } from "./tui/once.js";
 class UsageError extends TypeError {}
 
 const HELP_FLAGS = new Set(["--help", "-h"]);
-const SIMPLE_HELP_COMMANDS = new Set(["context", "tui", "watch", "await"]);
+const SIMPLE_HELP_COMMANDS = new Set(["context", "tui", "watch", "await", "doctor"]);
 const PROVIDER_HELP_COMMANDS = new Set([
   "status",
   "ingest",
@@ -110,6 +114,13 @@ export async function main(
   if (argv.length === 1 && argv[0] === "--version") {
     io.stdout(`${packageVersion()}\n`);
     return 0;
+  }
+
+  if (argv[0] === "doctor" && !argv.some((argument) => HELP_FLAGS.has(argument))) {
+    const flags = parseFlags(argv.slice(1), new Set(["project-root", "json"]), new Set(["json"]));
+    const report = await runDoctor({ projectRoot: flags.get("project-root") ?? process.cwd() });
+    io.stdout(flags.has("json") ? `${stableStringify(report)}\n` : formatDoctorReport(report));
+    return report.status === "pass" ? 0 : 1;
   }
 
   if (
@@ -175,6 +186,22 @@ export async function main(
 
   if (argv[0] === "workstream") {
     return runWorkstreamCommand(argv.slice(1), io);
+  }
+
+  if (argv[0] === "read") {
+    try {
+      const query = await resolveReadQuery(argv.slice(1), process.cwd());
+      io.stdout(`${stableStringify(await createReadOutput(query))}\n`);
+      return 0;
+    } catch (error: unknown) {
+      if (error instanceof ReadUsageError) {
+        io.stderr(`${error.message}\n`);
+        return 2;
+      }
+      const handled = handleReaderFailure(error, io, { cursorSupplied: argv.includes("--cursor") });
+      if (handled !== undefined) return handled;
+      throw error;
+    }
   }
 
   // The reader has existed as an API since v1 with no way to reach it, so both
@@ -394,9 +421,11 @@ export async function main(
         ? stableStringify(result)
         : result.kind === "timeout"
           ? formatAwaitTimeout(result)
-          : formatAwaitUnread(result)}\n`,
+          : result.kind === "incomplete"
+            ? formatAwaitIncomplete(result)
+            : formatAwaitUnread(result)}\n`,
     );
-    return 0;
+    return result.kind === "incomplete" ? 1 : 0;
   }
 
   // The event stream behind `/barbaro-watch` and any live status view. The engine
@@ -571,6 +600,10 @@ function isRecognizedHelpTarget(argv: readonly string[]): boolean {
   if (SIMPLE_HELP_COMMANDS.has(command)) return true;
 
   const subcommand = argv[1];
+  if (command === "read") {
+    return subcommand !== undefined && (HELP_FLAGS.has(subcommand) || subcommand === "context" ||
+      (subcommand === "turn" && argv[2] === "show"));
+  }
   if (command === "workstream") {
     return (
       subcommand !== undefined &&
@@ -1478,6 +1511,8 @@ function takePositional(
 function helpText(): string {
   return `barbaro\n\n` +
     `  barbaro --version\n\n` +
+    `  barbaro doctor [--project-root <path>] [--json]\n` +
+    `    Read-only effective setup and live evidence checks. Exit 0: pass; 1: attention; 2: usage.\n\n` +
     `  Session opt-in: \`/barbaro new|join <name>\` in Claude Code,\n` +
     `                  \`$barbaro new|join <name>\` in Codex; a bare\n` +
     `                  invocation lists workstreams and joins nothing\n\n` +
@@ -1496,6 +1531,8 @@ function helpText(): string {
     `                  read .barbaro/**/*.jsonl directly. If a direct field\n` +
     `                  page says representation=json-string, concatenate all\n` +
     `                  page text and JSON.parse it once.\n\n` +
+    `  Scoped context also includes project_claims across the checkout.\n` +
+    `  Claims are advisory; inspect confidence, expiry and shown/total coverage.\n\n` +
     `  barbaro codex status --session-id <id> [--project-root <path>]\n` +
     `  barbaro codex ingest --trace <rollout.jsonl> [--project-root <path>] [--reset]\n` +
     `  barbaro codex hook          # synchronous active-state hook via stdin\n` +
@@ -1533,12 +1570,28 @@ function helpText(): string {
                               # to the exact 64x28 card, pad larger requests
                               # with matte, and answer below 12x6 with the
                               # true-size notice
+  barbaro read context [--project-root <path>] [--byte-budget <n>]
+                  [--provider <claude|codex> --session-id <id>]
+                  [--workstream <name|ws_id> | --all-workstreams]
+                  [--turns-per-session <n>]
+                              # delivery-capable context; defaults to 8192 bytes
+                              # including the complete envelope and newline
+  barbaro read turn show <turn_id> [--field <record|request|response|actions>]
+                  [--provider <claude|codex> --session-id <id>]
+                  [--project-root <path>] [--cursor <cursor>] [--byte-budget <n>]
+                              # exact attention pages can accumulate delivery
+                              # only through a matching successful provider hook;
+                              # CLI execution alone never acknowledges anything
+                              # delivery.eligible=false explains observer output
+                              # run one foreground command with full model output;
+                              # no pipes, background jobs, or output transformations
   barbaro context [--project-root <path>] [--byte-budget <n>]
                   [--turns-per-session <n>]
                   [--provider <claude|codex> --session-id <id>]
                   [--workstream <name|ws_id> | --all-workstreams]
                               # live leases + newest turns, byte-bounded;
                               # scoped to the session's workstream when given
+                              # observer-only under alpha.6 hooks
   barbaro turn list [--project-root <path>] [--byte-budget <n>] [--cursor <cursor>]
                     [--max-file-bytes <n>] [--max-record-bytes <n>]
                     [--provider <claude|codex> --session-id <id>]
@@ -1553,7 +1606,7 @@ function helpText(): string {
                     [--provider <claude|codex> --session-id <id>]
                     [--workstream <name|ws_id> | --all-workstreams]
                               # lossless canonical or direct-field paging;
-                              # default budget 131072 bytes
+                              # default budget 131072 bytes; observer-only
   barbaro evidence show <evidence_id> --provider <claude|codex>
                     --session-id <ses_id> [--project-root <path>]
                     [--byte-budget <n>] [--action-cursor a:<offset>]
@@ -1566,6 +1619,7 @@ function helpText(): string {
                   [--self <ses_id> | --provider <claude|codex> --session-id <id>]
                   [--workstream <name|ws_id> | --all-workstreams]
                               # stream peer turns, joins, incidents, stale leases
+                              # and changed cross-workstream path overlaps;
                               # within the session's workstream; --self must
                               # name an enrolled stable session
   barbaro await   [--project-root <path>] [--interval-ms <n>]
@@ -1576,7 +1630,8 @@ function helpText(): string {
                               # peer turns; prints N unread and returns at once;
                               # timeout defaults to 600000 ms, exits 0, and
                               # is capped at 3600000 ms; --self must name an
-                              # enrolled stable session\n` +
+                              # enrolled stable session; incomplete coverage
+                              # at the deadline exits 1 (kind: incomplete)\n` +
     `      --live on claude ingest withholds a trailing in-progress turn\n`;
 }
 

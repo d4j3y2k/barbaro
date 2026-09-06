@@ -1098,7 +1098,7 @@ test("Codex hook nudges are main-only, cursor-based, and Stop-safe", async (t) =
     stop_hook_active: false,
     last_assistant_message: `${"answer ".repeat(500)}\nfinal line`,
   });
-  assert.match(blocked.stop_reason ?? "", /run barbaro context/u);
+  assert.match(blocked.stop_reason ?? "", /run barbaro read context/u);
   assert.match(blocked.stop_reason ?? "", /resend your previous response verbatim/u);
   assert.equal((blocked.stop_reason ?? "").includes("\n"), false);
   assert.ok(Buffer.byteLength(blocked.stop_reason ?? "", "utf8") < 2_000);
@@ -1108,7 +1108,7 @@ test("Codex hook nudges are main-only, cursor-based, and Stop-safe", async (t) =
   });
   assert.equal((await activeSnapshot(project, nativeSessionId))?.state, "working");
 
-  const cleared = await handleCodexHook({
+  const observer = await handleCodexHook({
     ...nextCommon,
     hook_event_name: "PreToolUse",
     tool_name: "Bash",
@@ -1117,14 +1117,14 @@ test("Codex hook nudges are main-only, cursor-based, and Stop-safe", async (t) =
         "barbaro context --provider codex --session-id session-nudge | jq .value",
     },
   });
-  assert.equal(cleared.nudge, undefined);
-  const afterClear = await inspectUnreadPeerTurns({
+  assert.equal(observer.nudge, undefined);
+  const afterObserver = await inspectUnreadPeerTurns({
     projectRoot: project,
     provider: "codex",
     nativeSessionId,
   });
-  assert.equal(afterClear.status, "ready");
-  assert.equal(afterClear.status === "ready" ? afterClear.unread_count : -1, 0);
+  assert.equal(afterObserver.status, "ready");
+  assert.equal(afterObserver.status === "ready" ? afterObserver.unread_count : -1, 2);
 
   await appendPeerTurn({
     projectRoot: project,
@@ -1145,7 +1145,7 @@ test("Codex hook nudges are main-only, cursor-based, and Stop-safe", async (t) =
     "codex",
     createSessionId("codex", nativeSessionId),
   );
-  assert.equal(cursor?.markers.stop, undefined);
+  assert.ok(cursor?.markers.stop, "observer reads preserve the claimed Stop latch");
 
   const nextTurn = await handleCodexHook({
     session_id: nativeSessionId,
@@ -1154,7 +1154,7 @@ test("Codex hook nudges are main-only, cursor-based, and Stop-safe", async (t) =
     hook_event_name: "UserPromptSubmit",
     prompt: "Continue.",
   });
-  assert.match(nextTurn.nudge?.text ?? "", /^Barbaro: 1 new peer turn/u);
+  assert.match(nextTurn.nudge?.text ?? "", /^Barbaro: 3 new peer turns/u);
   assert.deepEqual(JSON.parse(renderCodexHookOutput(nextTurn)), {
     hookSpecificOutput: {
       hookEventName: "UserPromptSubmit",
@@ -1249,7 +1249,7 @@ test("a newer Codex turn can supersede Stop without consuming its latch", async 
   assert.equal(unread.status === "ready" ? unread.unread_count : -1, 1);
 });
 
-test("a trace-attested fresh Codex context tool acknowledges unread turns", async (t) => {
+test("a trace-attested fresh Codex legacy context tool preserves unread turns", async (t) => {
   const fixture = await idleStopRolloverFixture(
     t,
     "session-fresh-context-boundary",
@@ -1260,7 +1260,7 @@ test("a trace-attested fresh Codex context tool acknowledges unread turns", asyn
   const before = await cursorStore.read("codex", stableSessionId);
   assert.ok(before);
 
-  const acknowledged = await handleCodexHook({
+  const observed = await handleCodexHook({
     hook_event_name: "PreToolUse",
     session_id: fixture.nativeSessionId,
     turn_id: fixture.goalTurnId,
@@ -1271,8 +1271,8 @@ test("a trace-attested fresh Codex context tool acknowledges unread turns", asyn
       command: `barbaro context --provider codex --session-id ${fixture.nativeSessionId} --project-root ${fixture.project}`,
     },
   });
-  assert.equal(acknowledged.active_revision, 3);
-  assert.equal(acknowledged.nudge, undefined);
+  assert.equal(observed.active_revision, 3);
+  assert.equal(observed.nudge?.unread_count, 1);
 
   const lease = await activeSnapshot(
     fixture.project,
@@ -1293,19 +1293,19 @@ test("a trace-attested fresh Codex context tool acknowledges unread turns", asyn
 
   const after = await cursorStore.read("codex", stableSessionId);
   assert.ok(after);
-  assert.equal(after.cursor_revision, before.cursor_revision + 1);
-  assert.notDeepEqual(after.feed_cursors, before.feed_cursors);
-  assert.deepEqual(after.markers, {});
+  assert.equal(after.cursor_revision, before.cursor_revision);
+  assert.deepEqual(after.feed_cursors, before.feed_cursors);
+  assert.equal(after.markers.stop, undefined);
   const unread = await inspectUnreadPeerTurns({
     projectRoot: fixture.project,
     provider: "codex",
     nativeSessionId: fixture.nativeSessionId,
   });
   assert.equal(unread.status, "ready");
-  assert.equal(unread.status === "ready" ? unread.unread_count : -1, 0);
+  assert.equal(unread.status === "ready" ? unread.unread_count : -1, 1);
 
   const cursorPath = cursorStore.cursorPath("codex", stableSessionId);
-  const cursorAfterAcknowledgement = await readFile(cursorPath);
+  const cursorAfterObservation = await readFile(cursorPath);
   const delayed = await handleCodexHook({
     hook_event_name: "PostToolUse",
     session_id: fixture.nativeSessionId,
@@ -1319,7 +1319,7 @@ test("a trace-attested fresh Codex context tool acknowledges unread turns", asyn
     await activeSnapshot(fixture.project, fixture.nativeSessionId),
     lease,
   );
-  assert.deepEqual(await readFile(cursorPath), cursorAfterAcknowledgement);
+  assert.deepEqual(await readFile(cursorPath), cursorAfterObservation);
 });
 
 test("trace-attested fresh Codex tool events publish honest lease state", async (t) => {

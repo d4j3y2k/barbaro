@@ -22,7 +22,6 @@ import {
 import {
   classifyAwaitCommand,
   isDigestExcludedBarbaroCommand,
-  isLeadingBarbaroContextCommand,
   type AwaitCommandClassification,
 } from "../core/barbaro-command.js";
 import {
@@ -34,12 +33,12 @@ import {
 import { createSessionId } from "../core/id.js";
 import { stableStringify } from "../core/stable-json.js";
 import {
-  advanceHookReadCursor,
   claimHookNudgeDelivery,
   rollbackHookStopClaim,
   stopReasonForNudge,
   type HookNudgeDelivery,
 } from "../nudge/index.js";
+import { handleClaudeReadDelivery } from "./claude-read.js";
 import {
   classifyUserRecord,
   decodeClaudeEnvelope,
@@ -58,6 +57,7 @@ import {
 import { beginIngestAttempt } from "./ingest-attempt.js";
 import {
   admitHookSession,
+  participationMemberships,
   SESSION_NOT_JOINED,
   WORKSTREAM_SELECTION_PENDING,
 } from "./participation.js";
@@ -77,6 +77,8 @@ const NEXT_USER_PROMPT_NOT_YET_RECORDED =
   "next user prompt not yet recorded in transcript";
 const STOP_TURN_NOT_VISIBLE =
   "Stop turn not visible in transcript before the ingest deadline";
+const TRAILING_TURN_CLOSE_TIMEOUT =
+  "terminal closing record not visible before the ingest deadline";
 
 /**
  * Events that fire in the middle of Claude's post-turn write flurry, where a
@@ -245,8 +247,7 @@ export async function handleClaudeHook(
     const stoppedResult = updateHookResult(event, stopped);
     if (
       stopped.lease === undefined ||
-      agentId !== "main" ||
-      input.stop_hook_active === true
+      agentId !== "main"
     ) {
       return stoppedResult;
     }
@@ -271,6 +272,7 @@ export async function handleClaudeHook(
           nativeSessionId,
           marker: "stop",
           turn: { kind: "claude", phase: "current" },
+          ...(input.stop_hook_active === true ? { stopContinuation: true } : {}),
           onLockReleaseFailure: (error) =>
             observeCommittedLockRelease("nudge cursor", error),
         });
@@ -335,6 +337,13 @@ export async function handleClaudeHook(
     if (previous.state === "idle") {
       return { event, ignored: "stale event after idle" };
     }
+    if (agentId === "main") {
+      await handleClaudeReadDelivery({
+        projectRoot, provider: "claude", nativeSessionId,
+        turn: { kind: "claude", phase: "current" },
+        onLockReleaseFailure: (error) => observeCommittedLockRelease("nudge cursor", error),
+      }, event, input);
+    }
     const nudge = agentId === "main"
       ? await claimHookNudgeDelivery({
           projectRoot,
@@ -370,6 +379,13 @@ export async function handleClaudeHook(
       };
     });
     const result = updateHookResult(event, settled);
+    if (agentId === "main" && result.active_revision !== undefined) {
+      await handleClaudeReadDelivery({
+        projectRoot, provider: "claude", nativeSessionId,
+        turn: { kind: "claude", phase: "current" },
+        onLockReleaseFailure: (error) => observeCommittedLockRelease("nudge cursor", error),
+      }, "PostToolBatch", input);
+    }
     const nudge =
       agentId === "main" && result.active_revision !== undefined
         ? await claimHookNudgeDelivery({
@@ -388,29 +404,47 @@ export async function handleClaudeHook(
   if (event === "UserPromptSubmit" || event === "UserPromptExpansion") {
     const prompt = stringValue(input.prompt) ?? "";
     const intent: ActiveContent = excerptContent(prompt, ACTIVE_INTENT_BYTES);
-    const lease = await store.write({
-      ...identity,
-      state: "working",
-      intent,
-      // A new prompt supersedes whatever the previous turn was touching.
-      claims: [],
-      unknown_write_scope: false,
+    const membership = admission.participation === undefined ? undefined
+      : participationMemberships(admission.participation).at(-1);
+    let queued = false;
+    let nudge: HookNudgeDelivery | undefined;
+    const settled = await store.update(identity, (previous) => {
+      const now = Date.now();
+      // Expiry is deliberately conservative: a long-running tool whose lease
+      // expired can get one extra Stop nudge, but can never lose unread content.
+      queued = previous !== undefined && membership !== undefined &&
+        (previous.state === "working" || previous.state === "waiting") &&
+        previous.workstream_id === membership.workstream_id &&
+        Date.parse(previous.updated_at) >= Date.parse(membership.from) &&
+        Date.parse(previous.updated_at) <= now && Date.parse(previous.expires_at) > now;
+      return { write: {
+        ...identity,
+        state: "working",
+        intent,
+        claims: [],
+        unknown_write_scope: false,
+      } };
+    }, {
+      // Hold actor -> cursor ordering across classification and publication.
+      // A failed active write cannot claim an unseen informational nudge.
+      afterCommit: async () => {
+        if (event !== "UserPromptSubmit" || agentId !== "main") return;
+        nudge = await claimHookNudgeDelivery({
+          projectRoot,
+          provider: "claude",
+          nativeSessionId,
+          marker: "user_prompt",
+          turn: queued && membership !== undefined
+            ? { kind: "claude", phase: "queued", workstream_id: membership.workstream_id, membership_from: membership.from }
+            : { kind: "claude", phase: "begin" },
+          onLockReleaseFailure: (error) =>
+            observeCommittedLockRelease("nudge cursor", error),
+        });
+      },
+      onLockReleaseFailure: (error) => observeCommittedLockRelease("active lease", error),
     });
-    const nudge =
-      event === "UserPromptSubmit" && agentId === "main"
-        ? await claimHookNudgeDelivery({
-            projectRoot,
-            provider: "claude",
-            nativeSessionId,
-            marker: "user_prompt",
-            turn: { kind: "claude", phase: "begin" },
-            onLockReleaseFailure: (error) =>
-              observeCommittedLockRelease("nudge cursor", error),
-          })
-        : undefined;
     return {
-      event,
-      active_revision: lease.revision,
+      ...updateHookResult(event, settled),
       ...note,
       ...(nudge === undefined ? {} : { nudge }),
     };
@@ -455,16 +489,11 @@ export async function handleClaudeHook(
     if (agentId !== "main" || result.active_revision === undefined) {
       return result;
     }
-    if (scope.contextCommand === true) {
-      await advanceHookReadCursor({
-        projectRoot,
-        provider: "claude",
-        nativeSessionId,
-        onLockReleaseFailure: (error) =>
-          observeCommittedLockRelease("nudge cursor", error),
-      });
-      return result;
-    }
+    await handleClaudeReadDelivery({
+      projectRoot, provider: "claude", nativeSessionId,
+      turn: { kind: "claude", phase: "current" },
+      onLockReleaseFailure: (error) => observeCommittedLockRelease("nudge cursor", error),
+    }, "PreToolUse", input);
     const nudge = await claimHookNudgeDelivery({
       projectRoot,
       provider: "claude",
@@ -542,6 +571,7 @@ export const CATCH_UP_INGEST_EVENTS: ReadonlySet<string> = new Set([
 
 export interface ClaudeIngestHookResult {
   readonly event: string;
+  /** Latest snapshot, with output counters summed across this hook's retries. */
   readonly ingested?: Awaited<ReturnType<typeof runClaudeTrace>>;
   readonly ignored?: string;
 }
@@ -576,8 +606,8 @@ export class ClaudeSubagentIngestTimeoutError extends Error {
 }
 
 /**
- * Stop-hook ingestion: the turn has just ended, so the trace is final and the
- * bundle can be normalized and published.
+ * Stop-hook ingestion: a terminal turn may publish once the trace attests its
+ * close. Stop does not assert that the source file is final.
  *
  * `transcript_path` names the session file. A subagent transcript is ignored
  * here; children are ingested as part of their parent's bundle so a parent
@@ -746,6 +776,16 @@ export async function handleClaudeIngestHook(
   trailingDeadline += attemptLogElapsed;
   userPromptDeadline += attemptLogElapsed;
 
+  const output = {
+    turns_appended: 0,
+    turns_skipped: 0,
+    evidence_appended: 0,
+    evidence_skipped: 0,
+    conflicted: 0,
+    conflicted_ids: [] as string[],
+  };
+  const resultWithOutput = (result: Awaited<ReturnType<typeof runClaudeTrace>>) =>
+    ({ ...result, output: { ...output } });
   try {
     while (true) {
       const ingested = await runClaudeTrace({
@@ -770,12 +810,22 @@ export async function handleClaudeIngestHook(
       // must not make this read look later than it actually was or suppress
       // the next transcript read that the provider flush depends on.
       const observedNow = now();
+      for (const key of ["turns_appended", "turns_skipped", "evidence_appended", "evidence_skipped", "conflicted"] as const) {
+        output[key] += ingested.output[key];
+      }
+      // Keep the same bounded sample as the runner's two eight-ID writers.
+      output.conflicted_ids = [...new Set([...output.conflicted_ids, ...ingested.output.conflicted_ids])].slice(0, 16);
       const stopTurnVisible = ingested.input.stop_turn_visible !== false;
       const stopTurnNotVisible = event === "Stop" && !stopTurnVisible;
-      const publishBlocker = claudePublishBlocker(
-        ingested,
-        stopTurnNotVisible,
-      );
+      const awaitingTurnClose = waitsForTrailingTurn &&
+        ingested.input.withheld_reason === undefined &&
+        ingested.input.trailing_turn_open === true &&
+        ingested.input.trailing_turn_closable === true;
+      const trailingCloseTimedOut = !stopTurnNotVisible && awaitingTurnClose &&
+        observedNow >= trailingDeadline;
+      const publishBlocker = trailingCloseTimedOut
+        ? "trailing_turn_close_timeout"
+        : claudePublishBlocker(ingested, stopTurnNotVisible);
       await attempt.observe({
         observedSize: ingested.observation.observed_size,
         fileIdentity: ingested.observation.file_identity,
@@ -803,7 +853,7 @@ export async function handleClaudeIngestHook(
         // return immediately rather than recording a misleading plain `ok`.
         if (!waitsForStopIdentity || observedNow >= deadline) {
           await attempt.finish("stop_turn_not_visible");
-          return { event, ingested, ignored: STOP_TURN_NOT_VISIBLE };
+          return { event, ingested: resultWithOutput(ingested), ignored: STOP_TURN_NOT_VISIBLE };
         }
         await sleep(pollIntervalMs);
         continue;
@@ -822,28 +872,17 @@ export async function handleClaudeIngestHook(
       const stillBeingWritten =
         ingested.input.withheld_reason !== undefined &&
         TRANSIENT_WITHHOLD_REASONS.has(ingested.input.withheld_reason);
-      // The trailing turn is withheld until it can no longer grow, so waiting
-      // for it to close buys nothing — the only thing worth a retry here is a
-      // snapshot the runner refused because the file was mid-write, which
-      // hook-time write flurries make routine.
+      // A refused mid-write snapshot can settle at either a Stop boundary or
+      // the arrival of the next prompt. Only terminal events wait for a close.
       const retriesTransientSnapshot =
         waitsForTrailingTurn || event === "UserPromptSubmit";
       const transientDeadline =
         event === "UserPromptSubmit" ? userPromptDeadline : trailingDeadline;
-      // At Stop the turn that just ended closes at Claude's `turn_duration`
-      // record, written after the synchronous hooks return. Waiting for it is
-      // what publishes the turn now rather than one turn late — but only when
-      // the wait can pay: the trailing turn must be closable (terminal, no
-      // background launch outstanding) and this provider must already have
-      // shown it writes the record. A provider that never does, or a turn a
-      // background report may still continue, is not waited on; such a turn
-      // publishes on a later event, as before. The first turn of a session
-      // has no prior record to point to and so also publishes one event late.
-      const awaitingTurnClose =
-        waitsForTrailingTurn &&
-        ingested.input.trailing_turn_open === true &&
-        ingested.input.trailing_turn_closable === true &&
-        ingested.input.turn_duration_seen === true;
+      // A terminal turn with no outstanding background work may receive its
+      // authoritative closing record after synchronous Stop hooks return.
+      // The same bounded wait applies to the first turn: prior observation of
+      // a turn_duration record cannot be a prerequisite for seeing the first.
+      // A provider that never writes a close stays unpublished at the deadline.
       const turnSettled =
         !retriesTransientSnapshot ||
         observedNow >= transientDeadline ||
@@ -852,7 +891,7 @@ export async function handleClaudeIngestHook(
         // A conflict no longer aborts the run, so without this it would
         // vanish: publishing continued, but a record the producer recomputed
         // differently is a determinism defect that still has to surface.
-        if (ingested.output.conflicted > 0) {
+        if (output.conflicted > 0) {
           await recordIncident({
             projectRoot,
             provider: "claude",
@@ -860,13 +899,13 @@ export async function handleClaudeIngestHook(
             event,
             ...(workstreamId === undefined ? {} : { workstreamId }),
             detail:
-              `${ingested.output.conflicted} derived record(s) recomputed ` +
+              `${output.conflicted} derived record recomputation(s) ` +
               `with different canonical content; stored versions kept: ` +
-              ingested.output.conflicted_ids.join(", "),
+              output.conflicted_ids.join(", "),
           });
         }
         await attempt.finish("ok");
-        return { event, ingested };
+        return { event, ingested: resultWithOutput(ingested), ...(trailingCloseTimedOut ? { ignored: TRAILING_TURN_CLOSE_TIMEOUT } : {}) };
       }
       if (
         targetAgentId !== undefined &&
@@ -884,7 +923,7 @@ export async function handleClaudeIngestHook(
         // of ours.
         if (!ingested.subagents.pending_agent_ids.includes(targetAgentId)) {
           await attempt.finish("ok");
-          return { event, ingested };
+          return { event, ingested: resultWithOutput(ingested) };
         }
         throw new ClaudeSubagentIngestTimeoutError(targetAgentId, timeoutMs);
       }
@@ -1104,7 +1143,6 @@ interface ToolScope {
   readonly claims: readonly ActiveWriteClaim[];
   readonly unknownWriteScope: boolean;
   readonly awaitCommand?: AwaitCommandClassification;
-  readonly contextCommand?: boolean;
 }
 
 function mergeClaims(
@@ -1146,7 +1184,6 @@ function describeToolScope(
     const command = stringValue(toolInput.command) ?? "";
     const awaitCommand = classifyAwaitCommand(command);
     const digestExcludedCommand = isDigestExcludedBarbaroCommand(command);
-    const contextCommand = isLeadingBarbaroContextCommand(command);
     return {
       action: {
         kind: "command",
@@ -1159,7 +1196,6 @@ function describeToolScope(
       unknownWriteScope:
         awaitCommand === undefined && !digestExcludedCommand,
       ...(awaitCommand === undefined ? {} : { awaitCommand }),
-      ...(contextCommand ? { contextCommand: true } : {}),
     };
   }
 

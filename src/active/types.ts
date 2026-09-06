@@ -120,6 +120,12 @@ export interface ActiveLeaseUpdateOptions {
    */
   onWriteFailure?: (error: unknown) => void | Promise<void>;
   /**
+   * Run after persistence, before releasing the actor lock. A failure here
+   * propagates but cannot undo the committed lease or invoke compensation.
+   * Used when a dependent cursor decision must follow a successful write.
+   */
+  afterCommit?: (lease: ActiveLeaseV1) => void | Promise<void>;
+  /**
    * Observe a lock cleanup failure after the selected lease was committed.
    * Callback failure is ignored because it cannot undo the durable result.
    */

@@ -16,6 +16,39 @@ hooks in [`INSTALL.md`](../INSTALL.md) are installed.
 Barbaro shares completed turns. It does not expose a model response while that
 turn is still in progress, and its file claims are advisory rather than locks.
 
+## Diagnose installation and live evidence
+
+```sh
+barbaro doctor --project-root "$PWD"
+barbaro doctor --project-root "$PWD" --json
+```
+
+Doctor is read-only. It checks effective hook layers, duplicates, interpreter
+and build identity, skill copies, Git ignore rules, publication evidence and
+delivery observations. The JSON schema is `barbaro.doctor.v1`. Exit status is
+0 for pass, 1 for an actionable warning/failure, and 2 for invalid usage.
+User-wide hooks are valid without project-local settings. Source paths and
+coverage limits explain what was inspected; trust, provider launch overrides
+and undiscovered plugin/managed settings still need provider confirmation.
+
+`configured` describes files. Publication and model delivery separately report
+`observed_working`, `stale`, `unverified` or `attention`. A reservation is not
+delivery, an expired uncommitted read is visible, and an ingest attempt with a
+publication blocker is not healthy even when its process outcome is `ok`.
+Recent means within 15 minutes. Doctor selects the newest members by canonical
+publication, main-lease or participation time before applying its eight-per-
+provider display cap. Positive working evidence survives limited coverage;
+other stale sessions and coverage warnings remain visible beside it. Missing live evidence calls for a real first
+turn, parallel-tool turn and small model-visible read, not another installation.
+The delivery adapter accepts Codex 0.153.2 and 0.153.3 literal exec forwarders or the
+Claude Code 2.1.261 foreground success/batch shape. Claude's hook shape alone
+does not attest a version; verify actual provider versions during live tests.
+Codex observations carry the version from the session trace, separately from
+the installed CLI command version; a desktop producer can differ from that command.
+
+See [dogfood diagnostics](dogfood.md#the-public-doctor) for the evidence fields,
+limits and distinction between development freshness and the running build.
+
 ## Join a workstream
 
 A workstream is a named objective that scopes routine context, unread cursors,
@@ -136,12 +169,12 @@ bytes and points to `--once`; stdin and stdout must also be attached to a TTY.
 
 ## Read peer context
 
-`barbaro context` returns byte-bounded live leases and the newest completed
+`barbaro read context` returns byte-bounded live leases and the newest completed
 turns. When provider identity is supplied, the result is scoped to that
 session's current workstream:
 
 ```sh
-barbaro context \
+barbaro read context \
   --provider codex \
   --session-id "$CODEX_SESSION_ID" \
   --project-root "$PWD"
@@ -150,13 +183,91 @@ barbaro context \
 Use `--workstream <name|id>` to read one workstream as an observer or
 `--all-workstreams` for the entire checkout. `--byte-budget` and
 `--turns-per-session` bound the projection; the result reports what was shown
-or hidden. Reading context acknowledges the session's currently unread peer
-turns. It never edits the original provider trace.
+or hidden. The default delivery budget is 8192 UTF-8 bytes for the complete
+envelope and newline. The CLI never changes unread state. Main-agent hooks
+acknowledge only full canonical responses (or requests when no response exists)
+that successfully reach the model; exact pages accumulate by record/field hash
+and byte range. Older gaps remain unread. `delivery.eligible` is only a candidate,
+not proof of delivery. Failure, missing output, previews, truncation, unsupported
+wrappers and actual output above the ceiling consume nothing.
+
+Claude input queued while its main actor has a current working or waiting lease
+keeps the unfinished turn's delivered-content suppression through its first Stop.
+That terminal boundary consumes the suppression, so the queued input's later
+turn can receive its once-per-revision Stop nudge even without another prompt
+hook. Unread gaps stay unread throughout. An expired lease, including one that
+expires during a long tool call, uses the ordinary-prompt fallback and can cause
+one extra Stop nudge. Old pending reads remain fenced by their input generation.
+
+Cursor capacity is bounded too. `delivery.reason: "coverage_capacity"` returns
+an oldest-gap turn id and a `recovery_hint`: read that exact record from its first
+page and follow every `next_cursor` in order. Delivered prefixes free sparse
+coverage without crossing unread gaps. `pending_capacity` means outstanding
+invocations must finish or expire before retrying one foreground read. The CLI
+reports capacity without writing state; the committing hook checks it again.
+
+Unread counts are lower bounds when a feed is unavailable. Nudges and await
+say “at least”; their coverage reports name the failed feeds and retain counts
+for omitted diagnostic details. Context reports `unavailable_feed` in history
+coverage, and a scoped delivery read also reports `.value.unread` when its
+cursor knows of a missing feed. Healthy feeds remain readable. Unavailable
+feeds keep their prior cursor positions; restoring them restores their unread
+gaps. Symlinks, hard links, nonregular paths, corrupt cursors and identity
+violations still cause refusal.
+Raising exact-reader limits can enable observation of larger files, but delivery
+still uses its fixed 64 MiB feed and 8 MiB record bounds. Such a selected feed
+returns observer output with `delivery.reason: "feed_unavailable"`. Raising
+reader limits never restores acknowledgment.
+
+Codex native delivery verification separately scans a pinned whole transcript,
+bounded to 128 MiB per native file and 8 MiB per native record. Above either bound,
+reads remain observers: unread and saved gaps are preserved, nudges continue,
+and ordinary hook activity is not stopped by the resource refusal. Doctor reports
+`native_trace_limit` with the bytes observed and the applicable bound; a record
+count may be a lower bound if the rest of that record was not read. This bounded
+capacity increase does not make delivery unlimited. Long sessions can cross it;
+a future pinned-offset incremental reader is needed to avoid a whole-file scan
+at each delivery boundary. Neither these native limits nor exact-reader options
+raise the canonical-feed limits or the 8 KiB model-facing output ceiling.
+
+Scoped delivery context allocates current-epoch peer turns before own-session
+history so a long verdict cannot crowd out a short peer response. Legacy
+observer context keeps its chronological ordering. Counts and history limits
+still include own-session turns.
+
+Run one foreground read per tool call with full unfiltered output. In Codex
+0.153.2 or 0.153.3 code mode use a single literal forwarding expression such as
+`text(await tools.exec_command({cmd:"barbaro read context ...",max_output_tokens:10000}));`
+with the identity/project flags shown above. Claude uses foreground Bash.
+Piping or filtering a `barbaro read` command makes it an observer and cannot
+acknowledge turns, even when the command exits successfully.
+Legacy `barbaro context`, `barbaro turn show`, turn lists, evidence reads and
+foreign/all-workstream reads remain observers under alpha.6 hooks.
+
+Scoped context includes a separate `.value.project_claims` view across the
+checkout. Its claim entries name the workstream (`null` means unscoped), actor,
+normalized project-relative path, confidence, unknown write scope and expiry.
+It exposes foreign claims before your own hook has announced a planned write.
+Conversation, intent and ordinary activity remain scoped. Claims are advisory,
+never locks. Equal known paths overlap; a path and its slash-delimited descendant
+also overlap with inferred confidence. Sibling name prefixes do not overlap.
+Normalization is lexical and uses the hooks' POSIX path rules; it does not resolve
+filesystem aliases or case differences. Names that differ only in case do not overlap even on a case-insensitive filesystem. Bash/sed writes retain unknown scope; concrete paths come from recognized editor-tool writes. Unknown scope alone asserts no collision. A scoped watcher with no local claims has nothing to compare against a foreign claim, so silence does not prove the path is free.
+
+Check claims and overlaps `shown`/`total` and `coverage` before assuming a path
+free. Invalid active records and byte-budget omissions make coverage limited;
+unknown scope has its own actor count even when all rows fit. Increasing the
+observer `barbaro context --byte-budget` in the same scope can reveal more paths.
+If coverage remains incomplete, resolve the uncertainty before writing. The
+workstream TUI shows advisory overlap, unknown-scope or incomplete-claims notices
+in its caption; scoped context provides the path details. These notices are
+separate from the workstream's activity and quiet status.
 
 Treat context as an attention view, not as a complete transcript. Continue to
 the lossless readers whenever completeness, older history, or absence matters:
 the per-session context window can omit older turns even when
-`turns.shown == turns.total`. Always continue when any rendered content has
+`turns.shown == turns.total`. Inspect `.value.coverage.history` and the
+window/projection/attention counts. Always continue when any rendered content has
 `truncated.projection: true`, `turns.shown < turns.total`, or a nudge reports
 more unread turns than context showed. First page the canonical turn index in
 the same scope, then page the response you need:
@@ -167,7 +278,7 @@ barbaro turn list \
   --session-id "$CODEX_SESSION_ID" \
   --project-root "$PWD"
 
-barbaro turn show <turn_id> \
+barbaro read turn show <turn_id> \
   --field response \
   --provider codex \
   --session-id "$CODEX_SESSION_ID" \
@@ -182,6 +293,10 @@ field, and the page reports its total UTF-8 byte count and SHA-256 digest. If a
 direct-field page reports `representation: "json-string"`, JSON-parse the
 complete concatenated value once. Use `--max-file-bytes` and
 `--max-record-bytes` to raise the reader limits for larger stores or records.
+Check `diagnostics.skipped_oversized_feed_files` and
+`diagnostics.unavailable_feed_files`: a finished index traversal can still have
+incomplete source coverage. Those counts remain pinned across its pages. Exact
+lookup reports unproven absence when unavailable feeds could contain the target.
 
 If a turn references evidence, retrieve it through its producer's canonical
 provider and stable session identity:
@@ -207,8 +322,8 @@ contracts are outside that guarantee.
 
 ## Stream peer activity
 
-`barbaro watch` emits completed turns, joins, incidents, and stale leases as
-they happen:
+`barbaro watch` emits completed turns, joins, incidents, stale leases and
+changed cross-workstream path overlaps as they happen:
 
 ```sh
 barbaro watch \
@@ -221,7 +336,13 @@ When the identified session is enrolled, the stream is scoped to its
 workstream. `--workstream <name|id>` selects a scope explicitly;
 `--all-workstreams` watches the whole checkout. `--json` emits one
 `barbaro.watch.event.v1` object per line, and `--once` performs one poll after
-the baseline.
+the baseline. A scoped watcher compares all live known paths in its own
+workstream against foreign workstreams, including unscoped actors. `CONFLICT`
+contains only the overlapping actors and paths, with advisory confidence.
+Routine renewals, command changes, unrelated claims and unchanged overlaps are
+silent. Expiry removes a conflict; renewed overlap after expiry is new news.
+The initial baseline absorbs existing conflicts; scoped context shows the
+current set, including conflicts that predate the watcher.
 
 Watcher-generated turns carry provenance and are suppressed from the event
 stream so two watchers cannot wake each other indefinitely. They remain
@@ -246,7 +367,10 @@ turn arrives or the timeout expires. Every peer turn counts, including one
 published after a Monitor wake.
 
 Await reports availability but does not acknowledge or consume a turn. Run
-`barbaro context` once after it returns to acknowledge and inspect the content.
+`barbaro read context` once with the same identity/project flags after it returns.
+It acknowledges only content whose successful delivery the hooks verify. If the
+notice reports gaps outside the delivered window, use its scoped turn index and
+exact read commands instead; follow every page cursor.
 Concurrent waits for the same session cannot consume or hide one another's
 result, though launching duplicates does no useful work.
 
@@ -254,7 +378,10 @@ Identify the session with paired `--provider`/`--session-id` flags or its stable
 `--self <ses_id>` identity. Await refuses identity-less, all-workstream, and
 foreign-workstream reads because its cursor always belongs to the session's
 current workstream. The default timeout is 600000 ms, the hard cap is 3600000
-ms, and a timeout exits successfully.
+ms. A quiet timeout exits 0 only after a complete final scan. If feeds remain
+unavailable at the deadline, await returns `kind: "incomplete"` in JSON (or
+`AWAIT incomplete` in text) and exits 1. Healthy unread news still returns
+immediately at exit 0 with its lower-bound count and incomplete coverage.
 
 ## Workstream lifecycle
 

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   appendFile,
+  chmod,
   link,
   mkdir,
   mkdtemp,
@@ -109,6 +110,31 @@ async function temporaryProject(
     await rm(project, { recursive: true, force: true });
   }
 }
+
+test("turn-list pages retain unavailable-feed counts without changing a pinned traversal", { skip: process.getuid?.() === 0 }, async () => {
+  await temporaryProject(async (project) => {
+    for (let seed = 1; seed <= 20; seed += 1) await appendTurn(project, turn(seed, { workstreamId: WS_ALPHA }));
+    const foreign = turn(100, { provider: "claude", sessionId: CLAUDE_SESSION, workstreamId: WS_BETA });
+    await appendTurn(project, foreign);
+    const path = feedPath(project, foreign);
+    await chmod(path, 0);
+    try {
+      const options = { workstreamId: WS_ALPHA, byteBudget: 2048 };
+      let page = await readProjectTurnList(project, options);
+      assert.equal(page.value.diagnostics.unavailable_feed_files, 1);
+      assert.ok(page.value.turns.next_cursor);
+      const ids = page.value.turns.items.map((item) => item.turn_id);
+      await chmod(path, 0o600);
+      while (page.value.turns.next_cursor !== undefined) {
+        page = await readProjectTurnList(project, { ...options, cursor: page.value.turns.next_cursor });
+        assert.equal(page.value.diagnostics.unavailable_feed_files, 1);
+        ids.push(...page.value.turns.items.map((item) => item.turn_id));
+      }
+      assert.equal(ids.length, 20);
+      assert.equal(new Set(ids).size, 20);
+    } finally { await chmod(path, 0o600); }
+  });
+});
 
 function feedPath(project: string, record: BarbaroTurnV1): string {
   return join(

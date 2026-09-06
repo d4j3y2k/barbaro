@@ -122,7 +122,7 @@ test("turn projection is deterministic, byte-bounded, and reports N-of-M", () =>
   ]);
 });
 
-test("bounded context points to lossless turn retrieval only when turns are hidden", () => {
+test("context separates supplied history from projection coverage and provides retrieval", () => {
   const diagnostics = {
     feed_files: 1,
     malformed_feed_records: 0,
@@ -149,11 +149,12 @@ test("bounded context points to lossless turn retrieval only when turns are hidd
   );
   assert.equal(
     hidden.value.turn_retrieval_hint,
-    "Run `barbaro turn list`, then `barbaro turn show <turn_id>`.",
+    "Run `barbaro turn list` in the same project and workstream, then `barbaro read turn show <turn_id> --field response`; follow every next_cursor.",
   );
 
   const complete = projectContext([], [turn()], diagnostics, {
     byteBudget: 12_000,
+    historyCoverage: { state: "complete", reasons: [] },
   });
   assert.equal(complete.value.turns.shown, complete.value.turns.total);
   assert.equal("turn_retrieval_hint" in complete.value, false);
@@ -174,12 +175,29 @@ test("bounded context points to lossless turn retrieval only when turns are hidd
   };
   const exactComplete = projectContext([], [boundaryTurn], diagnostics, {
     byteBudget: 12_000,
+    historyCoverage: { state: "complete", reasons: [] },
   });
   const boundary = projectContext([], [boundaryTurn], diagnostics, {
     byteBudget: exactComplete.utf8_bytes,
+    historyCoverage: { state: "complete", reasons: [] },
   });
   assert.equal(boundary.value.turns.shown, boundary.value.turns.total);
   assert.equal("turn_retrieval_hint" in boundary.value, false);
+
+  const suppliedWindow = projectContext([], [boundaryTurn], diagnostics, {
+    byteBudget: 12_000,
+  });
+  assert.equal(suppliedWindow.value.coverage.history.state, "unknown");
+  assert.equal(suppliedWindow.value.turn_retrieval_hint, READER_CONTEXT_TURN_RETRIEVAL_HINT);
+
+  const excerpted = projectContext([], [{ ...boundaryTurn, response: content("x".repeat(4000)) }], diagnostics, {
+    byteBudget: 12_000,
+    historyCoverage: { state: "complete", reasons: [] },
+  });
+  assert.equal(excerpted.value.turns.shown, 1);
+  assert.equal(excerpted.value.coverage.projection_omitted_turns, 0);
+  assert.equal(excerpted.value.coverage.attention_truncated_turns, 1);
+  assert.equal(excerpted.value.turn_retrieval_hint, READER_CONTEXT_TURN_RETRIEVAL_HINT);
 });
 
 test("subagent evidence actions page without changing the canonical record", () => {

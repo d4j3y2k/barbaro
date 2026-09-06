@@ -486,8 +486,8 @@ export class SessionParticipationStore {
         message:
           `Barbaro: ${created ? "created and joined" : "joined"} workstream ` +
           `"${workstream.name}" (${workstream.workstream_id}). Peers in it see ` +
-          `your completed turns; read theirs with \`barbaro context ` +
-          `--provider ${provider} --session-id "$${sessionVariable}"\`.`,
+          `your completed turns; read theirs with \`barbaro read context ` +
+          `--provider ${provider} --session-id "$${sessionVariable}" --project-root "$PWD"\`.`,
       };
     });
   }

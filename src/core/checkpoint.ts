@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { InputLimitError } from "./input-limit.js";
 import { constants, type BigIntStats, type PathLike } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import { open } from "node:fs/promises";
@@ -144,8 +145,9 @@ export async function resolveJsonlCheckpoint(
       options.maxFileBytes !== undefined &&
       snapshot.size > options.maxFileBytes
     ) {
-      throw new RangeError(
+      throw new InputLimitError(
         `JSONL checkpoint path exceeds ${options.maxFileBytes} bytes`,
+        "file", options.maxFileBytes,
       );
     }
     if (checkpoint === undefined) {

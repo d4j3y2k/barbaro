@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFile, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -397,7 +397,7 @@ test("await returns pre-existing cursor unread in text and JSON modes", async ()
       ),
       0,
     );
-    assert.deepEqual(text.output, ["1 unread — run barbaro context\n"]);
+    assert.deepEqual(text.output, [`1 unread — run barbaro read context --provider codex --session-id ${createSessionId("codex", "awaiting-session")} --workstream ${own.participation.workstream_id} --project-root "$PWD"\n`]);
     assert.deepEqual(text.errors, []);
 
     const json = capture();
@@ -598,6 +598,45 @@ test("await timeout is successful in text and JSON modes", async () => {
       kind: "timeout",
       timeout_ms: 1,
     });
+  });
+});
+
+test("await isolates an oversized foreign feed and returns nonzero for incomplete quiet", async () => {
+  await withProject(async (project) => {
+    const joined = await admitHookSession({ projectRoot: project, provider: "codex",
+      nativeSessionId: "await-incomplete", event: "UserPromptSubmit", prompt: "$barbaro new incomplete-lane",
+      now: new Date("2026-08-23T00:59:00.000Z") });
+    const workstreamId = joined.participation!.workstream_id!;
+    const directory = join(project, ".barbaro", "feed", "claude");
+    await mkdir(directory, { recursive: true });
+    const foreignId = createSessionId("claude", "foreign-noisy-feed");
+    const foreign = turnRecord({ sessionId: foreignId, workstreamId: `ws_${"f".repeat(32)}`, sequence: 1, request: "outside this scope" });
+    const path = join(directory, `${foreignId}.jsonl`);
+    await writeFile(path, `${JSON.stringify(foreign)}\n`);
+    const handle = await open(path, "r+");
+    try { await handle.truncate(64 * 1024 * 1024 + 1); } finally { await handle.close(); }
+    const args = ["await", "--project-root", project, "--provider", "codex", "--session-id", "await-incomplete", "--timeout-ms", "1", "--interval-ms", "1"];
+    for (const json of [false, true]) {
+      const io = capture();
+      assert.equal(await main([...args, ...(json ? ["--json"] : [])], io.io), 1);
+      if (json) {
+        const result = JSON.parse(io.output[0]!);
+        assert.equal(result.kind, "incomplete");
+        assert.equal(result.coverage.unavailable.items[0].reason, "file_too_large");
+      } else assert.match(io.output.join(""), /AWAIT incomplete.*quiet is unproven/u);
+    }
+    const healthy = turnRecord({ sessionId: createSessionId("claude", "healthy-news"), workstreamId, sequence: 1, request: "scoped verdict" });
+    await writeFile(join(directory, `${healthy.session_id}.jsonl`), `${JSON.stringify(healthy)}\n`);
+    for (const json of [false, true]) {
+      const io = capture();
+      assert.equal(await main([...args, ...(json ? ["--json"] : [])], io.io), 0);
+      if (json) {
+        const result = JSON.parse(io.output[0]!);
+        assert.equal(result.kind, "unread");
+        assert.equal(result.unread_count, 1);
+        assert.equal(result.coverage.state, "incomplete");
+      } else assert.match(io.output.join(""), /^at least 1 unread.*coverage incomplete/u);
+    }
   });
 });
 

@@ -10,7 +10,7 @@ import {
   readProjectStoreHealth,
 } from "../reader/health.js";
 import { readProjectContext } from "../reader/store.js";
-import type { ReaderStoreHealth } from "../reader/types.js";
+import type { ReaderStoreHealth, ReaderProjectClaims } from "../reader/types.js";
 
 import { measureCells, padCells } from "./cells.js";
 import { ComfortInputParser } from "./comfort-input.js";
@@ -43,6 +43,7 @@ import {
 import {
   dashboardRollAt,
   dashboardTurnFact,
+  projectClaimNotice,
   hubNewsTickerKeys,
   hubProjectionWarning,
   hubSelectableWorkstreamIds,
@@ -202,6 +203,7 @@ interface ComfortModel {
   health?: ReaderStoreHealth;
   catalogue?: ReaderCatalogueV1;
   turns: readonly DashboardTurnFact[];
+  projectClaims?: ReaderProjectClaims;
   refresh?: RefreshMeasurement;
   refreshFailed?: boolean;
   readFailure?: string;
@@ -589,6 +591,7 @@ export async function runComfortTui(
           readonly health: ReaderStoreHealth;
           readonly catalogue?: ReaderCatalogueV1;
           readonly turns: readonly DashboardTurnFact[];
+          readonly projectClaims?: ReaderProjectClaims;
         }
       | undefined;
     const refreshMode = mode;
@@ -627,6 +630,7 @@ export async function runComfortTui(
           render();
         }
         let turns: readonly DashboardTurnFact[] = [];
+        let projectClaims: ReaderProjectClaims | undefined;
         if (refreshMode.kind === "dashboard") {
           scopeWorkstreamId = refreshMode.workstreamId;
           const context = await readers.readContext(projectRoot, {
@@ -638,6 +642,7 @@ export async function runComfortTui(
           projectedBytes += context.utf8_bytes;
           shownTurns = context.value.turns.shown;
           turns = context.value.turns.items.map(dashboardTurnFact);
+          projectClaims = context.value.project_claims;
           if (initial && startup !== undefined) {
             startup.projectedBytes = projectedBytes;
             startup.shownTurns = shownTurns;
@@ -649,6 +654,7 @@ export async function runComfortTui(
           health: health.value,
           catalogue: catalogue.value,
           turns,
+          ...(projectClaims === undefined ? {} : { projectClaims }),
         };
       } else {
         nextSnapshot = { health: health.value, turns: [] };
@@ -683,6 +689,8 @@ export async function runComfortTui(
         model.catalogue = nextSnapshot.catalogue;
       }
       model.turns = nextSnapshot.turns;
+      if (nextSnapshot.projectClaims === undefined) delete model.projectClaims;
+      else model.projectClaims = nextSnapshot.projectClaims;
       if (refreshMode.kind === "home") {
         if (nextSnapshot.catalogue === undefined) {
           homeNewsTickerOrder = [];
@@ -1652,6 +1660,7 @@ export async function runComfortTui(
       motionPolicy(),
       selectedRollIndex,
     );
+    const claimNotice = projectClaimNotice(model.refresh?.scopeWorkstreamId === item.record.workstream_id ? model.projectClaims : undefined);
     const measured = withRefreshTelemetry(reduced.frame, card);
     const trimmed = trimFrameForCard(measured, card);
     return {
@@ -1661,12 +1670,10 @@ export async function runComfortTui(
           : `${item.record.name} · completed`,
       truth: withFailure(reduced.truth),
       frame: trimmed,
-      bench: dashboardBench(
-        item,
-        catalogue,
-        trimmed,
-        selectedRollIndex,
-      ),
+      bench: [
+        ...(claimNotice === undefined ? [] : [claimNotice]),
+        ...dashboardBench(item, catalogue, trimmed, selectedRollIndex),
+      ],
       keyLine: dashboardKeyLine(trimmed, card, item.record.status),
     };
   }

@@ -9,68 +9,73 @@ developers depend on, and a broken build silently breaks coordination.
 This document describes the preflight, the parallel-actor protocol, and the
 bounded peer-context procedure used in this checkout.
 
-## The setup doctor
+## The public doctor
 
-`src/setup/` is a read-only diagnostic library. It answers one question — *is
-this checkout in a state where launching parallel actors is safe?* — as a
-structured, deterministic record.
+Run `barbaro doctor --project-root "$PWD"` before live verification; add
+`--json` for the stable `barbaro.doctor.v1` report. Exit 0 means every check
+passes, 1 means a warning or failure needs attention, and 2 means invalid CLI
+usage. Doctor never installs, edits, repairs, enrolls a session, or runs a
+configured hook command. Its bounded readers report source paths, hashes,
+counts and evidence metadata without canonical request/response bodies.
 
-The library observes and never repairs:
+The public command reads documented user, project, local and managed file
+layers. Codex uses `CODEX_HOME` (default `$HOME/.codex`) for user configuration;
+Claude uses `CLAUDE_CONFIG_DIR` (default `$HOME/.claude`). Codex user skills
+remain under `$HOME/.agents/skills`. Hook arrays merge across scopes: a valid
+user installation needs no project settings. Duplicate Barbaro roles are
+reported separately from unrelated hook stacks. Provider trust, launch-time
+settings, plugins and managed sources outside the inspected files remain
+explicit limitations; confirm effective execution in the provider's `/hooks`
+view and through the live exchange.
 
-- it never installs anything, never writes or edits a hook config, and never
-  touches user or global settings;
-- it reads only project-local configuration files. The one exception is
-  deliberate and read-only: to decide whether a hook is runnable it stats the
-  interpreter and CLI that the project's own hook config names, resolving a
-  bare command through `PATH` the way the hook runner will. It never reads a
-  user or global settings file;
-- it inspects `.barbaro/` through metadata alone (`lstat`, `readdir`), so no
-  canonical feed, evidence, or lease bytes can reach a report or a terminal
-  through it;
-- given the same filesystem, clock, and environment, two runs serialize
-  byte-identically under `stableStringify`.
-
-Diagnostics are named, sorted by id, and carry machine-readable `facts` plus
-manual `remediation` steps. Statuses are deliberately coarse:
-
-| Status | Meaning |
+| Check | Evidence |
 |---|---|
-| `pass` | Verified good. |
-| `warn` | Works, but a parallel launch is riskier than it looks. |
-| `fail` | Coordination is broken until a human fixes it. |
+| `runtime.identity` | Literal CLI paths, package and build versions, and a build manifest covering every emitted JavaScript file. Different builds and partial replacements are visible. |
+| `<provider>.hooks` | Required roles, disabled settings, duplicates, command resolution, matcher limits and async mode. SessionEnd ingestion is synchronous. |
+| `<provider>.interpreter` | Resolved literal interpreter or supported Node shebang. A version is verified only when the interpreter is the same executable as the current doctor process. |
+| `<provider>.skills` | User/project skill hashes compared with the configured runtime's shipped copies; missing, differing and shadowed copies remain visible. |
+| `store.ignore` | Git's effective ignore rule, including global rules and `.git/info/exclude`, plus already tracked store files. Git environment overrides are excluded from this query. |
+| `store.health` | Supported bounded store-health checks and explicit refusal/coverage diagnostics. |
+| `<provider>.publication` | Current members' canonical publication timestamps and ingest-attempt evidence, including an `ok` outcome with a publication blocker. |
+| `<provider>.delivery` | Bounded hook observations, pending/expired reservations, current build identity and saved-feed availability. |
+| `build.dist-freshness` | Source/output timestamps in a Barbaro development checkout, separately from installed/runtime identity. |
 
-The report's overall `status` is the worst diagnostic.
+Publication and delivery have separate `observed_working`, `stale`,
+`unverified` and `attention` states. The reference freshness interval is 15
+minutes. A configured hook is not a live observation. A canonical publication
+proves publication; it does not prove every configured hook executes.
+Delivery is observed working only after a recorded verified model delivery
+matches a currently verified build. The hook-owned delivery journal retains
+16 observations per session and an omitted count; it contains hashes and
+fixed reason codes, never commands or output. Reservations and staged output
+alone prove no acknowledgment. Missing journals, unfamiliar producer versions
+or shapes, and reservations that expire without a commit remain explicit.
+Claude's accepted shape does not itself attest its producer version.
 
-### Running it
+Live-evidence selection streams the complete scoped enrollment roster. Each
+candidate contributes its newest known canonical publication, main-lease time
+and participation time before the eight-members-per-provider display cap.
+Only the eight newest candidates are retained in memory; enumeration work
+scales with enrollment count, while each feed suffix is bounded to 1 MiB.
+The separate store-health census retains its 64-entry category cap. Neither
+that census nor an id-sorted catalogue decides which live members appear.
 
-The setup doctor is currently a project-local library, not a `barbaro setup
-doctor` CLI command. Build the project and call the library directly:
+The report declares its scan, actor, saved-feed and output bounds. Limited
+coverage does not erase a selected member's positive publication or verified
+delivery. The provider state is `observed_working` when such recent evidence
+exists, with limited coverage and counts of other attention items beside it.
+The diagnostic remains a warning when coverage or another selected session
+needs attention. Older selected sessions retain their own stale/unverified
+states. Coverage limits cannot establish absence or healthy quiet. Missing saved feeds remain
+unread obligations: restore the original feed or investigate with supported
+readers. There is no supported retire-feed operation. Raising observer limits
+does not raise the fixed acknowledgment limits (64 MiB per feed, 8 MiB per
+record). Retention remains outside this implementation.
 
-```sh
-npm run build
-node --input-type=module -e '
-  import { runSetupDoctor, formatSetupDoctorReport } from "./dist/src/setup/index.js";
-  process.stdout.write(formatSetupDoctorReport(await runSetupDoctor()));
-'
-```
-
-`runSetupDoctor()` accepts `projectRoot`, `now`, `env`, `freshness`,
-`maxEntries`, and `maxDepth`; every one of them exists so a caller can make a
-run reproducible. `formatSetupDoctorReport` is only a projection — the
-structured report stays the source of truth for any wrapper.
-
-### What it checks
-
-| Diagnostic | Question |
-|---|---|
-| `build.dist-freshness` | Is `dist/src/cli.js` present, and is every `src/**/*.ts` compiled and newer-than-source? Hooks execute `dist/`, so an unbuilt edit never reaches a peer. |
-| `gitignore.barbaro-ignored` | Does `.gitignore` actually ignore `.barbaro/`? Derived views carry request and response excerpts. A `!.barbaro` negation counts as a failure. |
-| `hooks.claude` / `hooks.codex` | Does a project-local hook config exist, does it name both `hook` and `hook-ingest`, does it cover the required events, and do the interpreter and CLI it names actually resolve on disk (including installed executable symlinks)? |
-| `views.coordination-state` | Are `.barbaro/active`, `feed`, `evidence`, and `state` present, non-empty, and recent? Freshness thresholds default to the 5-minute lease TTL for `active` and one hour elsewhere. |
-| `workspace.isolation` | Is there a Git repository at all? Without one there are no branches and no worktrees, so parallel actors share one mutable checkout. |
-
-A stale view is reported as stale, never as current: treat it as *no* peer
-context rather than as peer context that happens to be old.
+The legacy `runSetupDoctor()` / `formatSetupDoctorReport()` library remains
+available under `dist/src/setup/index.js` with its original project-only
+`barbaro.setup.doctor.v1` contract. Use `runDoctor()` / `formatDoctorReport()`
+for effective user/project installation checks.
 
 ## Parallel actors and checkout boundaries
 
@@ -139,28 +144,31 @@ node --test /tmp/lane-dist/test/<area>/*.test.js
 
 `npx tsc -p tsconfig.json --noEmit` is always safe: it writes nothing.
 
-Once every lane has landed, one actor runs the shared `npm test` to rebuild
-`dist/` — which also restores the build that the hooks execute.
+Once every lane has landed, run the combined tests and package checks in an
+isolated source snapshot. If hooks execute this checkout's `dist/`, switch the
+complete reviewed build only at an approved idle rollout boundary with a
+recovery bundle; a shared `npm test` would replace that running build.
 
-## Peer-context preflight with `barbaro context`
+## Peer context and project-wide claims
 
-`barbaro context` is the supported bounded reader for live leases and recent
-completed turns. It filters expired leases, limits turns per provider session,
-and applies one UTF-8 byte budget to the projection without changing canonical
-feed or evidence records. Use explicit limits when a reproducible context size
-matters:
+Use the observer `barbaro context --all-workstreams --project-root "$PWD"` for
+project-wide leases and claims. Delivery context is scoped to a joined session:
 
 ```sh
-barbaro context \
+barbaro read context \
+  --provider codex \
+  --session-id "$CODEX_SESSION_ID" \
   --project-root "$PWD" \
-  --byte-budget 32768 \
+  --byte-budget 8192 \
   --turns-per-session 5
 ```
 
-The CLI defaults to a 16384-byte budget and five turns per session. The doctor
-also publishes the peer-context limits as structured guidance, backed by the
-exported `PEER_CONTEXT_RENDER_BUDGET_BYTES`,
-`PEER_CONTEXT_FEED_RECORDS_PER_SESSION`, and `COMPACT_LEASE_FIELDS` constants.
+Use the Claude provider and `CLAUDE_CODE_SESSION_ID` in Claude. The delivery
+budget includes the full envelope and newline. Run one foreground read with
+unfiltered output; the CLI is read-only and only provider-verified delivery
+acknowledges complete canonical attention fields. Older gaps remain unread.
+Legacy `context` and `turn show` are observers under alpha.6 hooks. The complete delivery envelope and newline must stay within 8192 bytes. Follow an approved staged runtime
+plan when upgrading live hooks; never rebuild the running `dist/` mid-session.
 
 Before planning any work:
 
@@ -176,9 +184,10 @@ Before planning any work:
    `truncated.projection: true`, `turns.shown < turns.total`, or a nudge count
    above what context showed requires exact retrieval.
 3. **Stay inside the byte budget.** The top-level `byte_budget` and `utf8_bytes`
-   make the render limit explicit. Increase it deliberately when necessary.
+   make the render limit explicit. Actual output above 8192 bytes is observer-only;
+   use exact pages when acknowledgement is needed.
 4. **Escalate through supported readers.** Run `barbaro turn list` in the same
-   scope, then `barbaro turn show <turn_id> --field response`; follow each
+   scope with the same provider/session/project flags, then `barbaro read turn show <turn_id> --field response`; follow each
    `next_cursor` with `--cursor`. `turn show` also pages exact `record`,
    `request`, and `actions` fields. If a page reports
    `representation: "json-string"`, concatenate all page text and JSON-parse it
@@ -188,7 +197,8 @@ Before planning any work:
    `response`, or `actions` field when the bounded projection is insufficient.
    Never read or print `.barbaro/**/*.jsonl` directly.
 6. **Restate before editing.** Say what peer activity you observed and what
-   your exact file scope is, then run `barbaro context` again before each edit.
+   your exact file scope is, then inspect `barbaro context --all-workstreams --project-root "$PWD"`
+   again before each edit.
 
 Within the readers' exposed `--max-file-bytes` and `--max-record-bytes` limits,
 lossless retrieval means every byte of a canonical Barbaro turn plus its
@@ -198,10 +208,7 @@ provider-raw fields or records omitted during adapter mapping are present.
 
 ## Reading a doctor report
 
-Treat a doctor report as a snapshot of the checkout it inspected. In this
-repository, `workspace.isolation` should report that Git is present. That means
-separate worktrees are available; it does not mean actors sharing this worktree
-are isolated from one another. Stale coordination views must likewise be
+Treat a doctor report as a snapshot of the checkout it inspected. A Git checkout can support separate worktrees, but actors in this checkout still share its files. Stale coordination views must likewise be
 treated as no current peer context rather than as old-but-trustworthy context.
 
 `build.dist-freshness` failing is the normal steady state *during* parallel
@@ -216,6 +223,6 @@ easy to lose by accident:
 
 - **No canonical leakage** — a canary string planted inside `.barbaro/feed`,
   `.barbaro/evidence`, and `.barbaro/active` must not appear anywhere in the
-  serialized report, and neither may session file names.
+  serialized report, The public report may name stable session IDs and feed identities needed for diagnosis; the legacy library retains its stricter metadata-only contract.
 - **No writes** — a `path|size|mtime` census of the whole fixture tree is taken
   before and after a full doctor run and must be byte-identical.

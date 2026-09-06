@@ -19,7 +19,7 @@ import type {
  */
 
 /** Total rendered peer context the setup preflight may put in one context. */
-export const PEER_CONTEXT_RENDER_BUDGET_BYTES = 32 * 1024;
+export const PEER_CONTEXT_RENDER_BUDGET_BYTES = 8 * 1024;
 
 /** Newest records to read per provider session before the budget applies. */
 export const PEER_CONTEXT_FEED_RECORDS_PER_SESSION = 5;
@@ -40,9 +40,9 @@ export const COMPACT_LEASE_FIELDS: readonly string[] = [
 
 /**
  * Kept under its original exported name for API compatibility. The bounded
- * reader is now the supported `barbaro context` command.
+ * reader is now the supported `barbaro read context` command.
  */
-export const PEER_CONTEXT_AUTOMATION_MILESTONE = "barbaro context";
+export const PEER_CONTEXT_AUTOMATION_MILESTONE = "barbaro read context";
 
 export const PEER_CONTEXT_LIMITS: PeerContextLimits = {
   render_budget_bytes: PEER_CONTEXT_RENDER_BUDGET_BYTES,
@@ -59,23 +59,23 @@ export function peerContextPreflight(): GuidanceStep[] {
     {
       id: "peer.read-supported-context",
       text:
-        `Run \`barbaro context --byte-budget ${PEER_CONTEXT_RENDER_BUDGET_BYTES} --turns-per-session ${PEER_CONTEXT_FEED_RECORDS_PER_SESSION}\`; ` +
-        "it is a bounded attention view that filters expired leases and renders only supported compact projections, not the complete peer archive.",
+        `Run \`barbaro read context --byte-budget ${PEER_CONTEXT_RENDER_BUDGET_BYTES} --turns-per-session ${PEER_CONTEXT_FEED_RECORDS_PER_SESSION}\`; ` +
+        "supply the joined reader's --provider/--session-id and --project-root flags; it is a bounded attention view that filters expired leases and renders only supported compact projections, not the complete peer archive.",
     },
     {
       id: "peer.bound-feed-reads",
       text:
         `Read the projected newest ${PEER_CONTEXT_FEED_RECORDS_PER_SESSION} feed records per provider session and honor every shown/total count. The per-session window can omit older turns even when shown equals total, so page \`barbaro turn list\` whenever completeness or absence matters. ` +
-        "Always use that exhaustive index when shown is below total, a turn has truncated.projection, or a nudge count exceeds what context showed, then retrieve each needed answer with `barbaro turn show <turn_id> --field response`.",
+        "Always use that exhaustive index when shown is below total, a turn has truncated.projection, or a nudge count exceeds what context showed, then retrieve each needed answer with `barbaro read turn show <turn_id> --field response`.",
     },
     {
       id: "peer.budget-render",
-      text: `Cap the initial \`barbaro context\` attention view at ${PEER_CONTEXT_RENDER_BUDGET_BYTES} bytes total and report N-of-M when you truncate; exhaustive turn and evidence retrieval remains available through bounded pages.`,
+      text: `Cap the initial \`barbaro read context\` attention view at ${PEER_CONTEXT_RENDER_BUDGET_BYTES} bytes total and report N-of-M when you truncate; exhaustive turn and evidence retrieval remains available through bounded pages. A complete envelope plus newline above 8192 bytes is observer-only. Execute one foreground read with full unfiltered output; only provider-proven delivery acknowledges complete attention fields, never command launch. Older gaps require exact pages; duplicate reads do not clear them.`,
     },
     {
       id: "peer.never-print-canonical",
       text:
-        "Never read or print `.barbaro/**/*.jsonl` directly. Retrieve exact canonical bytes only through the supported bounded readers: `barbaro turn show <turn_id> --field record` and `barbaro evidence show <evidence_id> --provider <provider> --session-id <ses_id> --field record`, following each next_cursor until complete.",
+        "Never read or print `.barbaro/**/*.jsonl` directly. Retrieve exact canonical bytes only through the supported bounded readers: `barbaro read turn show <turn_id> --field record` and `barbaro evidence show <evidence_id> --provider <provider> --session-id <ses_id> --field record`, following each next_cursor until complete.",
     },
     {
       id: "peer.evidence-on-demand",
@@ -89,7 +89,7 @@ export function peerContextPreflight(): GuidanceStep[] {
     },
     {
       id: "peer.state-observations",
-      text: "State what peer activity you observed and your exact file scope before editing, then run `barbaro context` again immediately before each edit.",
+      text: "State what peer activity you observed and your exact file scope before editing. Use `barbaro context --all-workstreams --project-root \"$PWD\"` separately to inspect project-wide claims.",
     },
   ];
 }
@@ -159,7 +159,7 @@ export function launchGuidance(
     },
     {
       id: "launch.recheck-leases",
-      text: "Run `barbaro context` immediately before editing a file; its non-expired leases are advisory snapshots, not locks.",
+      text: "Run `barbaro context --all-workstreams --project-root \"$PWD\"` immediately before editing a file; its non-expired leases are advisory snapshots, not locks.",
     },
     {
       id: "launch.read-only-store",

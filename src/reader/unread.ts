@@ -26,11 +26,13 @@ import {
 import {
   NUDGE_CURSOR_SCHEMA,
   NUDGE_CURSOR_SCHEMA_V1,
+  NUDGE_CURSOR_SCHEMA_V2,
   type NudgeCursor,
   type NudgeCursorV1,
   type NudgeCursorV2,
   type NudgeFeedCursorV1,
 } from "../nudge/types.js";
+import { isReadRecordAcknowledged, parseNudgeReadState } from "../nudge/read-state.js";
 
 import { projectTurn } from "./projection.js";
 import { isTurnV1 } from "./store.js";
@@ -679,6 +681,8 @@ function consumeFeedLine(
     ) {
       continue;
     }
+    if (recipient.cursor?.schema === NUDGE_CURSOR_SCHEMA &&
+        isReadRecordAcknowledged(recipient.cursor.reads, value)) continue;
     recipient.unreadCount += 1;
     if (
       recipient.newest === undefined ||
@@ -833,8 +837,17 @@ function parseCursor(
   if (value.schema === NUDGE_CURSOR_SCHEMA_V1) {
     return parseCursorV1(value, expectedProvider, expectedSessionId);
   }
-  if (value.schema === NUDGE_CURSOR_SCHEMA) {
+  if (value.schema === NUDGE_CURSOR_SCHEMA_V2) {
     return parseCursorV2(value, expectedProvider, expectedSessionId);
+  }
+  if (value.schema === NUDGE_CURSOR_SCHEMA) {
+    const { reads, ...legacy } = value;
+    const base = parseCursorV2(legacy, expectedProvider, expectedSessionId);
+    return {
+      ...base,
+      schema: NUDGE_CURSOR_SCHEMA,
+      reads: parseNudgeReadState(reads, base.provider, base.claude_turn_generation),
+    };
   }
   throw new TypeError("unsupported cursor schema");
 }
@@ -906,7 +919,7 @@ function parseCursorV2(
     throw new TypeError("Codex cursor carries Claude generation");
   }
   return {
-    schema: NUDGE_CURSOR_SCHEMA,
+    schema: NUDGE_CURSOR_SCHEMA_V2,
     ...base,
     markers: value.markers,
     delivery: value.delivery as unknown as NudgeCursorV2["delivery"],

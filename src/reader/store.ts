@@ -1,4 +1,6 @@
 import { constants } from "node:fs";
+import { InputLimitError } from "../core/input-limit.js";
+import { FeedCoverageTracker, missingFeedError } from "../core/feed-availability.js";
 import {
   open,
   readdir,
@@ -7,6 +9,7 @@ import {
 import { join, resolve } from "node:path";
 
 import { ActiveLeaseStore } from "../active/store.js";
+import { projectWriteClaims } from "../active/conflicts.js";
 import { ACTIVE_ACTOR_FILENAME_PATTERN } from "../active/identity.js";
 import type {
   BarbaroAction,
@@ -31,6 +34,7 @@ import {
 import { projectContext, projectEvidence } from "./projection.js";
 import type {
   ReaderContextOptions,
+  ReaderContextHistoryCoverage,
   ReaderContextV1,
   ReaderDiagnostics,
   ReaderEvidenceOptions,
@@ -62,6 +66,7 @@ interface FeedReadResult {
   readonly invalid: number;
   readonly partial: boolean;
   readonly scanLimited: boolean;
+  readonly windowLimited: boolean;
 }
 
 interface ReaderFileLimits {
@@ -70,15 +75,13 @@ interface ReaderFileLimits {
   readonly maxScanBytes: number;
 }
 
-export class ReaderRecordTooLargeError extends RangeError {
+export class ReaderRecordTooLargeError extends InputLimitError {
   readonly path: string;
-  readonly maximumBytes: number;
 
   constructor(path: string, maximumBytes: number) {
-    super(`Barbaro JSONL record in ${path} exceeds ${maximumBytes} bytes`);
+    super(`Barbaro JSONL record in ${path} exceeds ${maximumBytes} bytes`, "record", maximumBytes);
     this.name = "ReaderRecordTooLargeError";
     this.path = path;
-    this.maximumBytes = maximumBytes;
   }
 }
 
@@ -100,6 +103,17 @@ export async function readProjectContext(
   projectRoot: string,
   options: ReaderContextOptions,
 ): Promise<ReaderProjection<ReaderContextV1>> {
+  return (await readProjectContextSnapshot(projectRoot, options)).projection;
+}
+
+/** The canonical records and projection from the same read, for delivery binding. */
+export async function readProjectContextSnapshot(
+  projectRoot: string,
+  options: ReaderContextOptions,
+): Promise<{
+  readonly projection: ReaderProjection<ReaderContextV1>;
+  readonly turns: readonly BarbaroTurnV1[];
+}> {
   if (projectRoot.length === 0) {
     throw new TypeError("projectRoot must not be empty");
   }
@@ -136,27 +150,30 @@ export async function readProjectContext(
   let invalidFeedRecords = 0;
   let partialFeedFiles = 0;
   let scanLimitedFeedFiles = 0;
+  let windowLimitedFeedFiles = 0;
+  const availability = new FeedCoverageTracker();
 
   for (const file of feedFiles) {
-    const result = await readNewestFeedTurns(
-      boundary,
-      file,
-      turnsPerSession,
-      limits,
-    );
-    turns.push(
-      ...(scope === undefined
-        ? result.turns
-        : result.turns.filter((turn) => turn.workstream_id === scope)),
-    );
+    let result: FeedReadResult;
+    try {
+      result = await readNewestFeedTurns(boundary, file, turnsPerSession, limits, scope);
+    } catch (error: unknown) {
+      if (availability.unavailable(file, error)) continue;
+      throw error;
+    }
+    availability.scanned();
+    turns.push(...result.turns);
     malformedFeedRecords += result.malformed;
     invalidFeedRecords += result.invalid;
     if (result.partial) partialFeedFiles += 1;
     if (result.scanLimited) scanLimitedFeedFiles += 1;
+    if (result.windowLimited) windowLimitedFeedFiles += 1;
   }
   turns.sort(compareTurnsNewestFirst);
 
+  const coverage = availability.value();
   const diagnostics: ReaderDiagnostics = {
+    ...(coverage.state === "incomplete" ? { feed_coverage: coverage } : {}),
     feed_files: feedFiles.length,
     malformed_feed_records: malformedFeedRecords,
     invalid_feed_records: invalidFeedRecords,
@@ -164,7 +181,29 @@ export async function readProjectContext(
     scan_limited_feed_files: scanLimitedFeedFiles,
     invalid_active_records: invalidActiveRecords,
   };
-  return projectContext(active, turns, diagnostics, options);
+  const reasons: ReaderContextHistoryCoverage["reasons"][number][] = [];
+  if (windowLimitedFeedFiles > 0) reasons.push("history_window");
+  if (scanLimitedFeedFiles > 0) reasons.push("scan_limit");
+  if (partialFeedFiles > 0) reasons.push("partial_feed");
+  if (malformedFeedRecords + invalidFeedRecords > 0) reasons.push("invalid_records");
+  if (coverage.state === "incomplete") reasons.push("unavailable_feed");
+  const recipient = options.attentionRecipient;
+  const peerAttention = (turn: BarbaroTurnV1): boolean => recipient !== undefined &&
+    !(turn.provider === recipient.provider && turn.session_id === recipient.sessionId) &&
+    turn.workstream_id === scope && Date.parse(turn.ended_at) > Date.parse(recipient.membershipFrom);
+  const projectionTurns = recipient === undefined ? turns : [...turns].sort(
+    (a, b) => Number(peerAttention(b)) - Number(peerAttention(a)) || compareTurnsNewestFirst(a, b),
+  );
+  return {
+    turns,
+    projection: projectContext(active, projectionTurns, diagnostics, {
+      ...options,
+      projectClaims: projectWriteClaims(absoluteRoot, allActive, new Date(options.now ?? Date.now())),
+      turnsPerSession,
+      windowLimitedFeedFiles,
+      historyCoverage: { state: reasons.length === 0 ? "complete" : "limited", reasons },
+    }),
+  };
 }
 
 /** Load one explicitly named evidence record and return only a bounded view. */
@@ -359,6 +398,7 @@ async function readNewestFeedTurns(
   file: JsonlFile,
   maximumRecords: number,
   limits: ReaderFileLimits,
+  workstreamId: string | undefined,
 ): Promise<FeedReadResult> {
   const filePath = boundary.pathFor(file.components);
   const opened = await openSafeRegularFile(
@@ -367,13 +407,7 @@ async function readNewestFeedTurns(
     limits.maxFileBytes,
   );
   if (opened === undefined) {
-    return {
-      turns: [],
-      malformed: 0,
-      invalid: 0,
-      partial: false,
-      scanLimited: false,
-    };
+    throw missingFeedError();
   }
   const { handle, size } = opened;
   try {
@@ -397,6 +431,7 @@ async function readNewestFeedTurns(
     const turns: BarbaroTurnV1[] = [];
     let malformed = 0;
     let invalid = 0;
+    let windowLimited = false;
 
     for (let index = lines.length - 1; index >= 0; index -= 1) {
       const line = lines[index]!;
@@ -418,8 +453,14 @@ async function readNewestFeedTurns(
         invalid += 1;
         continue;
       }
+      // Membership filtering precedes the per-session window. A session's
+      // later workstream must not evict its newest turns in this one.
+      if (workstreamId !== undefined && value.workstream_id !== workstreamId) continue;
+      if (turns.length === maximumRecords) {
+        windowLimited = true;
+        break;
+      }
       turns.push(value);
-      if (turns.length === maximumRecords) break;
     }
     return {
       turns,
@@ -427,6 +468,7 @@ async function readNewestFeedTurns(
       invalid,
       partial,
       scanLimited: start > 0,
+      windowLimited,
     };
   } finally {
     await handle.close();

@@ -80,6 +80,8 @@ test("digest exclusion accepts only whole simple Barbaro read commands", () => {
     "  barbaro await --timeout-ms 42  ",
     `'barbaro' "context" --json`,
     'barbaro context --project-root "$PWD"',
+    'barbaro read context --provider codex --session-id "$CODEX_SESSION_ID"',
+    "barbaro read turn show turn_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --field response",
     "barbaro context # generated read",
     "barbaro turn list",
     "barbaro turn list --all-workstreams --cursor opaque",
@@ -94,6 +96,9 @@ test("digest exclusion accepts only whole simple Barbaro read commands", () => {
   for (const command of [
     "barbaro awaiter",
     "barbaro contextual",
+    "barbaro read await",
+    "barbaro read turn list",
+    "barbaro read context | jq .",
     "/usr/bin/barbaro await",
     "node dist/src/cli.js await",
     "echo barbaro context",

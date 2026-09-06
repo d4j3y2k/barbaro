@@ -1,4 +1,5 @@
 import { truncateUtf8 } from "../core/content.js";
+import { readContextGuidance, readGapGuidance } from "./read-guidance.js";
 
 import { claimHookNudge } from "./unread.js";
 import type {
@@ -45,6 +46,9 @@ export function deliveryFromClaim(
     latest?.response?.text ?? latest?.request.text ?? "new peer activity";
   const excerpt = boundedOneLine(rawExcerpt, LATEST_TURN_EXCERPT_BYTES);
   const noun = claim.unread_count === 1 ? "turn" : "turns";
+  const outside = claim.outside_delivered_window === true;
+  const guidance = outside ? readGapGuidance(claim.provider, claim.session_id, claim.workstream_id)
+    : readContextGuidance(claim.provider, claim.session_id, claim.workstream_id);
   return {
     marker: claim.marker,
     cursor_revision: claim.cursor_revision,
@@ -53,8 +57,8 @@ export function deliveryFromClaim(
       ? {}
       : { stop_rollback: claim.stop_rollback }),
     text:
-      `Barbaro: ${claim.unread_count} new peer ${noun} — latest ${source}: ` +
-      `${JSON.stringify(excerpt)} — run barbaro context`,
+      `Barbaro: ${claim.coverage?.state === "incomplete" ? "at least " : ""}${claim.unread_count} ${outside ? `unread peer ${noun} ${claim.unread_count === 1 ? "remains" : "remain"} outside the delivered window` : `new peer ${noun}`}${claim.coverage?.state === "incomplete" ? ` (coverage incomplete: ${claim.coverage.unavailable.total} feeds unavailable)` : ""} — latest ${source}: ` +
+      `${JSON.stringify(excerpt)} — ${guidance}`,
   };
 }
 

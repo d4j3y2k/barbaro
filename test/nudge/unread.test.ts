@@ -2,6 +2,11 @@ import assert from "node:assert/strict";
 import {
   access,
   appendFile,
+  chmod,
+  link,
+  open,
+  rename,
+  symlink,
   mkdir,
   mkdtemp,
   readFile,
@@ -22,14 +27,23 @@ import {
   InvalidNudgeCursorError,
   NUDGE_CURSOR_SCHEMA,
   NUDGE_CURSOR_SCHEMA_V1,
+  NUDGE_CURSOR_SCHEMA_V2,
   NudgeCursorStateStore,
-  advanceHookReadCursor,
   claimHookNudge,
   inspectUnreadPeerTurns,
   rollbackHookStopClaim,
+  emptyNudgeReadState,
+  mergeReadCoverage,
+  readRecordHash,
+  readContentHash,
+  type NudgeReadCoverage,
 } from "../../src/nudge/index.js";
+import { readUnreadSummaryBatch } from "../../src/reader/unread.js";
+import { selectTurnText } from "../../src/reader/record-page.js";
 import { WATCH_WAKE_MARKER, isEchoTurn } from "../../src/watch/index.js";
+import { seedFullyDeliveredCursor } from "./cursor-fixture.js";
 import { snapshotTree } from "../setup/fixture.js";
+import { deliveryFromClaim } from "../../src/nudge/delivery.js";
 
 const SELF_NATIVE = "nudge-self";
 const PEER_NATIVE = "nudge-peer";
@@ -202,6 +216,85 @@ function selfOptions(project: string) {
   };
 }
 
+test("an unavailable feed preserves its prior position while healthy unread stays visible", async (t) => {
+  for (const fault of ["file-limit", "record-limit", "permission", "missing"] as const) {
+    await t.test(fault, { skip: fault === "permission" && process.getuid?.() === 0 }, async (t) => {
+      const project = await temporaryProject(t);
+      const workstreamId = await joinPeerAndSelf(project);
+      const priorTurn = turnRecord({ sessionId: PEER_SESSION, workstreamId, sequence: 1,
+        startedAt: "2026-08-23T10:00:01.000Z", endedAt: "2026-08-23T10:00:02.000Z", request: "already delivered" });
+      await appendTurn(project, priorTurn);
+      await seedFullyDeliveredCursor(selfOptions(project));
+      const store = new NudgeCursorStateStore(project);
+      const before = (await store.read("codex", SELF_SESSION))!;
+      const unread = turnRecord({ sessionId: PEER_SESSION, workstreamId, sequence: 2,
+        startedAt: "2026-08-23T10:00:03.000Z", endedAt: "2026-08-23T10:00:04.000Z", request: "unread in failing feed" });
+      await appendTurn(project, unread);
+      const healthy = { ...unread, session_id: createSessionId("claude", "healthy-peer"), turn_id: `turn_${"e".repeat(32)}` };
+      await appendTurn(project, healthy);
+      const path = feedPath(project, priorTurn);
+      const original = await readFile(path);
+      if (fault === "file-limit") {
+        const handle = await open(path, "r+");
+        try { await handle.truncate(64 * 1024 * 1024 + 1); } finally { await handle.close(); }
+      } else if (fault === "record-limit") {
+        await appendFile(path, "x".repeat(8 * 1024 * 1024 + 1));
+      } else if (fault === "permission") await chmod(path, 0);
+      else await rename(path, `${path}.absent`);
+
+      try {
+        const snapshot = await inspectUnreadPeerTurns(selfOptions(project));
+        assert.equal(snapshot.status, "ready");
+        if (snapshot.status !== "ready") return;
+        assert.equal(snapshot.unread_count, 1);
+        assert.equal(snapshot.coverage?.state, "incomplete");
+        assert.equal(snapshot.coverage?.unavailable.total, 1);
+        assert.equal(snapshot.coverage?.unavailable.items[0]?.session_id, PEER_SESSION);
+        assert.deepEqual(await store.read("codex", SELF_SESSION), before, "observer never repairs the cursor");
+        const claim = await claimHookNudge({ ...selfOptions(project), marker: "tool_boundary" });
+        assert.equal(claim.status, "ready");
+        if (claim.status === "ready") {
+          assert.equal(claim.claimed, true);
+          assert.match(deliveryFromClaim(claim).text, /at least 1 new peer turn.*coverage incomplete/u);
+        }
+        const after = (await store.read("codex", SELF_SESSION))!;
+        assert.deepEqual(after.feed_cursors.find((feed) => feed.session_id === PEER_SESSION), before.feed_cursors[0]);
+      } finally {
+        if (fault === "permission") await chmod(path, 0o600);
+        else if (fault === "missing") await rename(`${path}.absent`, path);
+        else await writeFile(path, original);
+      }
+      const recovered = await inspectUnreadPeerTurns(selfOptions(project));
+      assert.equal(recovered.status, "ready");
+      if (recovered.status === "ready") {
+        assert.equal(recovered.unread_count, 2);
+        assert.equal(recovered.coverage, undefined);
+      }
+    });
+  }
+});
+
+test("feed isolation never converts unsafe paths into partial success", async (t) => {
+  for (const fault of ["symlink", "hard-link", "directory"] as const) {
+    await t.test(fault, async (t) => {
+      const project = await temporaryProject(t);
+      const workstreamId = await joinPeerAndSelf(project);
+      const record = turnRecord({ sessionId: PEER_SESSION, workstreamId, sequence: 1,
+        startedAt: "2026-08-23T10:00:01.000Z", endedAt: "2026-08-23T10:00:02.000Z", request: "unsafe source" });
+      await appendTurn(project, record);
+      await appendTurn(project, { ...record, session_id: createSessionId("claude", "healthy-source"), turn_id: `turn_${"e".repeat(32)}` });
+      const path = feedPath(project, record);
+      await rename(path, `${path}.original`);
+      if (fault === "symlink") await symlink(`${path}.original`, path);
+      else if (fault === "hard-link") await link(`${path}.original`, path);
+      else await mkdir(path);
+      await assert.rejects(inspectUnreadPeerTurns(selfOptions(project)), /real file|symbolic link|hard links/u);
+      const store = new NudgeCursorStateStore(project);
+      assert.equal(await store.read("codex", SELF_SESSION), undefined);
+    });
+  }
+});
+
 function claudeSelfOptions(
   project: string,
   phase: "begin" | "current" = "current",
@@ -277,7 +370,7 @@ test("a peer turn published before a new reader starts remains unread", async (t
     unread,
   );
 
-  await advanceHookReadCursor({
+  await seedFullyDeliveredCursor({
     ...selfOptions(project),
     now: new Date("2026-08-23T10:00:02.000Z"),
   });
@@ -514,7 +607,7 @@ test("unjoined and selection-pending sessions never create nudge state", async (
     await claimHookNudge({ ...options, marker: "user_prompt" }),
     { status: "not_joined" },
   );
-  assert.deepEqual(await advanceHookReadCursor(options), {
+  assert.deepEqual(await seedFullyDeliveredCursor(options), {
     status: "not_joined",
   });
   const described = await admitHookSession({
@@ -556,7 +649,7 @@ test("unjoined and selection-pending sessions never create nudge state", async (
     await claimHookNudge({ ...options, marker: "stop" }),
     { status: "workstream_pending" },
   );
-  assert.deepEqual(await advanceHookReadCursor(options), {
+  assert.deepEqual(await seedFullyDeliveredCursor(options), {
     status: "workstream_pending",
   });
   await assert.rejects(access(join(project, ".barbaro", "state", "nudge")), {
@@ -671,7 +764,7 @@ test("nudge claims share a high-water and Stop latch atomically", async (t) => {
     7,
   );
 
-  const advanced = await advanceHookReadCursor(selfOptions(project));
+  const advanced = await seedFullyDeliveredCursor(selfOptions(project));
   assert.equal(advanced.status, "ready");
   assert.equal(advanced.unread_count, 2);
   assert.equal((await inspectUnreadPeerTurns(selfOptions(project))).status, "ready");
@@ -897,7 +990,7 @@ test("Stop rollback cannot cross a context revision", async (t) => {
   assert.ok(stopped.status === "ready" && stopped.stop_rollback);
   const store = new NudgeCursorStateStore(project);
   const path = store.cursorPath("codex", SELF_SESSION);
-  const advanced = await advanceHookReadCursor(selfOptions(project));
+  const advanced = await seedFullyDeliveredCursor(selfOptions(project));
   assert.equal(advanced.status, "ready");
   const advancedBytes = await readFile(path);
 
@@ -1031,7 +1124,7 @@ test("Claude v1 migration preserves conservative turns and monotonic generations
       "a definite prompt starts a new Claude turn; a mid-turn hook does not",
     );
 
-    const advanced = await advanceHookReadCursor({
+    const advanced = await seedFullyDeliveredCursor({
       projectRoot: project,
       provider: "claude",
       nativeSessionId: CLAUDE_SELF_NATIVE,
@@ -1094,6 +1187,140 @@ test("v1 empty and Stop markers migrate without weakening delivery safety", asyn
   }
 });
 
+test("v2 migration preserves its exact frontier, revision, announcement ledger and Claude generation", async (t) => {
+  for (const provider of ["codex", "claude"] as const) {
+    const project = await temporaryProject(t);
+    const isCodex = provider === "codex";
+    const workstreamId = isCodex
+      ? await joinPeerAndSelf(project)
+      : await joinCodexPeerAndClaudeSelf(project);
+    const options = isCodex ? selfOptions(project) : claudeSelfOptions(project);
+    const sessionId = isCodex ? SELF_SESSION : CLAUDE_SELF_SESSION;
+    const peer = {
+      provider: isCodex ? "claude" : "codex",
+      sessionId: isCodex ? PEER_SESSION : CODEX_PEER_SESSION,
+      workstreamId,
+    };
+    await appendTurn(project, turnRecord({
+      ...peer, sequence: 1, request: "already fenced history",
+      startedAt: "2026-08-23T09:59:51.000Z", endedAt: "2026-08-23T09:59:52.000Z",
+    }));
+    await claimHookNudge({ ...options, marker: "tool_boundary", now: T_ZERO });
+    await appendTurn(project, turnRecord({
+      ...peer, sequence: 2, request: "unread news",
+      startedAt: "2026-08-23T10:00:01.000Z", endedAt: "2026-08-23T10:00:02.000Z",
+    }));
+    const claimed = await claimHookNudge({ ...options, marker: "stop" });
+    assert.equal(claimed.status, "ready");
+    assert.equal(claimed.claimed, true);
+    const store = new NudgeCursorStateStore(project);
+    const current = await store.read(provider, sessionId);
+    assert.equal(current?.schema, NUDGE_CURSOR_SCHEMA);
+    const { reads: _reads, schema: _schema, ...base } = current;
+    const legacy = {
+      ...base,
+      ...(isCodex ? {} : {
+        claude_turn_generation: 7,
+        delivery: { ...base.delivery, last_turn: { kind: "claude", generation: 7 } },
+      }),
+      schema: NUDGE_CURSOR_SCHEMA_V2,
+    };
+    const path = store.cursorPath(provider, sessionId);
+    const legacyBytes = `${JSON.stringify(legacy)}\n`;
+    await writeFile(path, legacyBytes);
+    const observed = await inspectUnreadPeerTurns(options);
+    assert.equal(observed.status, "ready");
+    assert.equal(observed.unread_count, 1);
+    assert.equal(await readFile(path, "utf8"), legacyBytes, "observer does not migrate");
+    const migratedClaim = await claimHookNudge({ ...options, marker: "tool_boundary" });
+    assert.equal(migratedClaim.status, "ready");
+    assert.equal(migratedClaim.claimed, false, "migration does not announce old history");
+    const migrated = await store.read(provider, sessionId);
+    assert.equal(migrated?.schema, NUDGE_CURSOR_SCHEMA);
+    assert.deepEqual(migrated, {
+      ...legacy, schema: NUDGE_CURSOR_SCHEMA, reads: emptyNudgeReadState(),
+      updated_at: migrated.updated_at,
+    });
+    assert.equal(migrated.feed_cursors.length, 1);
+    assert.ok(migrated.feed_cursors[0]!.checkpoint.byte_offset > 0);
+    assert.equal((await claimHookNudge({ ...options, marker: "stop" })).status, "already_claimed");
+  }
+});
+
+test("sparse delivery leaves older gaps unread in both scanners and compacts only after gaps close", async (t) => {
+  const project = await temporaryProject(t);
+  const workstreamId = await joinPeerAndSelf(project);
+  const turns = Array.from({ length: 8 }, (_, index) => turnRecord({
+    sessionId: PEER_SESSION, workstreamId, sequence: index + 1,
+    request: `request ${index + 1}`, response: `response ${index + 1}`,
+    startedAt: `2026-08-23T10:00:0${index + 1}.000Z`,
+    endedAt: `2026-08-23T10:00:0${index + 1}.500Z`,
+  }));
+  for (const turn of turns) await appendTurn(project, turn);
+  const claim = await claimHookNudge({ ...selfOptions(project), marker: "tool_boundary" });
+  assert.equal(claim.status, "ready");
+  assert.equal(claim.unread_count, 8);
+  const store = new NudgeCursorStateStore(project);
+  function delivered(turn: BarbaroTurnV1): NudgeReadCoverage {
+    const text = selectTurnText(turn, "response").text;
+    return {
+      provider: turn.provider, session_id: turn.session_id, turn_id: turn.turn_id,
+      record_sha256: readRecordHash(turn), field: "response",
+      field_sha256: readContentHash(text), total_bytes: Buffer.byteLength(text),
+      ranges: [{ start: 0, end: Buffer.byteLength(text) }],
+    };
+  }
+  // These are synthetic, already-attested receipts. Provider attestation is
+  // tested separately; this exercise targets the persistent unread semantics.
+  async function seedCoverage(entries: readonly NudgeReadCoverage[]): Promise<void> {
+    await store.withHookWrite("codex", SELF_SESSION, async (current) => {
+      assert.equal(current?.schema, NUDGE_CURSOR_SCHEMA);
+      return { state: { ...current, reads: mergeReadCoverage(current.reads, entries) }, result: undefined };
+    });
+  }
+  async function assertBoth(expected: number): Promise<void> {
+    const before = await snapshotTree(project);
+    const hook = await inspectUnreadPeerTurns(selfOptions(project));
+    assert.equal(hook.status, "ready");
+    assert.equal(hook.unread_count, expected);
+    const batch = await readUnreadSummaryBatch({ projectRoot: project, recipients: [{
+      provider: "codex", session_id: SELF_SESSION,
+      workstream_id: workstreamId, membership_from: T_ZERO.toISOString(),
+    }] });
+    assert.equal(batch.items[0]!.status, "ready");
+    const summary = batch.items[0]!;
+    assert.equal(summary.status === "ready" ? summary.unread_count : -1, expected);
+    assert.equal(await snapshotTree(project), before);
+  }
+  await seedCoverage(turns.slice(3).map(delivered));
+  await assertBoth(3);
+  const first = delivered(turns[0]!);
+  await seedCoverage([{ ...first, ranges: [{ start: 0, end: 2 }, { start: 3, end: first.total_bytes }] }]);
+  await assertBoth(3);
+  await seedCoverage([{ ...first, ranges: [{ start: 2, end: 3 }] }]);
+  await assertBoth(2);
+  const changed = { ...turns[7]!, outcome: "failed" as const };
+  await replaceFeed(project, "claude", PEER_SESSION, [...turns.slice(0, 7), changed]);
+  await assertBoth(3);
+  await seedCoverage([delivered(turns[1]!), delivered(turns[2]!), delivered(changed)]);
+  await assertBoth(0);
+  const beforeCollapse = await store.read("codex", SELF_SESSION);
+  const zero = await claimHookNudge({ ...selfOptions(project), marker: "tool_boundary" });
+  assert.equal(zero.status, "ready");
+  assert.equal(zero.claimed, false);
+  const collapsed = await store.read("codex", SELF_SESSION);
+  assert.equal(collapsed?.schema, NUDGE_CURSOR_SCHEMA);
+  assert.equal(collapsed.reads.coverage.length, 0);
+  assert.equal(collapsed.cursor_revision, beforeCollapse?.cursor_revision);
+  assert.ok(collapsed.feed_cursors[0]!.checkpoint.byte_offset > 0);
+  await assertBoth(0);
+  await appendTurn(project, turnRecord({
+    sessionId: PEER_SESSION, workstreamId, sequence: 9, request: "post-snapshot arrival",
+    startedAt: "2026-08-23T10:00:09.000Z", endedAt: "2026-08-23T10:00:09.500Z",
+  }));
+  await assertBoth(1);
+});
+
 test("a leading context acknowledgement upgrades v1 and fully rearms v2", async (t) => {
   const project = await temporaryProject(t);
   const workstreamId = await joinPeerAndSelf(project);
@@ -1121,7 +1348,7 @@ test("a leading context acknowledgement upgrades v1 and fully rearms v2", async 
     ["user_prompt", "stop"],
   );
 
-  const advanced = await advanceHookReadCursor(selfOptions(project));
+  const advanced = await seedFullyDeliveredCursor(selfOptions(project));
   assert.equal(advanced.status, "ready");
   assert.equal(advanced.unread_count, 1);
   const after = await store.read("codex", SELF_SESSION);
@@ -1363,7 +1590,7 @@ test("runtime turn evidence and every v2 field stay strictly validated", async (
   }
 });
 
-test("settling a missing feed prunes its retained checkpoint", async (t) => {
+test("a missing feed retains its checkpoint and cannot establish complete quiet", async (t) => {
   const project = await temporaryProject(t);
   const workstreamId = await joinPeerAndSelf(project);
   await claimHookNudge({
@@ -1380,7 +1607,7 @@ test("settling a missing feed prunes its retained checkpoint", async (t) => {
     request: "will be acknowledged",
   });
   await appendTurn(project, peerTurn);
-  await advanceHookReadCursor(selfOptions(project));
+  await seedFullyDeliveredCursor(selfOptions(project));
   const store = new NudgeCursorStateStore(project);
   assert.equal(
     (await store.read("codex", SELF_SESSION))?.feed_cursors.length,
@@ -1394,9 +1621,10 @@ test("settling a missing feed prunes its retained checkpoint", async (t) => {
   });
   assert.equal(settled.status, "ready");
   assert.equal(settled.unread_count, 0);
+  assert.equal(settled.coverage?.state, "incomplete");
   assert.equal(
     (await store.read("codex", SELF_SESSION))?.feed_cursors.length,
-    0,
+    1,
   );
 });
 
@@ -1460,7 +1688,7 @@ test("a rebuilt feed replays conservatively and cannot blind later appends", asy
   });
   await appendTurn(project, first);
   await appendTurn(project, second);
-  await advanceHookReadCursor(selfOptions(project));
+  await seedFullyDeliveredCursor(selfOptions(project));
 
   // A canonical rebuild invalidates the physical checkpoint. Replaying an
   // acknowledged turn is safer than WatchEngine's silent re-baseline.
