@@ -663,6 +663,8 @@ function providerDisplayName(provider: string): string {
       return "Codex";
     case "claude":
       return "Claude";
+    case "agy":
+      return "Antigravity";
     default:
       return provider.length === 0
         ? "Unknown provider"

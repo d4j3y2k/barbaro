@@ -870,7 +870,7 @@ const CREATED_FRAME = {
   idLine: "ws_d3c1a9e4 \u00b7 open",
   commands: [
     {
-      heading: "Join from Claude Code",
+      heading: "Join from Claude Code or Antigravity",
       text: "/barbaro join motion-study",
       selected: true,
       manualHighlight: false,
@@ -989,7 +989,7 @@ test("create-success-punched-64x28 renders byte-identically", async () => {
     truth: CREATED_TRUTH,
     frame: CREATED_FRAME,
     bench: [
-      "Claude Code join command \u00b7 selected",
+      "Claude Code or Antigravity join command \u00b7 selected",
       "Punched \u00b7 /barbaro join motion-study",
       "Clipboard updated. The command was not run.",
       "ID \u00b7 ws_d3c1a9e4b72f54a0c86120e2f7d9aa15",
@@ -1015,7 +1015,7 @@ test("create-success-no-clipboard-64x28 renders byte-identically", async () => {
       ],
     },
     bench: [
-      "Claude Code join command \u00b7 selected",
+      "Claude Code or Antigravity join command \u00b7 selected",
       "/barbaro join motion-study",
       "Clipboard unavailable. Copy the selected line manually.",
       "The command was not run.",

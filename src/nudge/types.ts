@@ -1,3 +1,4 @@
+import type { ParticipatingProvider } from "../contracts/providers.js";
 import type { JsonlCheckpoint } from "../core/checkpoint.js";
 import type { FeedReadCoverage } from "../core/feed-availability.js";
 import type { NudgeReadState } from "./read-state.js";
@@ -59,7 +60,7 @@ export interface NudgeMarkersV2 {
 /** Exact hook turn that most recently received a model-visible delivery. */
 export type NudgeDeliveryTurnV2 =
   | {
-      readonly kind: "codex";
+      readonly kind: "codex" | "agy";
       readonly turn_id: string;
     }
   | {
@@ -75,7 +76,7 @@ export interface NudgeDeliveryV2 {
 
 /** In-lock receipt used only to undo a Stop claim whose lease write failed. */
 export interface HookStopClaimRollback {
-  readonly provider: "codex" | "claude";
+  readonly provider: ParticipatingProvider;
   readonly session_id: string;
   readonly workstream_id: string;
   readonly membership_from: string;
@@ -116,7 +117,7 @@ export type NudgeCursor = NudgeCursorV1 | NudgeCursorV2 | NudgeCursorV3;
 /** Provider turn evidence supplied by the admitted main-agent hook. */
 export type HookNudgeTurn =
   | {
-      readonly kind: "codex";
+      readonly kind: "codex" | "agy";
       readonly turn_id: string;
     }
   | {

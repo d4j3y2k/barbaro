@@ -1,5 +1,7 @@
 import { opendir, stat } from "node:fs/promises";
 import { join } from "node:path";
+
+import { type ParticipatingProvider, PARTICIPATING_PROVIDERS } from "../contracts/providers.js";
 import { ActiveLeaseStore } from "../active/store.js";
 import { isActiveLeaseVisible } from "../active/validation.js";
 import { SafeStoreBoundary } from "../core/safe-store.js";
@@ -8,7 +10,7 @@ import { readSessionRecentTurnFacts } from "./catalogue.js";
 
 export const RECENT_MEMBERS_PER_PROVIDER = 8;
 export interface ReaderRecentMember {
-  readonly provider: "codex" | "claude";
+  readonly provider: ParticipatingProvider;
   readonly session_id: string;
   readonly workstream_id: string;
   readonly membership_from: string;
@@ -35,7 +37,7 @@ export async function readRecentMembers(projectRoot: string, now: Date) {
   const active = new ActiveLeaseStore(join(projectRoot, ".barbaro/active"));
   const providers = [];
   const reference = now.getTime();
-  for (const provider of ["codex", "claude"] as const) {
+  for (const provider of PARTICIPATING_PROVIDERS) {
     const selected: ReaderRecentMember[] = [];
     let candidates = 0; let files = 0; let incomplete = 0;
     let invalidParticipation = 0; let unavailableLeases = 0; let unavailableFeeds = 0;

@@ -7,8 +7,9 @@ high-assurance workflows.
 ## Current limitations
 
 - Provider session formats are private, version-sensitive implementation
-  details. The Codex adapter is version-pinned and the Claude Code adapter is
-  based on observed traces; a provider update can require a Barbaro update.
+  details. The Codex adapter is version-pinned, the Claude Code adapter uses
+  observed traces, and the Antigravity CLI adapter uses native hook payloads
+  verified on agy 1.5.18. A provider update can require a Barbaro update.
 - Active path claims are advisory. They do not lock files, prevent concurrent
   writes, or replace normal Git branch and worktree isolation.
 - The v1 interchange schemas are the current normative contract, but the CLI,

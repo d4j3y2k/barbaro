@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 
+import { type ParticipatingProvider, isParticipatingProvider } from "../contracts/providers.js";
 import {
   validateJsonlCheckpoint,
   type JsonlCheckpoint,
@@ -251,7 +252,7 @@ function parseCursorV2(
     "claude_turn_generation",
     "updated_at",
   ]);
-  if (expectedProvider !== "codex" && expectedProvider !== "claude") {
+  if (!isParticipatingProvider(expectedProvider)) {
     throw new TypeError("nudge cursor v2 provider is unsupported");
   }
   const markers = parseMarkersV2(value.markers, base.cursor_revision);
@@ -261,7 +262,7 @@ function parseCursorV2(
       throw new TypeError("Claude nudge cursor generation is invalid");
     }
   } else if (claudeTurnGeneration !== undefined) {
-    throw new TypeError("Codex nudge cursor cannot carry a Claude generation");
+    throw new TypeError("Only Claude nudge cursors carry a generation");
   }
   const delivery = parseDelivery(
     value.delivery,
@@ -394,7 +395,7 @@ function parseMarkersV2(value: unknown, revision: number): NudgeMarkersV2 {
 
 function parseDelivery(
   value: unknown,
-  provider: "codex" | "claude",
+  provider: ParticipatingProvider,
   claudeTurnGeneration: number | undefined,
 ): NudgeCursorV2["delivery"] {
   if (!isObject(value)) {
@@ -418,22 +419,22 @@ function parseDelivery(
 
 function parseDeliveryTurn(
   value: unknown,
-  provider: "codex" | "claude",
+  provider: ParticipatingProvider,
   claudeTurnGeneration: number | undefined,
 ): NudgeDeliveryTurnV2 {
   if (!isObject(value)) {
     throw new TypeError("nudge cursor delivery turn must be an object");
   }
-  if (provider === "codex") {
+  if (provider === "codex" || provider === "agy") {
     assertAllowedKeys(value, ["kind", "turn_id"]);
     if (
-      value.kind !== "codex" ||
+      value.kind !== provider ||
       typeof value.turn_id !== "string" ||
       !TURN_ID_PATTERN.test(value.turn_id)
     ) {
-      throw new TypeError("Codex nudge cursor delivery turn is invalid");
+      throw new TypeError("Invalid provider delivery turn");
     }
-    return { kind: "codex", turn_id: value.turn_id };
+    return { kind: provider, turn_id: value.turn_id };
   }
   assertAllowedKeys(value, ["kind", "generation"]);
   if (

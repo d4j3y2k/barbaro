@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { realpath } from "node:fs/promises";
 
+import { SESSION_VARIABLES } from "../contracts/providers.js";
 import { stableStringify } from "../core/stable-json.js";
 import { currentDeliveryTurn, withHookCursor, type HookNudgeClaimOptions } from "./unread.js";
 import {
@@ -11,6 +12,7 @@ import { readCommandArguments, readQueryHash, ReadUsageError, resolveReadQuery, 
 import { nudgeCursorFits } from "./store.js";
 
 export interface HookReadOptions extends Omit<HookNudgeClaimOptions, "marker"> {
+  readonly workingDirectory?: string;
   readonly toolName: unknown;
   readonly toolUseId: unknown;
   readonly toolInput: unknown;
@@ -36,13 +38,14 @@ export async function resolveHookRead(options: HookReadOptions): Promise<HookRea
   if (typeof command !== "string" || (input as Record<string, unknown>).run_in_background === true) return undefined;
   const encodedInput = stableStringify(input);
   if (Buffer.byteLength(encodedInput) > 8192) return undefined;
+  const cwd = options.workingDirectory ?? options.projectRoot;
   const args = readCommandArguments(command, {
-    PWD: options.projectRoot,
-    [options.provider === "codex" ? "CODEX_SESSION_ID" : "CLAUDE_CODE_SESSION_ID"]: options.nativeSessionId,
+    PWD: cwd,
+    [SESSION_VARIABLES[options.provider]]: options.nativeSessionId,
   });
   if (args === undefined) return undefined;
   let query: ReadQuery;
-  try { query = await resolveReadQuery(args, options.projectRoot); }
+  try { query = await resolveReadQuery(args, cwd, options.provider === "agy" ? options.nativeSessionId : ""); }
   catch (error: unknown) {
     if (error instanceof ReadUsageError) return undefined;
     throw error;

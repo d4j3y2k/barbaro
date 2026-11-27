@@ -25,15 +25,18 @@ export interface HookNudgeDelivery {
 
 /** Claim one delivery channel and render its model-visible one-line nudge. */
 export async function claimHookNudgeDelivery(
-  options: HookNudgeClaimOptions,
+  options: HookNudgeClaimOptions & { readonly workingDirectory?: string },
 ): Promise<HookNudgeDelivery | undefined> {
   const claim = await claimHookNudge(options);
   if (claim.status !== "ready" || !claim.claimed) return undefined;
-  return deliveryFromClaim(claim);
+  return deliveryFromClaim(claim,
+    options.workingDirectory !== undefined && options.workingDirectory !== options.projectRoot
+      ? options.projectRoot : undefined);
 }
 
 export function deliveryFromClaim(
   claim: HookNudgeClaimReady,
+  projectRoot?: string,
 ): HookNudgeDelivery {
   if (!claim.claimed || claim.unread_count <= 0) {
     throw new TypeError("a nudge delivery requires a claimed unread turn");
@@ -47,8 +50,8 @@ export function deliveryFromClaim(
   const excerpt = boundedOneLine(rawExcerpt, LATEST_TURN_EXCERPT_BYTES);
   const noun = claim.unread_count === 1 ? "turn" : "turns";
   const outside = claim.outside_delivered_window === true;
-  const guidance = outside ? readGapGuidance(claim.provider, claim.session_id, claim.workstream_id)
-    : readContextGuidance(claim.provider, claim.session_id, claim.workstream_id);
+  const guidance = outside ? readGapGuidance(claim.provider, claim.session_id, claim.workstream_id, projectRoot)
+    : readContextGuidance(claim.provider, claim.session_id, claim.workstream_id, projectRoot);
   return {
     marker: claim.marker,
     cursor_revision: claim.cursor_revision,

@@ -1,6 +1,7 @@
 import { realpath, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 
+import { type ParticipatingProvider, isParticipatingProvider, scopedSessionId } from "../contracts/providers.js";
 import { stableStringify } from "../core/stable-json.js";
 import { participationMemberships, SessionParticipationStore } from "../hooks/participation.js";
 import { WorkstreamStore } from "../workstreams/store.js";
@@ -9,7 +10,7 @@ import { READ_OUTPUT_CEILING_BYTES, readContentHash } from "./read-state.js";
 export class ReadUsageError extends TypeError {}
 
 export interface ReadRecipient {
-  readonly provider: "codex" | "claude";
+  readonly provider: ParticipatingProvider;
   readonly session_id: string;
   readonly workstream_id: string;
   readonly membership_from: string;
@@ -40,6 +41,7 @@ export function readQueryHash(query: ReadQuery): string {
 export async function resolveReadQuery(
   argv: readonly string[],
   cwd: string,
+  agyConversationId = process.env.ANTIGRAVITY_CONVERSATION_ID,
 ): Promise<ReadQuery> {
   const kind = argv[0] === "context" ? "context"
     : argv[0] === "turn" && argv[1] === "show" ? "turn" : undefined;
@@ -67,11 +69,11 @@ export async function resolveReadQuery(
     }
   }
   const provider = flags.get("provider");
-  const sessionId = flags.get("session-id");
+  const sessionId = scopedSessionId(provider, flags.get("session-id"), agyConversationId);
   if ((provider === undefined) !== (sessionId === undefined)) {
     throw new ReadUsageError("--provider and --session-id must be supplied together");
   }
-  if (provider !== undefined && provider !== "codex" && provider !== "claude") {
+  if (provider !== undefined && !isParticipatingProvider(provider)) {
     throw new ReadUsageError(`Unknown provider: ${provider}`);
   }
   const all = flags.has("all-workstreams");
@@ -132,7 +134,7 @@ export function readCommandArguments(
   command: string,
   variables: Readonly<Record<string, string>>,
 ): readonly string[] | undefined {
-  if (Buffer.byteLength(command) > 8192 || /[\r\n;|&<>`#\u0000]/u.test(command)) return undefined;
+  if (Buffer.byteLength(command) > 8192 || /[\r\n\u0000]/u.test(command)) return undefined;
   const tokens: string[] = [];
   let token = "";
   let started = false;
@@ -142,7 +144,7 @@ export function readCommandArguments(
     if (c === quote) { quote = undefined; continue; }
     if (quote === undefined && (c === "'" || c === '"')) { quote = c; started = true; continue; }
     if (quote !== "'" && c === "$") {
-      const match = /^\$(?:\{(PWD|CODEX_SESSION_ID|CLAUDE_CODE_SESSION_ID)\}|(PWD|CODEX_SESSION_ID|CLAUDE_CODE_SESSION_ID)(?![a-zA-Z0-9_]))/u.exec(command.slice(index));
+      const match = /^\$(?:\{(PWD|CODEX_SESSION_ID|CLAUDE_CODE_SESSION_ID|ANTIGRAVITY_CONVERSATION_ID)\}|(PWD|CODEX_SESSION_ID|CLAUDE_CODE_SESSION_ID|ANTIGRAVITY_CONVERSATION_ID)(?![a-zA-Z0-9_]))/u.exec(command.slice(index));
       const name = match?.[1] ?? match?.[2];
       const value = name === undefined ? undefined : variables[name];
       if (match === null || value === undefined) return undefined;
@@ -156,6 +158,11 @@ export function readCommandArguments(
       if (quote === '"' && !['"', "\\", "$", "`"].includes(next)) token += "\\";
       token += next; started = true; continue;
     }
+    // Operators in a quoted project path are literal characters. Backticks
+    // still evaluate inside double quotes, and unquoted shell syntax is never
+    // part of an admitted foreground read.
+    if ((quote !== "'" && c === "`") ||
+        (quote === undefined && /[;|&<>#]/u.test(c))) return undefined;
     if (quote === undefined && /[()*?\[\]{}~!]/u.test(c)) return undefined;
     if (quote === undefined && /[ \t]/u.test(c)) {
       if (started) tokens.push(token);

@@ -7,6 +7,7 @@ import {
 } from "node:fs/promises";
 import { resolve } from "node:path";
 
+import { type ParticipatingProvider, isParticipatingProvider } from "../contracts/providers.js";
 import type { BarbaroTurnV1 } from "../contracts/v1.js";
 import {
   fileIdentityEquals,
@@ -894,7 +895,7 @@ function parseCursorV2(
     "claude_turn_generation",
     "updated_at",
   ]);
-  if (provider !== "codex" && provider !== "claude") {
+  if (!isParticipatingProvider(provider)) {
     throw new TypeError("unsupported cursor provider");
   }
   if (!isObject(value.markers)) throw new TypeError("invalid cursor markers");
@@ -916,7 +917,7 @@ function parseCursorV2(
       throw new TypeError("invalid Claude cursor generation");
     }
   } else if (value.claude_turn_generation !== undefined) {
-    throw new TypeError("Codex cursor carries Claude generation");
+    throw new TypeError("Non-Claude cursor carries Claude generation");
   }
   return {
     schema: NUDGE_CURSOR_SCHEMA_V2,
@@ -992,7 +993,7 @@ function parseCursorBase(
 
 function validateDeliveryTurn(
   delivery: Record<string, unknown>,
-  provider: "codex" | "claude",
+  provider: ParticipatingProvider,
   generation: unknown,
 ): void {
   const value = delivery.last_turn;
@@ -1000,14 +1001,14 @@ function validateDeliveryTurn(
   if (delivery.highest_unread_count === 0 || !isObject(value)) {
     throw new TypeError("invalid cursor delivery turn");
   }
-  if (provider === "codex") {
+  if (provider === "codex" || provider === "agy") {
     assertAllowedKeys(value, ["kind", "turn_id"]);
     if (
-      value.kind !== "codex" ||
+      value.kind !== provider ||
       typeof value.turn_id !== "string" ||
       !TURN_ID_PATTERN.test(value.turn_id)
     ) {
-      throw new TypeError("invalid Codex delivery turn");
+      throw new TypeError("invalid provider delivery turn");
     }
     return;
   }

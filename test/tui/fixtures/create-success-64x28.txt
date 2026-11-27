@@ -7,7 +7,7 @@ motion-study was created. Creation itself enrolled no sessions.
 │ Explore the motion-study interface for every adventurous...  │
 │                      ws_d3c1a9e4 · open                      │
 │                                                              │
-│  Join from Claude Code                                       │
+│  Join from Claude Code or Antigravity                        │
 │> /barbaro join motion-study                                  │
 │                                                              │
 │  Join from Codex                                             │

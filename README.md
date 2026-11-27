@@ -1,10 +1,9 @@
 # Barbaro
 
-Barbaro is local coordination for Codex and Claude Code sessions working in
+Barbaro coordinates Codex, Claude Code, and Antigravity CLI (agy) sessions in
 the same checkout. Enrolled sessions share completed turns, recent actions,
-and advisory file claims without modifying either provider's session logs.
-Related sessions join a named **workstream**, which scopes their routine
-context and wake-ups to one objective.
+and advisory file claims. Related sessions join a named **workstream**,
+which scopes their routine context and wake-ups to one objective.
 
 Barbaro does not launch agents, stream in-progress model output, lock files,
 replace Git or worktree isolation, or sync across devices. It has no runtime
@@ -27,14 +26,14 @@ the CLI and terminal dashboard read them.
 
 ```text
 Codex Desktop rollout ─┐
-                       ├─ read-only hooks/ingest ─> .barbaro/ ─> TUI
-Claude Code trace ─────┘                                  ├─> context
-                                                         ├─> watch
-                                                         └─> await
+Claude Code trace ─────┼─ hooks/ingest ─> .barbaro/ ─┬─> TUI
+Antigravity CLI hooks ─┘                             ├─> context
+                                                     ├─> watch
+                                                     └─> await
 ```
 
 - A workstream is a named objective shared by one or more sessions. It can
-  contain Codex sessions, Claude Code sessions, or both.
+  include any combination of Codex, Claude Code, and Antigravity CLI sessions.
 - Sessions opt in individually. Installing Barbaro does not enroll anything,
   and a new provider session starts dormant.
 - Peers receive completed turns and bounded context, never a live partial
@@ -51,7 +50,9 @@ npm install --global barbaro
 barbaro --version
 ```
 
-Then install the provider skills and hooks using [`INSTALL.md`](INSTALL.md).
+For Antigravity workstreams, install the [GitHub build with the agy plugin](INSTALL.md#install-a-github-release-asset), then enable it using the [Antigravity plugin setup](INSTALL.md#install-the-antigravity-cli-plugin).
+
+Install the provider skills and hooks using [`INSTALL.md`](INSTALL.md).
 That guide covers user-wide and project-local setup, the verified GitHub
 release fallback, and the required `.barbaro/` ignore rule. Choose one setup
 scope per provider; do not register the same hooks at both user and project
@@ -59,23 +60,22 @@ scope.
 
 ## Quick start
 
-Complete the skill and hook setup in [`INSTALL.md`](INSTALL.md), then open both
-provider sessions in the same checkout. In Codex Desktop, create and join a
-workstream with a leading Barbaro skill invocation:
+Complete the skill and hook setup in [`INSTALL.md`](INSTALL.md), then open
+the participating sessions in the same checkout. In Codex Desktop, start a
+workstream with the Barbaro skill.
 
 ```text
 $barbaro new docs-refresh Update the public documentation.
 ```
 
-Join that workstream from Claude Code:
+In Claude Code or Antigravity CLI, join that workstream with the provider command.
 
 ```text
 /barbaro join docs-refresh Review the documentation for accuracy.
 ```
 
-The providers can be reversed, and a workstream may contain multiple sessions
-from the same provider. A bare `$barbaro` or `/barbaro` lists available
-workstreams and joins nothing.
+Any provider can create the workstream, and each can have multiple sessions.
+A bare `$barbaro` or `/barbaro` lists available workstreams and joins nothing.
 
 From the project root, open the dashboard:
 
@@ -130,7 +130,7 @@ documents all display sizes, controls, and options.
 | `barbaro watch` | Stream new turns, joins, incidents, and stale leases. |
 | `barbaro await` | Wait once for unread peer turns without consuming them. |
 | `barbaro workstream …` | List, inspect, create, complete, or reopen workstreams. |
-| `barbaro codex status` / `barbaro claude status` | Check whether one provider session is enrolled and where. |
+| `barbaro codex status` / `barbaro claude status` / `barbaro agy status` | Check whether one provider session is enrolled and where. |
 
 Run `barbaro --help` for the complete CLI surface. The [usage guide](docs/usage.md)
 explains the difference between `context`, `watch`, and `await` and includes

@@ -1329,8 +1329,8 @@ export async function runComfortTui(
   function joinCommands(name: string) {
     return [
       {
-        heading: "Join from Claude Code",
-        label: "Claude Code join command",
+        heading: "Join from Claude Code or Antigravity",
+        label: "Claude Code or Antigravity join command",
         text: `/barbaro join ${name}`,
       },
       {

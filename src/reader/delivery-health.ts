@@ -1,5 +1,7 @@
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
+
+import type { ParticipatingProvider } from "../contracts/providers.js";
 import { SafeStoreBoundary } from "../core/safe-store.js";
 import { NudgeCursorStateStore } from "../nudge/store.js";
 import { NUDGE_CURSOR_SCHEMA } from "../nudge/types.js";
@@ -7,7 +9,7 @@ import { READ_INVOCATION_TTL_MS } from "../nudge/read-state.js";
 import { readReadObservations } from "../hooks/read-observation.js";
 
 /** Counts and native evidence metadata only; never returns pending commands or output. */
-export async function readDeliveryHealth(projectRoot: string, provider: "codex" | "claude", sessionId: string, now: Date) {
+export async function readDeliveryHealth(projectRoot: string, provider: ParticipatingProvider, sessionId: string, now: Date) {
   const observation = await readReadObservations(projectRoot, provider, sessionId);
   const observations = observation.state === "ok" ? observation.journal.observations : [];
   const latest = observations.at(-1);

@@ -70,6 +70,9 @@ import {
   WorkstreamStore,
 } from "./workstreams/index.js";
 import { collectWorkstreamPresence } from "./workstreams/store.js";
+import { isParticipatingProvider, scopedSessionId } from "./contracts/providers.js";
+import { agyProjectRoot } from "./providers/agy/project-root.js";
+import { handleAgyHook } from "./hooks/agy.js";
 import { runClaudeTrace } from "./runner/claude.js";
 import { runCodexTrace } from "./runner/codex.js";
 import {
@@ -133,7 +136,7 @@ export async function main(
   }
 
   if (
-    (argv[0] === "codex" || argv[0] === "claude") &&
+    isParticipatingProvider(argv[0]) &&
     argv[1] === "status"
   ) {
     const provider: ParticipatingProvider = argv[0];
@@ -141,8 +144,9 @@ export async function main(
       argv.slice(2),
       new Set(["session-id", "project-root"]),
     );
-    const nativeSessionId = requiredFlag(flags, "session-id");
-    const projectRoot = flags.get("project-root") ?? process.cwd();
+    const nativeSessionId = scopedSessionId(provider, flags.get("session-id")) ?? requiredFlag(flags, "session-id");
+    const projectRoot = flags.get("project-root") ??
+      (provider === "agy" ? await agyProjectRoot(process.cwd()) : process.cwd());
     const participation = await new SessionParticipationStore(projectRoot).read(
       provider,
       nativeSessionId,
@@ -504,6 +508,22 @@ export async function main(
     }
   }
 
+  if (argv[0] === "hook" && argv[1] === "agy") {
+    const event = argv[2];
+    if (argv.length !== 3 || event === undefined ||
+        !["PreInvocation", "PreToolUse", "PostToolUse", "Stop"].includes(event)) {
+      throw new UsageError("barbaro hook agy requires PreInvocation, PreToolUse, PostToolUse or Stop");
+    }
+    let output: object = {};
+    try {
+      output = await handleAgyHook(event, JSON.parse(await readStdin()));
+    } catch {
+      // Malformed input or unavailable local state must not interrupt Antigravity.
+    }
+    io.stdout(`${stableStringify(output)}\n`);
+    return 0;
+  }
+
   if (argv[0] === "claude" && argv[1] === "ingest") {
     const flags = parseFlags(
       argv.slice(2),
@@ -622,6 +642,8 @@ function isRecognizedHelpTarget(argv: readonly string[]): boolean {
       (HELP_FLAGS.has(subcommand) || EVIDENCE_HELP_COMMANDS.has(subcommand))
     );
   }
+  if (command === "agy") return subcommand === "status" || (subcommand !== undefined && HELP_FLAGS.has(subcommand));
+  if (command === "hook") return subcommand === "agy";
   if (command === "codex" || command === "claude") {
     return (
       subcommand !== undefined &&
@@ -812,7 +834,7 @@ async function runEvidenceReaderCommand(
     new Set(["all-workstreams"]),
   );
   const provider = requiredFlag(flags, "provider");
-  if (provider !== "claude" && provider !== "codex") {
+  if (!isParticipatingProvider(provider)) {
     throw new UsageError(`Unknown provider: ${provider}`);
   }
   const sessionId = requiredFlag(flags, "session-id");
@@ -885,14 +907,13 @@ async function resolveLosslessReaderScope(
   projectRoot: string,
 ): Promise<string | undefined> {
   const provider = flags.get("provider");
-  const sessionId = flags.get("session-id");
+  const sessionId = scopedSessionId(provider, flags.get("session-id"));
   if ((provider === undefined) !== (sessionId === undefined)) {
     throw new UsageError("--provider and --session-id must be supplied together");
   }
   if (
     provider !== undefined &&
-    provider !== "claude" &&
-    provider !== "codex"
+    !isParticipatingProvider(provider)
   ) {
     throw new UsageError(`Unknown provider: ${provider}`);
   }
@@ -1043,7 +1064,7 @@ interface ResolvedAwaitCursor {
 function assertAwaitIdentityFlags(flags: ReadonlyMap<string, string>): void {
   const self = flags.get("self");
   const provider = flags.get("provider");
-  const nativeSessionId = flags.get("session-id");
+  const nativeSessionId = scopedSessionId(provider, flags.get("session-id"));
   if (
     self !== undefined &&
     (provider !== undefined || nativeSessionId !== undefined)
@@ -1097,7 +1118,7 @@ async function resolveAwaitCursor(
     const match = matches[0];
     if (match === undefined) {
       io.stderr(
-        "this session has not joined Barbaro — run /barbaro (Claude Code) or $barbaro (Codex) first\n",
+        "this session has not joined Barbaro — run /barbaro (Claude Code) or $barbaro (Codex or Antigravity) first\n",
       );
       return WATCH_SELF_REFUSED;
     }
@@ -1105,9 +1126,9 @@ async function resolveAwaitCursor(
     participation = match.participation;
   } else {
     const rawProvider = flags.get("provider");
-    const nativeSessionId = flags.get("session-id");
+    const nativeSessionId = scopedSessionId(rawProvider, flags.get("session-id"));
     if (
-      (rawProvider !== "claude" && rawProvider !== "codex") ||
+      !isParticipatingProvider(rawProvider) ||
       nativeSessionId === undefined
     ) {
       throw new UsageError(`Unknown provider: ${String(rawProvider)}`);
@@ -1116,7 +1137,7 @@ async function resolveAwaitCursor(
     participation = await store.read(provider, nativeSessionId);
     if (participation === undefined) {
       io.stderr(
-        "this session has not joined Barbaro — run /barbaro (Claude Code) or $barbaro (Codex) first\n",
+        "this session has not joined Barbaro — run /barbaro (Claude Code) or $barbaro (Codex or Antigravity) first\n",
       );
       return WATCH_SELF_REFUSED;
     }
@@ -1163,7 +1184,7 @@ async function resolveWatchSelf(
 ): Promise<ResolvedWatchSelf | typeof WATCH_SELF_REFUSED> {
   const self = flags.get("self");
   const provider = flags.get("provider");
-  const nativeSessionId = flags.get("session-id");
+  const nativeSessionId = scopedSessionId(provider, flags.get("session-id"));
   if (
     self !== undefined &&
     (provider !== undefined || nativeSessionId !== undefined)
@@ -1184,7 +1205,7 @@ async function resolveWatchSelf(
     ).find((candidate) => candidate.session_id === self);
     if (participation === undefined) {
       io.stderr(
-        "this session has not joined Barbaro — run /barbaro (Claude Code) or $barbaro (Codex) first\n",
+        "this session has not joined Barbaro — run /barbaro (Claude Code) or $barbaro (Codex or Antigravity) first\n",
       );
       return WATCH_SELF_REFUSED;
     }
@@ -1198,7 +1219,7 @@ async function resolveWatchSelf(
   if (provider === undefined || nativeSessionId === undefined) {
     return {};
   }
-  if (provider !== "claude" && provider !== "codex") {
+  if (!isParticipatingProvider(provider)) {
     throw new UsageError(`Unknown provider: ${provider}`);
   }
   // Resolving through the participation store doubles as the consent gate: a
@@ -1210,7 +1231,7 @@ async function resolveWatchSelf(
   );
   if (participation === undefined) {
     io.stderr(
-      "this session has not joined Barbaro — run /barbaro (Claude Code) or $barbaro (Codex) first\n",
+      "this session has not joined Barbaro — run /barbaro (Claude Code) or $barbaro (Codex or Antigravity) first\n",
     );
     return WATCH_SELF_REFUSED;
   }
@@ -1252,12 +1273,12 @@ async function resolveWorkstreamScope(
   }
   if (flags.has("self")) return stableSelfWorkstreamId;
   const provider = flags.get("provider");
-  const nativeSessionId = flags.get("session-id");
+  const nativeSessionId = scopedSessionId(provider, flags.get("session-id"));
   if ((provider === undefined) !== (nativeSessionId === undefined)) {
     throw new UsageError("--provider and --session-id must be supplied together");
   }
   if (provider === undefined || nativeSessionId === undefined) return undefined;
-  if (provider !== "claude" && provider !== "codex") {
+  if (!isParticipatingProvider(provider)) {
     throw new UsageError(`Unknown provider: ${provider}`);
   }
   const participation = await new SessionParticipationStore(projectRoot).read(
@@ -1533,6 +1554,8 @@ function helpText(): string {
     `                  page text and JSON.parse it once.\n\n` +
     `  Scoped context also includes project_claims across the checkout.\n` +
     `  Claims are advisory; inspect confidence, expiry and shown/total coverage.\n\n` +
+    `  barbaro agy status [--session-id <id>] [--project-root <path>]\n` +
+    `  barbaro hook agy <PreInvocation|PreToolUse|PostToolUse|Stop>\n` +
     `  barbaro codex status --session-id <id> [--project-root <path>]\n` +
     `  barbaro codex ingest --trace <rollout.jsonl> [--project-root <path>] [--reset]\n` +
     `  barbaro codex hook          # synchronous active-state hook via stdin\n` +
@@ -1571,13 +1594,13 @@ function helpText(): string {
                               # with matte, and answer below 12x6 with the
                               # true-size notice
   barbaro read context [--project-root <path>] [--byte-budget <n>]
-                  [--provider <claude|codex> --session-id <id>]
+                  [--provider <claude|codex|agy> --session-id <id>]
                   [--workstream <name|ws_id> | --all-workstreams]
                   [--turns-per-session <n>]
                               # delivery-capable context; defaults to 8192 bytes
                               # including the complete envelope and newline
   barbaro read turn show <turn_id> [--field <record|request|response|actions>]
-                  [--provider <claude|codex> --session-id <id>]
+                  [--provider <claude|codex|agy> --session-id <id>]
                   [--project-root <path>] [--cursor <cursor>] [--byte-budget <n>]
                               # exact attention pages can accumulate delivery
                               # only through a matching successful provider hook;
@@ -1587,14 +1610,14 @@ function helpText(): string {
                               # no pipes, background jobs, or output transformations
   barbaro context [--project-root <path>] [--byte-budget <n>]
                   [--turns-per-session <n>]
-                  [--provider <claude|codex> --session-id <id>]
+                  [--provider <claude|codex|agy> --session-id <id>]
                   [--workstream <name|ws_id> | --all-workstreams]
                               # live leases + newest turns, byte-bounded;
                               # scoped to the session's workstream when given
                               # observer-only under alpha.6 hooks
   barbaro turn list [--project-root <path>] [--byte-budget <n>] [--cursor <cursor>]
                     [--max-file-bytes <n>] [--max-record-bytes <n>]
-                    [--provider <claude|codex> --session-id <id>]
+                    [--provider <claude|codex|agy> --session-id <id>]
                     [--workstream <name|ws_id> | --all-workstreams]
                               # exhaustive newest-first canonical turn index;
                               # default budget 131072 bytes; a page must fit
@@ -1603,11 +1626,11 @@ function helpText(): string {
   barbaro turn show <turn_id> [--project-root <path>] [--byte-budget <n>]
                     [--field <record|request|response|actions>] [--cursor <cursor>]
                     [--max-file-bytes <n>] [--max-record-bytes <n>]
-                    [--provider <claude|codex> --session-id <id>]
+                    [--provider <claude|codex|agy> --session-id <id>]
                     [--workstream <name|ws_id> | --all-workstreams]
                               # lossless canonical or direct-field paging;
                               # default budget 131072 bytes; observer-only
-  barbaro evidence show <evidence_id> --provider <claude|codex>
+  barbaro evidence show <evidence_id> --provider <claude|codex|agy>
                     --session-id <ses_id> [--project-root <path>]
                     [--byte-budget <n>] [--action-cursor a:<offset>]
                     [--max-file-bytes <n>] [--max-record-bytes <n>]
@@ -1616,7 +1639,7 @@ function helpText(): string {
                               # --field <record|content|request|response|actions>
                               # [--cursor <cursor>] for lossless exact paging
   barbaro watch   [--project-root <path>] [--interval-ms <n>] [--json] [--once]
-                  [--self <ses_id> | --provider <claude|codex> --session-id <id>]
+                  [--self <ses_id> | --provider <claude|codex|agy> --session-id <id>]
                   [--workstream <name|ws_id> | --all-workstreams]
                               # stream peer turns, joins, incidents, stale leases
                               # and changed cross-workstream path overlaps;
@@ -1624,7 +1647,7 @@ function helpText(): string {
                               # name an enrolled stable session
   barbaro await   [--project-root <path>] [--interval-ms <n>]
                   [--timeout-ms <n>] [--json]
-                  [--self <ses_id> | --provider <claude|codex> --session-id <id>]
+                  [--self <ses_id> | --provider <claude|codex|agy> --session-id <id>]
                   [--workstream <own-name|own-ws_id>]
                               # read-only wait for the session cursor's unread
                               # peer turns; prints N unread and returns at once;

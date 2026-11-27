@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { open, readdir, type FileHandle } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
+import { isParticipatingProvider, type ParticipatingProvider } from "../contracts/providers.js";
 import { ActiveLeaseStore } from "../active/store.js";
 import type { ActiveLeaseV1 } from "../active/types.js";
 import type { BarbaroTurnV1 } from "../contracts/v1.js";
@@ -13,7 +14,6 @@ import {
 } from "../core/safe-store.js";
 import { compareUtf16CodeUnits } from "../core/stable-json.js";
 import {
-  PARTICIPATING_PROVIDERS,
   participationMemberships,
   SESSION_PARTICIPATION_SCHEMA,
   SESSION_PARTICIPATION_SCHEMA_V2,
@@ -312,7 +312,7 @@ interface ParticipationFacts {
 
 /** A targeted health read, independent of catalogue directory/projection caps. */
 export async function readSessionRecentTurnFacts(
-  projectRoot: string, provider: "codex" | "claude", sessionId: string,
+  projectRoot: string, provider: ParticipatingProvider, sessionId: string,
   membership: SessionWorkstreamMembership,
 ) {
   if (!/^ses_[0-9a-f]{32}$/u.test(sessionId)) throw new TypeError("Invalid session identity");
@@ -1320,9 +1320,7 @@ function parseParticipation(
   if (
     value.provider !== expectedProvider ||
     value.session_id !== expectedSessionId ||
-    !PARTICIPATING_PROVIDERS.includes(
-      expectedProvider as (typeof PARTICIPATING_PROVIDERS)[number],
-    ) ||
+    !isParticipatingProvider(expectedProvider) ||
     typeof value.joined_at !== "string" ||
     !Number.isFinite(Date.parse(value.joined_at)) ||
     value.initiated_by !== "user_prompt"

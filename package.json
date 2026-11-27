@@ -1,10 +1,11 @@
 {
   "name": "barbaro",
-  "version": "0.1.0-alpha.6",
-  "description": "Local coordination for Codex and Claude Code sessions",
+  "version": "0.1.0-alpha.8",
+  "description": "Local coordination for Codex, Claude Code and Antigravity CLI sessions",
   "keywords": [
     "ai",
     "agents",
+    "antigravity-cli",
     "claude-code",
     "codex",
     "coordination",
@@ -40,7 +41,8 @@
     "docs/",
     "examples/",
     "spec/",
-    "INSTALL.md"
+    "INSTALL.md",
+    "plugins/antigravity/"
   ],
   "bin": {
     "barbaro": "dist/src/cli.js"

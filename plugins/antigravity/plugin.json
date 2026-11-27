@@ -1,0 +1,9 @@
+{
+  "name": "barbaro",
+  "displayName": "Barbaro",
+  "version": "0.1.0-alpha.8",
+  "description": "Share completed turns and advisory file claims with other coding sessions in a local workstream.",
+  "author": { "name": "David Kim" },
+  "repository": "https://github.com/d4j3y2k/barbaro",
+  "license": "MIT"
+}

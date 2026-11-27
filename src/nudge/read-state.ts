@@ -208,12 +208,12 @@ function parsePending(value: unknown, provider: string, generation: number | und
 
 function parseReadTurn(value: unknown, provider: string, generation: number | undefined): NudgeDeliveryTurnV2 {
   if (!object(value)) throw new TypeError("invalid read delivery turn");
-  if (provider === "codex") {
+  if (provider === "codex" || provider === "agy") {
     keys(value, ["kind", "turn_id"]);
     if (value.kind !== provider || !matches(value.turn_id, /^turn_[0-9a-f]{32}$/u)) {
       throw new TypeError("pending read belongs to another provider turn");
     }
-    return { kind: "codex", turn_id: value.turn_id };
+    return { kind: provider, turn_id: value.turn_id };
   } else {
     keys(value, ["kind", "generation"]);
     if (provider !== "claude" || value.kind !== provider ||

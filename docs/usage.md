@@ -52,8 +52,8 @@ limits and distinction between development freshness and the running build.
 ## Join a workstream
 
 A workstream is a named objective that scopes routine context, unread cursors,
-and wake-ups. It can include one or more Codex sessions, Claude Code sessions,
-or both.
+and wake-ups. Any combination of Codex, Claude Code, and Antigravity CLI
+sessions can join the same workstream.
 
 In Codex Desktop, invoke the installed skill at the beginning of the prompt:
 
@@ -62,12 +62,15 @@ $barbaro new api-cleanup Replace the deprecated endpoint.
 $barbaro join api-cleanup Review the implementation.
 ```
 
-In Claude Code, use the provider command:
+In Claude Code or Antigravity CLI, use the provider command.
 
 ```text
 /barbaro new api-cleanup Replace the deprecated endpoint.
 /barbaro join api-cleanup Review the implementation.
 ```
+
+When b-rex launches an Antigravity session for a workstream, it sends the
+equivalent literal `$barbaro join NAME` as the first prompt.
 
 `new` creates the workstream and joins the current session. `join` enrolls the
 current session in an existing open workstream. A bare `$barbaro` or
@@ -92,6 +95,10 @@ barbaro codex status \
 
 barbaro claude status \
   --session-id "$CLAUDE_CODE_SESSION_ID" \
+  --project-root "$PWD"
+
+barbaro agy status \
+  --session-id "$ANTIGRAVITY_CONVERSATION_ID" \
   --project-root "$PWD"
 ```
 
@@ -135,8 +142,9 @@ styling.
 - `r` refreshes, `?` opens help, Escape returns, and `q` or Ctrl-C exits.
 - Space pauses or resumes a visible gallop.
 
-After creation, `c` performs Punch Out: it copies the selected Codex or Claude
-join command when a supported clipboard path is available. Punch Out does not
+After creation, `c` performs Punch Out by copying the selected join command
+when a supported clipboard path is available. Choose the slash form in Claude
+Code or Antigravity and the dollar form in Codex. Punch Out does not
 run the join command. The interactive TUI changes project state only after an
 explicit create submission or complete/reopen confirmation, using the public
 `barbaro workstream` commands.
@@ -178,6 +186,13 @@ barbaro read context \
   --provider codex \
   --session-id "$CODEX_SESSION_ID" \
   --project-root "$PWD"
+```
+
+In Antigravity CLI, run the read in a single foreground `run_command` tool
+call from the joined checkout.
+
+```sh
+barbaro read context --provider agy --session-id "$ANTIGRAVITY_CONVERSATION_ID" --project-root "$PWD"
 ```
 
 Use `--workstream <name|id>` to read one workstream as an observer or

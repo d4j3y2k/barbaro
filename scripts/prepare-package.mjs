@@ -21,6 +21,7 @@ const packagedInputs = [
   "README.md",
   "package-lock.json",
   "package.json",
+  "plugins/antigravity",
   "scripts/check-release-version.mjs",
   "scripts/generate-readme-assets.mjs",
   "scripts/prepare-package.mjs",

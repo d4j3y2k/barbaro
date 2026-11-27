@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { isParticipatingProvider, type ParticipatingProvider } from "../contracts/providers.js";
 import { createSessionId } from "../core/id.js";
 import { SafeStoreBoundary } from "../core/safe-store.js";
 import { writeJsonFileAtomically } from "../core/atomic-json.js";
@@ -28,15 +29,15 @@ export interface ReadObservation {
   readonly state: typeof STATES[number];
   readonly reason: "reserved" | "candidate_staged" | "model_delivery_verified" | "unsupported_producer_or_shape" | "output_not_eligible" | "commit_not_verified" | "command_failed" | "reservation_refused" | "native_trace_limit";
   readonly native_trace_limit?: NativeTraceLimit;
-  readonly adapter: `codex-${CodexReadProducer}-literal-exec` | "claude-2.1.261-foreground-batch";
-  /** The Claude hook envelope has no version field; shape evidence is not version evidence. */
+  readonly adapter: `codex-${CodexReadProducer}-literal-exec` | "claude-2.1.261-foreground-batch" | "agy-1.5.18-foreground-run-command";
+  /** Only the Codex adapter can attest the producer version from native metadata. */
   readonly producer_version?: CodexReadProducer;
   readonly runtime_cli_sha256?: string;
   readonly runtime_build_sha256?: string;
 }
 export interface ReadObservationJournal {
   readonly schema: typeof READ_OBSERVATION_SCHEMA;
-  readonly provider: "codex" | "claude";
+  readonly provider: ParticipatingProvider;
   readonly session_id: string;
   readonly omitted: number;
   readonly observations: readonly ReadObservation[];
@@ -55,13 +56,21 @@ function validNativeTraceLimit(value: unknown): value is NativeTraceLimit {
     ["file", "record"].includes(String(value.kind)) && Number.isSafeInteger(value.maximum_bytes) &&
     Number(value.maximum_bytes) > 0 && Number.isSafeInteger(value.observed_bytes) && Number(value.observed_bytes) > Number(value.maximum_bytes);
 }
+function observationAdapter(provider: ParticipatingProvider, producer: CodexReadProducer | undefined): ReadObservation["adapter"] {
+  switch (provider) {
+    case "codex": return `codex-${producer ?? "0.153.2"}-literal-exec`;
+    case "claude": return "claude-2.1.261-foreground-batch";
+    case "agy": return "agy-1.5.18-foreground-run-command";
+  }
+}
+
 function components(provider: string, sessionId: string): string[] {
-  if (!["codex", "claude"].includes(provider) || !/^ses_[0-9a-f]{32}$/u.test(sessionId)) throw new TypeError("Invalid read observation identity");
+  if (!isParticipatingProvider(provider) || !/^ses_[0-9a-f]{32}$/u.test(sessionId)) throw new TypeError("Invalid read observation identity");
   return ["logs", "delivery", provider, `${sessionId}.json`];
 }
 
 /** Supported, bounded, read-only health interface. Never includes commands or delivered text. */
-export async function readReadObservations(projectRoot: string, provider: "codex" | "claude", sessionId: string): Promise<ReadObservationResult> {
+export async function readReadObservations(projectRoot: string, provider: ParticipatingProvider, sessionId: string): Promise<ReadObservationResult> {
   const boundary = SafeStoreBoundary.forBarbaroProject(projectRoot);
   let text: string | undefined;
   try { text = await boundary.readUtf8File(components(provider, sessionId), MAX_BYTES); }
@@ -80,7 +89,7 @@ export async function readReadObservations(projectRoot: string, provider: "codex
           row.state !== reasonState(row.reason) || (provider === "codex" && row.state === "committed" && !isCodexReadProducer(row.producer_version)) ||
           ((row.reason === "native_trace_limit") !== (row.native_trace_limit !== undefined)) ||
           (row.native_trace_limit !== undefined && (provider !== "codex" || !validNativeTraceLimit(row.native_trace_limit))) ||
-          row.adapter !== (provider === "codex" ? `codex-${row.producer_version ?? "0.153.2"}-literal-exec` : "claude-2.1.261-foreground-batch") ||
+          row.adapter !== observationAdapter(provider, isCodexReadProducer(row.producer_version) ? row.producer_version : undefined) ||
           (row.producer_version !== undefined && (provider !== "codex" || !isCodexReadProducer(row.producer_version))) ||
           (row.runtime_cli_sha256 !== undefined && !sha(row.runtime_cli_sha256)) ||
           (row.runtime_build_sha256 !== undefined && !sha(row.runtime_build_sha256))) return { state: "invalid" };
@@ -92,11 +101,11 @@ export async function readReadObservations(projectRoot: string, provider: "codex
 
 /** Hook-owned advisory evidence only. Failure cannot change the delivery decision or cursor. */
 export async function observeHookRead(options: HookReadOptions, state: ReadObservation["state"], reason: ReadObservation["reason"], pinnedProducer?: CodexReadProducer, nativeLimit?: NativeTraceLimit): Promise<void> {
-  if (typeof options.toolUseId !== "string" || !["codex", "claude"].includes(options.provider)) return;
+  if (typeof options.toolUseId !== "string" || !isParticipatingProvider(options.provider)) return;
   if ((reason === "native_trace_limit") !== (nativeLimit !== undefined) ||
       (nativeLimit !== undefined && (options.provider !== "codex" || state !== "refused" || !validNativeTraceLimit(nativeLimit)))) return;
   try {
-    const provider = options.provider as "codex" | "claude";
+    const provider = options.provider;
     const sessionId = createSessionId(provider, options.nativeSessionId);
     const boundary = SafeStoreBoundary.forBarbaroProject(options.projectRoot);
     const path = components(provider, sessionId);
@@ -117,7 +126,7 @@ export async function observeHookRead(options: HookReadOptions, state: ReadObser
       if (provider === "codex" && state === "committed" && producer === undefined) return;
       const row: ReadObservation = {
         invocation_sha256: id, created_at: old?.created_at ?? now, updated_at: now, state, reason,
-        adapter: provider === "codex" ? `codex-${producer ?? "0.153.2"}-literal-exec` : "claude-2.1.261-foreground-batch",
+        adapter: observationAdapter(provider, producer),
         ...(producer === undefined ? {} : { producer_version: producer }),
         ...(nativeLimit === undefined ? {} : { native_trace_limit: nativeLimit }),
         ...(cli.state === "ok" ? { runtime_cli_sha256: cli.identity.sha256 } : {}),

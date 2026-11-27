@@ -1,4 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
+
+import { isParticipatingProvider } from "../contracts/providers.js";
 import type { FeedReadCoverage } from "../core/feed-availability.js";
 
 import {
@@ -250,7 +252,7 @@ function validateAwaitOptions(options: AwaitCursorOptions): void {
   if (options.projectRoot.length === 0) {
     throw new TypeError("projectRoot must not be empty");
   }
-  if (options.provider !== "claude" && options.provider !== "codex") {
+  if (!isParticipatingProvider(options.provider)) {
     throw new TypeError(`Unknown provider: ${String(options.provider)}`);
   }
   if (!/^ses_[0-9a-f]{32}$/u.test(options.sessionId)) {

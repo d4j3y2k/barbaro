@@ -3,6 +3,7 @@ import { constants } from "node:fs";
 import { open, readdir, type FileHandle } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 
+import { isParticipatingProvider } from "../contracts/providers.js";
 import {
   ACTIVE_ACTOR_FILENAME_PATTERN,
   activeActorFilename,
@@ -16,7 +17,6 @@ import {
 } from "../core/safe-store.js";
 import { compareUtf16CodeUnits } from "../core/stable-json.js";
 import {
-  PARTICIPATING_PROVIDERS,
   SESSION_PARTICIPATION_SCHEMA,
   SESSION_PARTICIPATION_SCHEMA_V2,
 } from "../hooks/participation.js";
@@ -724,7 +724,7 @@ function parseParticipationForHealth(
     throw new TypeError("participation identity does not match its storage path");
   }
   if (
-    !PARTICIPATING_PROVIDERS.includes(expectedProvider as "claude" | "codex") ||
+    !isParticipatingProvider(expectedProvider) ||
     !SESSION_ID_PATTERN.test(expectedSessionId) ||
     typeof value.joined_at !== "string" ||
     !Number.isFinite(Date.parse(value.joined_at)) ||

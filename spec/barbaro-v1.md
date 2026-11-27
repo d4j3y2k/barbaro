@@ -157,8 +157,9 @@ not participate in IDs.
 
 `sequence` is monotonic only among top-level turns in one session. It is not an
 identity. Provider adapters derive it from the provider's canonical ordering:
-Codex rollout order/ordinal and Claude's active DAG branch with deterministic
-topological ordering.
+Codex uses rollout order, Claude uses deterministic topological ordering of its
+active DAG branch, and Antigravity CLI (`agy`) counts completed explicit user
+input steps in native transcript order.
 
 Terminal turn outcomes are:
 
@@ -276,7 +277,7 @@ no provider-native identity to derive from.
 Provider parsers accept unknown source record types and fields and preserve
 enough source identity to inspect them later. The common record schemas are
 closed except for the `extensions` object. Provider-specific data lives under a
-provider key such as `extensions.claude` or `extensions.codex`; it must not
+provider key such as `extensions.claude`, `extensions.codex`, or `extensions.agy`; it must not
 change the meaning of a common field.
 
 ## Contract evolution

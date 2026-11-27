@@ -1,0 +1,27 @@
+{
+  "barbaro": {
+    "enabled": true,
+    "PreInvocation": [
+      { "type": "command", "command": "barbaro hook agy PreInvocation", "timeout": 30 }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          { "type": "command", "command": "barbaro hook agy PreToolUse", "timeout": 30 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          { "type": "command", "command": "barbaro hook agy PostToolUse", "timeout": 30 }
+        ]
+      }
+    ],
+    "Stop": [
+      { "type": "command", "command": "barbaro hook agy Stop", "timeout": 30 }
+    ]
+  }
+}

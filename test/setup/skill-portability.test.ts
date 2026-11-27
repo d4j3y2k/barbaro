@@ -24,6 +24,17 @@ const SHIPPED_SKILLS = [
     ],
   },
   {
+    path: "plugins/antigravity/skills/barbaro/SKILL.md",
+    commands: [
+      "barbaro agy status",
+      "barbaro await",
+      "barbaro read context",
+      "barbaro turn list",
+      "barbaro read turn show",
+      "barbaro evidence show",
+    ],
+  },
+  {
     path: ".claude/skills/barbaro-watch/SKILL.md",
     commands: [
       "barbaro watch",
@@ -150,13 +161,13 @@ test("README and INSTALL pin the public installation contract", async () => {
   assert.doesNotMatch(install, /barbaro@alpha/u);
   assert.match(
     install,
-    /releases\/download\/v0\.1\.0-alpha\.6\/barbaro-0\.1\.0-alpha\.6\.tgz/u,
+    /releases\/download\/v0\.1\.0-alpha\.8\/barbaro-0\.1\.0-alpha\.8\.tgz/u,
   );
-  assert.match(install, /^npm install --global \.\/barbaro-0\.1\.0-alpha\.6\.tgz$/mu);
-  assert.match(install, /barbaro-0\.1\.0-alpha\.6\.tgz\.sha256/u);
+  assert.match(install, /^npm install --global \.\/barbaro-0\.1\.0-alpha\.8\.tgz$/mu);
+  assert.match(install, /barbaro-0\.1\.0-alpha\.8\.tgz\.sha256/u);
   assert.match(
     install,
-    /github:d4j3y2k\/barbaro#v0\.1\.0-alpha\.6[\s\S]+source tags do\s+not contain/u,
+    /github:d4j3y2k\/barbaro#v0\.1\.0-alpha\.8[\s\S]+source tags do\s+not contain/u,
   );
   assert.match(install, /^command -v barbaro$/mu);
   assert.match(install, /Choose either user scope or project scope/u);

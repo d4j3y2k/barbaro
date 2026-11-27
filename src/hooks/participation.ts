@@ -3,10 +3,12 @@ import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join as joinPath, relative, resolve } from "node:path";
 
+import { PARTICIPATING_PROVIDERS, SESSION_VARIABLES, type ParticipatingProvider } from "../contracts/providers.js";
 import { writeJsonFileAtomically } from "../core/atomic-json.js";
 import { createSessionId } from "../core/id.js";
 import { SafeStoreBoundary } from "../core/safe-store.js";
 import { compareUtf16CodeUnits } from "../core/stable-json.js";
+import { readScopeFlags } from "../nudge/read-guidance.js";
 import { withDirectoryLock } from "../output/directory-lock.js";
 import {
   InvalidWorkstreamNameError,
@@ -32,12 +34,7 @@ const MAX_PARTICIPATION_BYTES = 16 * 1024;
 const SESSION_ID_PATTERN = /^ses_[0-9a-f]{32}$/;
 const PARTICIPATION_FILENAME_PATTERN = /^(ses_[0-9a-f]{32})\.json$/;
 
-export type ParticipatingProvider = "codex" | "claude";
-
-export const PARTICIPATING_PROVIDERS: readonly ParticipatingProvider[] = [
-  "claude",
-  "codex",
-];
+export { PARTICIPATING_PROVIDERS, type ParticipatingProvider } from "../contracts/providers.js";
 
 export interface SessionParticipationV1 {
   readonly schema: typeof SESSION_PARTICIPATION_SCHEMA;
@@ -366,7 +363,7 @@ export class SessionParticipationStore {
     const sessionId = participationSessionId(provider, nativeSessionId);
     const components = participationComponents(provider, sessionId);
     const name = invocation.name;
-    const token = provider === "codex" ? BARBARO_CODEX_SKILL : BARBARO_JOIN_COMMAND;
+    const token = provider === "claude" ? BARBARO_JOIN_COMMAND : BARBARO_CODEX_SKILL;
 
     if (!isWorkstreamName(name)) {
       const existing = await this.#readComponents(components, provider, sessionId);
@@ -458,8 +455,6 @@ export class SessionParticipationStore {
         ],
       };
       await writeJsonFileAtomically(this.#boundary, components, participation);
-      const sessionVariable =
-        provider === "codex" ? "CODEX_SESSION_ID" : "CLAUDE_CODE_SESSION_ID";
       if (previous !== undefined) {
         const from =
           previous.workstream_id === undefined
@@ -477,6 +472,9 @@ export class SessionParticipationStore {
             `earlier turns stay where they were.`,
         };
       }
+      const readFlags = provider === "agy"
+        ? readScopeFlags(provider, sessionId, workstream.workstream_id, this.projectRoot)
+        : `--provider ${provider} --session-id "$${SESSION_VARIABLES[provider]}" --project-root "$PWD"`;
       return {
         joined: true,
         initiated: true,
@@ -487,7 +485,7 @@ export class SessionParticipationStore {
           `Barbaro: ${created ? "created and joined" : "joined"} workstream ` +
           `"${workstream.name}" (${workstream.workstream_id}). Peers in it see ` +
           `your completed turns; read theirs with \`barbaro read context ` +
-          `--provider ${provider} --session-id "$${sessionVariable}" --project-root "$PWD"\`.`,
+          `${readFlags}\`.`,
       };
     });
   }
@@ -683,7 +681,7 @@ function rosterMessage(
   provider: ParticipatingProvider,
   open: readonly WorkstreamV1[],
 ): string {
-  const token = provider === "codex" ? BARBARO_CODEX_SKILL : BARBARO_JOIN_COMMAND;
+  const token = provider === "claude" ? BARBARO_JOIN_COMMAND : BARBARO_CODEX_SKILL;
   const head =
     "Barbaro: this session has not joined a workstream, so nothing is " +
     "published yet.";

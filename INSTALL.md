@@ -15,46 +15,46 @@ command -v barbaro
 
 ## Install a GitHub release asset
 
-If the registry is unavailable, download the built prerelease tarball and its
+For Antigravity support, download the GitHub prerelease tarball and its
 separate SHA-256 checksum asset:
 
-The examples below use alpha.6. Download the tarball and checksum from the
+The examples below use alpha.8. Download the tarball and checksum from the
 same published release.
 
 ```sh
 curl --fail --location --remote-name \
-  https://github.com/d4j3y2k/barbaro/releases/download/v0.1.0-alpha.6/barbaro-0.1.0-alpha.6.tgz
+  https://github.com/d4j3y2k/barbaro/releases/download/v0.1.0-alpha.8/barbaro-0.1.0-alpha.8.tgz
 curl --fail --location --remote-name \
-  https://github.com/d4j3y2k/barbaro/releases/download/v0.1.0-alpha.6/barbaro-0.1.0-alpha.6.tgz.sha256
+  https://github.com/d4j3y2k/barbaro/releases/download/v0.1.0-alpha.8/barbaro-0.1.0-alpha.8.tgz.sha256
 ```
 
 Run the checksum command for your platform:
 
 ```sh
-sha256sum --check barbaro-0.1.0-alpha.6.tgz.sha256
+sha256sum --check barbaro-0.1.0-alpha.8.tgz.sha256
 ```
 
 On macOS, use:
 
 ```sh
-shasum -a 256 --check barbaro-0.1.0-alpha.6.tgz.sha256
+shasum -a 256 --check barbaro-0.1.0-alpha.8.tgz.sha256
 ```
 
 Then install the verified local archive:
 
 ```sh
-npm install --global ./barbaro-0.1.0-alpha.6.tgz
+npm install --global ./barbaro-0.1.0-alpha.8.tgz
 barbaro --version
 ```
 
 The `github:d4j3y2k/barbaro#<tag>` source-install form is intentionally
 unsupported. In particular, do not use
-`npm install --global github:d4j3y2k/barbaro#v0.1.0-alpha.6`: Git source tags do
+`npm install --global github:d4j3y2k/barbaro#v0.1.0-alpha.8`: Git source tags do
 not contain the ignored `dist/` output, and rebuilding development sources at
 install time is not part of Barbaro's release contract. Use the registry or the
 built release tarball instead.
 
-## Install the opt-in skills
+## Install Codex and Claude Code skills
 
 Choose either user scope or project scope for each provider, not both. Matching
 hooks installed at both scopes run twice, and duplicate skill copies make it
@@ -75,17 +75,37 @@ cp -R "$BARBARO_PACKAGE/.claude/skills/barbaro-watch/." "$HOME/.claude/skills/ba
 
 For a project-local installation, use `.agents/skills/` and `.claude/skills/`
 under the target project instead and skip the user-scoped copies above.
-Installing skills and hooks does not enroll a session: every Codex or Claude
-Code session stays dormant until the user invokes the shipped Barbaro skill.
+
+## Install the Antigravity CLI plugin
+
+The Barbaro plugin bundles the `/barbaro` skill and its four native hook events.
+Use a Barbaro build that includes `barbaro hook agy` and
+`plugins/antigravity/`. Add `.barbaro/` to the target checkout's Git ignore
+rules and make the matching `barbaro` executable available on agy's `PATH`.
+Install the user-scoped plugin and check that it is enabled. Run the install
+command again after updating the Barbaro package to refresh the plugin copy.
+
+```sh
+agy plugin install "$(npm root --global)/barbaro/plugins/antigravity"
+agy plugin list --json
+```
+
+From a built Barbaro source checkout, the plugin directory is
+`./plugins/antigravity`. Open a conversation from the target project and send
+`/barbaro new NAME` or `/barbaro join NAME` as the start of a prompt.
+Each conversation opts in separately. b-rex uses the equivalent
+`$barbaro join NAME` when launching a selected workstream.
 
 ## Check the installation
 
-With alpha.6 installed, run `barbaro doctor --project-root /path/to/project`
+For Codex and Claude Code, run `barbaro doctor --project-root /path/to/project`
 (add `--json` for source paths and build hashes). Doctor reads effective user
-and project settings and does not require duplicate project-local hooks.
-It honors `CODEX_HOME` and `CLAUDE_CONFIG_DIR` for user configuration; if you
+and project settings. It honors `CODEX_HOME` and `CLAUDE_CONFIG_DIR` for user configuration; if you
 set `CLAUDE_CONFIG_DIR`, install Claude skills under its `skills/` directory.
 The commands above use the default roots.
+
+For Antigravity, run `agy plugin list --json` and check membership with
+`barbaro agy status` using the [session identity example](docs/usage.md#join-a-workstream).
 
 A fresh installation normally has unverified publication and delivery until
 both providers complete a real exchange. Follow the diagnostic remediation
@@ -94,7 +114,7 @@ For a development checkout whose CLI points into `dist/`, build/runtime
 identity and source freshness are separate; use an agreed idle/drain rollout
 before replacing a build used by running hooks.
 
-## Install hooks
+## Install Codex and Claude Code hooks
 
 Before enabling hooks, add `.barbaro/` either to the target project's
 `.gitignore` or to `$HOME/.config/git/ignore` for user-wide coverage. Derived

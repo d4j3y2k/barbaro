@@ -1,3 +1,4 @@
+import { isParticipatingProvider } from "../contracts/providers.js";
 import {
   createJsonlCheckpoint,
   fileIdentityEquals,
@@ -313,7 +314,7 @@ export async function rollbackHookStopClaim(
   }
   const receipt = options.receipt;
   if (
-    (receipt.provider !== "codex" && receipt.provider !== "claude") ||
+    !isParticipatingProvider(receipt.provider) ||
     !/^ses_[0-9a-f]{32}$/u.test(receipt.session_id) ||
     !/^ws_[0-9a-f]{32}$/u.test(receipt.workstream_id) ||
     !Number.isFinite(Date.parse(receipt.membership_from)) ||
@@ -787,7 +788,7 @@ function establishClaimTurn(
   turn: HookNudgeTurn,
 ): NudgeCursorV3 {
   const state = cursor.state;
-  if (turn.kind === "codex") return state;
+  if (turn.kind !== "claude") return state;
   const generation = state.claude_turn_generation;
   if (generation === undefined) {
     throw new TypeError("Claude nudge cursor generation is missing");
@@ -816,8 +817,8 @@ export function currentDeliveryTurn(
   state: NudgeCursorV3,
   turn: HookNudgeTurn,
 ): NudgeDeliveryTurnV2 {
-  if (turn.kind === "codex") {
-    return { kind: "codex", turn_id: turn.turn_id };
+  if (turn.kind !== "claude") {
+    return { kind: turn.kind, turn_id: turn.turn_id };
   }
   const generation = state.claude_turn_generation;
   if (generation === undefined) {
@@ -831,7 +832,7 @@ function deliveryTurnsEqual(
   right: NudgeDeliveryTurnV2,
 ): boolean {
   if (left === undefined || left.kind !== right.kind) return false;
-  if (left.kind === "codex" && right.kind === "codex") {
+  if (left.kind !== "claude" && right.kind !== "claude") {
     return left.turn_id === right.turn_id;
   }
   return left.kind === "claude" &&
@@ -917,10 +918,10 @@ function validateHookTurn(
     throw new TypeError("nudge turn identity does not match its provider");
   }
   if (
-    turn.kind === "codex" &&
+    turn.kind !== "claude" &&
     !/^turn_[0-9a-f]{32}$/u.test(turn.turn_id)
   ) {
-    throw new TypeError("Codex nudge turn id is invalid");
+    throw new TypeError("Nudge turn id is invalid");
   }
   if (
     turn.kind === "claude" &&

@@ -6,6 +6,7 @@ const LOSSLESS_PEER_SKILLS = [
   ".agents/skills/barbaro/SKILL.md",
   ".claude/skills/barbaro/SKILL.md",
   ".claude/skills/barbaro-watch/SKILL.md",
+  "plugins/antigravity/skills/barbaro/SKILL.md",
 ] as const;
 
 test("peer skills distinguish bounded attention from lossless retrieval", async () => {
